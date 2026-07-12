@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv*/
+main_env/
+torch_env/
+onnx_env/
+
+# Models (user-managed, large binary weights)
+models/
+
+# Test / cache
+.pytest_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

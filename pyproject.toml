@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manga-ai-studio"
+version = "0.1.0"
+description = "A PySide6 desktop application for manga scanlators: clean pages, fix masks, run/correct OCR, and lay out translation text."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Manga AI Studio" }]
+dependencies = [
+    "PySide6>=6.7",
+    "opencv-python>=4.9",
+    "pillow>=10",
+    "loguru",
+    "configupdater",
+    "attrs",
+    # The three additions below are the single source of truth so downstream
+    # plans do NOT re-declare them.
+    # numpy<2 is pinned explicitly because PanelCleaner pins it; opencv/torch
+    # pull numpy transitively but a numpy 2.x install can break the vendored
+    # stack on some platforms.
+    "numpy<2",
+    # scipy is required by the vendored panelcleaner/image_ops.py (plan 05).
+    "scipy",
+    # natsort is required by manga_ai_studio/gui/file_table.py natural-sort
+    # (plan 02).
+    "natsort",
+]
+
+[project.scripts]
+manga-ai-studio = "manga_ai_studio.__main__:main"
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "simple-lama-inpainting",
+    "manga-ocr",
+]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "pytest-mock",
+]
+
+[tool.setuptools]
+packages = ["manga_ai_studio", "panelcleaner"]
+
+[tool.setuptools.package-data]
+panelcleaner = ["py.typed"]
