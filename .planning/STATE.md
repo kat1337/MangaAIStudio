@@ -99,3 +99,5 @@ Items acknowledged and carried forward from previous milestone close:
 Last session: 2026-07-12T21:42:43.369Z
 Stopped at: Completed 01-01-PLAN.md (Walking Skeleton); 2 tasks, 8 tests green
 Resume file: None
+
+> **Pause note (2026-07-12):** Execution paused after Wave 1 (01-01) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Next: `/gsd-execute-phase 1` resumes from Wave 2 (01-02, image viewer slice). 5 incomplete plans remain.
