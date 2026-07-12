@@ -79,30 +79,30 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CLEAN-01 | — | Pending |
-| CLEAN-02 | — | Pending |
-| CLEAN-03 | — | Pending |
-| CLEAN-04 | — | Pending |
-| CLEAN-05 | — | Pending |
-| CLEAN-06 | — | Pending |
-| TEXT-01 | — | Pending |
-| TEXT-02 | — | Pending |
-| TEXT-03 | — | Pending |
-| TEXT-04 | — | Pending |
-| TEXT-05 | — | Pending |
-| PROJ-01 | — | Pending |
-| PROJ-02 | — | Pending |
-| PROJ-03 | — | Pending |
-| PROJ-04 | — | Pending |
-| FLOW-01 | — | Pending |
-| FLOW-02 | — | Pending |
-| FLOW-03 | — | Pending |
+| CLEAN-01 | Phase 1 | Pending |
+| CLEAN-02 | Phase 1 | Pending |
+| CLEAN-03 | Phase 1 | Pending |
+| CLEAN-04 | Phase 1 | Pending |
+| CLEAN-05 | Phase 1 | Pending |
+| CLEAN-06 | Phase 1 | Pending |
+| TEXT-01 | Phase 3 | Pending |
+| TEXT-02 | Phase 4 | Pending |
+| TEXT-03 | Phase 3 | Pending |
+| TEXT-04 | Phase 4 | Pending |
+| TEXT-05 | Phase 4 | Pending |
+| PROJ-01 | Phase 5 | Pending |
+| PROJ-02 | Phase 2 | Pending |
+| PROJ-03 | Phase 5 | Pending |
+| PROJ-04 | Phase 5 | Pending |
+| FLOW-01 | Phase 1 | Pending |
+| FLOW-02 | Phase 1 | Pending |
+| FLOW-03 | Phase 2 | Pending |
 
 **Coverage:**
 - v1 requirements: 18 total
-- Mapped to phases: 0
-- Unmapped: 18 ⚠️ (will be resolved during roadmap creation)
+- Mapped to phases: 18
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-11*
-*Last updated: 2026-07-11 after initial definition*
+*Last updated: 2026-07-11 after roadmap creation (traceability assigned)*
