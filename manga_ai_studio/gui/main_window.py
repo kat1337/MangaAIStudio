@@ -2,36 +2,54 @@
 
 Architecture adapted from PanelCleaner ``mainwindow_driver.py`` (GPL v3,
 vendored-shape per D-12): the constructor receives a ``ProfileManager``,
-builds a central ``EditorCanvas``, and wires the menu bar / actions. The
-skeleton ships File -> Open Image (Ctrl+O) and View -> Fit to Window (Ctrl+0);
-detection/inpainting/tool-dispatch menus land in later plans.
+builds a central ``EditorCanvas``, and wires the menu bar / actions. Plan 01
+shipped the File -> Open Image (Ctrl+O) + View -> Fit to Window (Ctrl+0)
+skeleton. Plan 02 adds the full menu bar (File/Edit/View/Tools/Help), the
+single top toolbar, the Pages + Tools docks, the 3-field status bar, the
+FileTable sidebar, the Open Folder workflow, and drag-drop routing.
 
-T-01-01 mitigation (path traversal): ``QFileDialog.getOpenFileName`` returns an
-absolute, OS-validated path; no user-typed path string is accepted here. Plan 02
-adds ``Path.resolve()`` + suffix allowlist validation when folder/recent-files
-opens land.
+Security:
+    - ``open_image`` (plan 01) uses ``QFileDialog.getOpenFileName`` (T-01-01
+      OS-validated absolute path).
+    - ``open_folder`` and the drop handlers route every candidate path through
+      ``validate_image_path`` (T-01-02 resolve + suffix allowlist) before it
+      reaches ``set_image_from_path``, which runs ``validate_image_size``
+      (T-01-03 large-image cap).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from natsort import natsorted
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QDockWidget,
     QFileDialog,
+    QLabel,
     QMainWindow,
+    QMessageBox,
+    QToolBar,
 )
 
 from manga_ai_studio.config.profile_manager import ProfileManager
-from manga_ai_studio.gui.canvas import EditorCanvas
+from manga_ai_studio.core.image_file import ImageFile
+from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
+from manga_ai_studio.gui.file_table import FileTable
+
+# Maximum number of entries kept in the Recent Files submenu (UI-SPEC surface 1).
+MAX_RECENT_FILES = 8
+_QSETTINGS_ORG = "MangaAIStudio"
+_QSETTINGS_APP = "MangaAIStudio"
 
 
 class MainWindow(QMainWindow):
     """Top-level application window.
 
-    A ``QMainWindow`` with a central ``EditorCanvas``, a File menu, and a View
-    menu. Holds a ``ProfileManager`` for settings access.
+    A ``QMainWindow`` with a central ``EditorCanvas``, a Pages dock (left) and
+    a Tools dock (right), a single top toolbar, a 3-field status bar, and the
+    full menu bar per UI-SPEC surface 1.
     """
 
     def __init__(self, profile_manager: ProfileManager, parent=None) -> None:
@@ -42,39 +60,296 @@ class MainWindow(QMainWindow):
         self.canvas = EditorCanvas(self)
         self.setCentralWidget(self.canvas)
 
+        # Track loaded pages + the index of the currently-shown page.
+        self.image_files: list[ImageFile] = []
+
+        # Build child widgets, docks, menus, toolbar, status bar.
+        self._build_docks()
         self._build_menus()
+        self._build_toolbar()
+        self._build_status_bar()
+
+        # Route FileTable signals.
+        self.file_table.file_clicked.connect(self.on_page_selected)
+        self.file_table.files_dropped.connect(self._on_files_dropped)
+        self.file_table.folder_dropped.connect(self._on_folder_dropped)
+        # Route canvas zoom changes to the status bar center field.
+        self.canvas.zoom_changed.connect(self._on_zoom_changed)
+
+        # Note: drag-drop is handled by the FileTable sidebar (surface 3/4). The
+        # FileTable emits files_dropped/folder_dropped, which this window routes
+        # to _set_pages / _load_folder. No window-level drop handlers needed.
 
         # Window chrome (UI-SPEC surface 1).
         self.setWindowTitle("Manga AI Studio")
         self.setMinimumSize(1024, 720)
         self.resize(1440, 900)
 
-    # ------------------------------------------------------------------ menus
+        # Show the empty-state status on first paint.
+        self._refresh_status_bar()
+
+    # --------------------------------------------------------------- docks
+    def _build_docks(self) -> None:
+        """Build the Pages (left) and Tools (right) docks."""
+        # Pages dock -> FileTable (UI-SPEC surface 3).
+        self.dock_pages = QDockWidget("Pages", self)
+        self.dock_pages.setObjectName("dock_pages")
+        self.dock_pages.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.file_table = FileTable(self)
+        self.dock_pages.setWidget(self.file_table)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_pages)
+
+        # Tools dock -> placeholder widget (real tools panel lands in plan 04).
+        self.dock_tools = QDockWidget("Tools", self)
+        self.dock_tools.setObjectName("dock_tools")
+        self.dock_tools.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        tools_placeholder = QLabel("No tools yet — mask tools land in plan 04.")
+        tools_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tools_placeholder.setStyleSheet("color: #9a9aa2;")
+        self.dock_tools.setWidget(tools_placeholder)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_tools)
+
+    # ---------------------------------------------------------------- menus
     def _build_menus(self) -> None:
-        # File menu.
+        """Build the full menu bar (UI-SPEC surface 1)."""
+        self._build_file_menu()
+        self._build_edit_menu()
+        self._build_view_menu()
+        self._build_tools_menu()
+        self._build_help_menu()
+
+    def _build_file_menu(self) -> None:
+        # Open Image (plan 01, kept).
         self.action_open_image = QAction("Open Image\u2026", self)
         self.action_open_image.setShortcut(QKeySequence("Ctrl+O"))
         self.action_open_image.triggered.connect(self.open_image)
 
+        # Open Folder (plan 02).
+        self.action_open_folder = QAction("Open Folder\u2026", self)
+        self.action_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.action_open_folder.triggered.connect(self.open_folder)
+
+        # Recent Files submenu (max 8 via QSettings).
+        self.recent_menu = self.menuBar().addMenu("Recent Files")
+        self.action_clear_recent = QAction("Clear Menu", self)
+        self.action_clear_recent.triggered.connect(self._clear_recent_files)
+        self._refresh_recent_menu()
+
+        # Quit (Ctrl+Q).
+        self.action_quit = QAction("Quit", self)
+        self.action_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        self.action_quit.triggered.connect(self.close)
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.action_open_image)
+        file_menu.addAction(self.action_open_folder)
+        file_menu.addMenu(self.recent_menu)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_quit)
 
-        # View menu.
+    def _build_edit_menu(self) -> None:
+        # Plan 06 undo/redo placeholders — disabled until history lands.
+        self.action_undo_image = QAction("Undo Image", self)
+        self.action_undo_image.setShortcut(QKeySequence("Ctrl+Z"))
+        self.action_undo_image.setEnabled(False)
+
+        self.action_redo_image = QAction("Redo Image", self)
+        self.action_redo_image.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+        self.action_redo_image.setEnabled(False)
+
+        self.action_undo_mask = QAction("Undo Mask", self)
+        self.action_undo_mask.setShortcut(QKeySequence("Alt+Z"))
+        self.action_undo_mask.setEnabled(False)
+
+        self.action_redo_mask = QAction("Redo Mask", self)
+        self.action_redo_mask.setShortcut(QKeySequence("Alt+Shift+Z"))
+        self.action_redo_mask.setEnabled(False)
+
+        self.action_clear_mask = QAction("Clear Mask\u2026", self)
+        self.action_clear_mask.setEnabled(False)  # plan 04
+
+        edit_menu = self.menuBar().addMenu("&Edit")
+        edit_menu.addAction(self.action_undo_image)
+        edit_menu.addAction(self.action_redo_image)
+        edit_menu.addAction(self.action_undo_mask)
+        edit_menu.addAction(self.action_redo_mask)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_clear_mask)
+
+    def _build_view_menu(self) -> None:
         self.action_fit_to_window = QAction("Fit to Window", self)
         self.action_fit_to_window.setShortcut(QKeySequence("Ctrl+0"))
         self.action_fit_to_window.triggered.connect(self.canvas.fit_to_window)
 
+        self.action_actual_size = QAction("Actual Size", self)
+        self.action_actual_size.setShortcut(QKeySequence("Ctrl+1"))
+        self.action_actual_size.triggered.connect(self.canvas.zoom_reset)
+
+        self.action_zoom_in = QAction("Zoom In", self)
+        self.action_zoom_in.setShortcut(QKeySequence("Ctrl++"))
+        self.action_zoom_in.triggered.connect(self.canvas.zoom_in)
+
+        self.action_zoom_out = QAction("Zoom Out", self)
+        self.action_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        self.action_zoom_out.triggered.connect(self.canvas.zoom_out)
+
+        # Toggle Mask Overlay (M) — wired in plan 03/04.
+        self.action_toggle_mask_overlay = QAction("Toggle Mask Overlay", self)
+        self.action_toggle_mask_overlay.setShortcut(QKeySequence("M"))
+        self.action_toggle_mask_overlay.setEnabled(False)
+
+        # Show Original (P) — wired in plan 05.
+        self.action_show_original = QAction("Show Original", self)
+        self.action_show_original.setShortcut(QKeySequence("P"))
+        self.action_show_original.setEnabled(False)
+
+        # Toggle Sidebar / Tools (the docks).
+        self.action_toggle_sidebar = QAction("Toggle Sidebar", self)
+        self.action_toggle_sidebar.triggered.connect(self.dock_pages.toggleViewAction().trigger)
+
+        self.action_toggle_tools = QAction("Toggle Tools", self)
+        self.action_toggle_tools.triggered.connect(self.dock_tools.toggleViewAction().trigger)
+
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.action_fit_to_window)
+        view_menu.addAction(self.action_actual_size)
+        view_menu.addAction(self.action_zoom_in)
+        view_menu.addAction(self.action_zoom_out)
+        view_menu.addSeparator()
+        view_menu.addAction(self.action_toggle_mask_overlay)
+        view_menu.addAction(self.action_show_original)
+        view_menu.addSeparator()
+        view_menu.addAction(self.action_toggle_sidebar)
+        view_menu.addAction(self.action_toggle_tools)
 
-    # ------------------------------------------------------------------ slots
+    def _build_tools_menu(self) -> None:
+        # Detect Text (D) — disabled until plan 03.
+        self.action_detect_text = QAction("Detect Text", self)
+        self.action_detect_text.setShortcut(QKeySequence("D"))
+        self.action_detect_text.setEnabled(False)
+
+        # Inpaint (C) — disabled until plan 05.
+        self.action_inpaint = QAction("Inpaint", self)
+        self.action_inpaint.setShortcut(QKeySequence("C"))
+        self.action_inpaint.setEnabled(False)
+
+        # Tool selection (plan 04 mask tools — disabled here).
+        self.action_tool_move = QAction("Move/Pan", self)
+        self.action_tool_move.setShortcut(QKeySequence("V"))
+        self.action_tool_move.setEnabled(False)
+
+        self.action_tool_brush = QAction("Brush", self)
+        self.action_tool_brush.setShortcut(QKeySequence("B"))
+        self.action_tool_brush.setEnabled(False)
+
+        self.action_tool_rectangle = QAction("Rectangle", self)
+        self.action_tool_rectangle.setShortcut(QKeySequence("R"))
+        self.action_tool_rectangle.setEnabled(False)
+
+        self.action_tool_lasso = QAction("Lasso", self)
+        self.action_tool_lasso.setShortcut(QKeySequence("L"))
+        self.action_tool_lasso.setEnabled(False)
+
+        self.action_tool_eraser = QAction("Eraser", self)
+        self.action_tool_eraser.setShortcut(QKeySequence("E"))
+        self.action_tool_eraser.setEnabled(False)
+
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction(self.action_detect_text)
+        tools_menu.addAction(self.action_inpaint)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_tool_move)
+        tools_menu.addAction(self.action_tool_brush)
+        tools_menu.addAction(self.action_tool_rectangle)
+        tools_menu.addAction(self.action_tool_lasso)
+        tools_menu.addAction(self.action_tool_eraser)
+
+    def _build_help_menu(self) -> None:
+        self.action_about = QAction("About", self)
+        self.action_about.triggered.connect(self._on_about)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(self.action_about)
+
+    # --------------------------------------------------------------- toolbar
+    def _build_toolbar(self) -> None:
+        """Build the single top toolbar (UI-SPEC surface 1).
+
+        Phase 1 ships: Open | (sep) | Fit / 100% / Zoom Out / Zoom In | (sep) |
+        Toggle Mask Overlay. Other sections (Detect/Inpaint/Tools/Undo) are
+        added by their plans.
+        """
+        self.toolbar = QToolBar("Main", self)
+        self.toolbar.setMovable(False)
+        self.toolbar.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
+
+        self.toolbar.addAction(self.action_open_image)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.action_fit_to_window)
+        self.toolbar.addAction(self.action_actual_size)
+        self.toolbar.addAction(self.action_zoom_out)
+        self.toolbar.addAction(self.action_zoom_in)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.action_toggle_mask_overlay)
+
+    # ------------------------------------------------------------- status bar
+    def _build_status_bar(self) -> None:
+        """3-field status bar (UI-SPEC surface 1): left/center/right."""
+        self.status_bar_left = QLabel("")
+        self.status_bar_center = QLabel("")
+        self.status_bar_right = QLabel("")
+        # Center field uses the mono font for coords + zoom (UI-SPEC typography).
+        from PySide6.QtGui import QFont
+
+        mono = QFont("Consolas", 10)
+        self.status_bar_center.setFont(mono)
+
+        for widget in (
+            self.status_bar_left,
+            self.status_bar_center,
+            self.status_bar_right,
+        ):
+            widget.setStyleSheet("color: #e8e8ea; padding: 0 8px;")
+
+        bar = self.statusBar()
+        bar.addWidget(self.status_bar_left, 2)
+        bar.addWidget(self.status_bar_center, 3)
+        bar.addPermanentWidget(self.status_bar_right, 1)
+
+    def _refresh_status_bar(self) -> None:
+        """Recompute the right field's 'Page {n} / {total}' text."""
+        total = len(self.image_files)
+        current = self._current_page_index()
+        if total == 0:
+            self.status_bar_right.setText("")
+            self.status_bar_left.setText("No page open")
+            return
+        # 1-indexed; current may be None when nothing is selected yet.
+        n = (current + 1) if current is not None else 0
+        self.status_bar_right.setText(f"Page {n} / {total}" if n else f"Page 0 / {total}")
+
+    def _current_page_index(self) -> int | None:
+        """Return the 0-indexed position of the path shown in the canvas."""
+        path = self.file_table.current_path()
+        if path is None:
+            return None
+        for i, imf in enumerate(self.image_files):
+            if imf.path == path:
+                return i
+        return None
+
+    # --------------------------------------------------------------- slots
     def open_image(self) -> None:
         """Open a single image file into the canvas via File -> Open Image.
 
-        Uses ``QFileDialog.getOpenFileName`` (T-01-01 path-traversal mitigation:
-        OS-validated absolute path, no user-typed string). Loads via ``QImage``
-        with a ``.copy()`` to detach the buffer (RESEARCH Pitfall 2), then sets
-        it on the canvas and fits the view.
+        Uses ``QFileDialog.getOpenFileName`` (T-01-01 path-traversal mitigation)
+        and routes through ``set_image_from_path`` which runs the size + suffix
+        validators.
         """
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -84,15 +359,156 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._open_single_image(Path(path))
 
-        image = QImage(path)
-        if image.isNull():
+    def open_folder(self) -> None:
+        """Open a folder of images: scan (flat, non-recursive), sort, populate.
+
+        UI-SPEC surface 4 Open Folder (Ctrl+Shift+O). Folder scan uses
+        ``Path.iterdir`` + ``is_file`` + ``validate_image_path`` — symlink
+        resolution is handled by ``Path.resolve()`` inside the validator.
+        """
+        directory = QFileDialog.getExistingDirectory(self, "Open Folder", "")
+        if not directory:
             return
-        # Detach the buffer so the pixel data is not tied to the transient load
-        # (RESEARCH Pitfall 2 — QImage lifetime crashes).
-        image = image.copy()
-        pixmap = QPixmap.fromImage(image)
+        self._load_folder(Path(directory))
 
-        self.canvas.set_image(pixmap)
-        self.setWindowTitle(f"Manga AI Studio \u2014 {Path(path).name}")
+    def _load_folder(self, directory: Path) -> None:
+        """Scan ``directory`` for images and populate the FileTable."""
+        if not directory.is_dir():
+            return
+        # Flat, non-recursive scan (UI-SPEC surface 4).
+        candidates = [
+            p
+            for p in directory.iterdir()
+            if p.is_file() and validate_image_path(p)
+        ]
+        self._set_pages(candidates)
+
+    def _set_pages(self, paths: list[Path]) -> None:
+        """Build ``ImageFile``s from ``paths`` and push them to the sidebar.
+
+        The paths are natural-sorted before building ``ImageFile``s so the
+        window's ordering matches the sidebar's displayed order — index lookups
+        in :meth:`_current_page_index` rely on this consistency.
+        """
+        ordered = natsorted(paths, key=lambda p: str(p))
+        self.image_files = [ImageFile(path=p) for p in ordered]
+        self.file_table.set_pages([imf.path for imf in self.image_files])
+        # Auto-select + load the first page (UI-SPEC: open folder shows page 1).
+        if self.image_files:
+            first = self.image_files[0]
+            self.file_table.select_path(first.path)
+            self.on_page_selected(first.path)
+        else:
+            self.status_bar_left.setText("No images found in folder")
+        self._refresh_status_bar()
+
+    def on_page_selected(self, path: Path) -> None:
+        """Load ``path`` into the canvas and sync window title + status bar."""
+        if not self.canvas.set_image_from_path(path):
+            # UI-SPEC §Copywriting "file unreadable" dialog.
+            QMessageBox.warning(
+                self,
+                "Couldn't open file",
+                f"Couldn't open '{path.name}'.\nThe file may be corrupt or in an"
+                " unsupported format.",
+            )
+            return
+        self.setWindowTitle(f"Manga AI Studio \u2014 {path.name}")
         self.canvas.fit_to_window()
+        self._add_recent_file(path)
+        self._refresh_status_bar()
+
+    def _open_single_image(self, path: Path) -> None:
+        """Open one image as the sole page in the sidebar."""
+        if not validate_image_path(path):
+            QMessageBox.warning(
+                self,
+                "Couldn't open file",
+                f"Couldn't open '{path.name}'.\nThe file may be in an unsupported"
+                " format.",
+            )
+            return
+        self._set_pages([path])
+
+    # ---------------------------------------------------------- drag-drop
+    def _on_files_dropped(self, paths: list[Path]) -> None:
+        """FileTable dropped image files -> load them as the page list."""
+        self._set_pages(paths)
+
+    def _on_folder_dropped(self, directory: Path) -> None:
+        """FileTable dropped a folder -> scan + load."""
+        self._load_folder(directory)
+
+    # ------------------------------------------------------------- recent
+    def _settings(self):
+        from PySide6.QtCore import QSettings
+
+        return QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+
+    def _recent_files(self) -> list[Path]:
+        raw = self._settings().value("recentFiles", []) or []
+        out: list[Path] = []
+        for entry in raw:
+            try:
+                p = Path(entry)
+            except (TypeError, ValueError):
+                continue
+            if validate_image_path(p):
+                out.append(p)
+        return out[:MAX_RECENT_FILES]
+
+    def _add_recent_file(self, path: Path) -> None:
+        current = [p for p in self._recent_files() if p != path]
+        current.insert(0, path)
+        self._settings().setValue(
+            "recentFiles", [str(p) for p in current[:MAX_RECENT_FILES]]
+        )
+        self._refresh_recent_menu()
+
+    def _clear_recent_files(self) -> None:
+        self._settings().remove("recentFiles")
+        self._refresh_recent_menu()
+
+    def _refresh_recent_menu(self) -> None:
+        self.recent_menu.clear()
+        recents = self._recent_files()
+        if not recents:
+            placeholder = QAction("(empty)", self)
+            placeholder.setEnabled(False)
+            self.recent_menu.addAction(placeholder)
+        else:
+            for path in recents:
+                act = QAction(path.name, self)
+                act.triggered.connect(self._make_recent_opener(path))
+                self.recent_menu.addAction(act)
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction(self.action_clear_recent)
+
+    def _make_recent_opener(self, path: Path):
+        def _open(_checked: bool = False) -> None:
+            self._open_single_image(path)
+
+        return _open
+
+    # ------------------------------------------------------------- about
+    def _on_about(self) -> None:
+        """Help -> About: version + GPL v3 notice (UI-SPEC surface 1)."""
+        from panelcleaner import __display_name__, __version__
+
+        QMessageBox.about(
+            self,
+            "About Manga AI Studio",
+            f"<h3>{__display_name__}</h3>"
+            f"<p>Version {__version__}</p>"
+            "<p>A manga scanlation workspace unifying page cleaning, OCR, and"
+            " translation layout.</p>"
+            "<p>Licensed under the GNU General Public License v3. Adapted from"
+            " PanelCleaner (GPL v3).</p>",
+        )
+
+    # ------------------------------------------------------------- zoom sync
+    def _on_zoom_changed(self, factor: float) -> None:
+        """Update the status bar center field with the current zoom %."""
+        self.status_bar_center.setText(f"{factor * 100:.0f}%")
