@@ -11,6 +11,7 @@ Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and tra
 ## Phases
 
 **Phase Numbering:**
+
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
@@ -25,84 +26,124 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Cleaning Workspace
+
 **Goal**: User can clean manga pages interactively — open and navigate images, detect text masks, edit masks, run LaMa inpainting, and undo/redo — reaching cleaning parity using PanelCleaner as the foundation with a model adapter interface.
 **Mode:** mvp
 **Depends on**: Nothing (first phase — PanelCleaner-based foundation with model adapter interface design)
 **Requirements**: CLEAN-01, CLEAN-02, CLEAN-03, CLEAN-04, CLEAN-05, CLEAN-06, FLOW-01, FLOW-02
 **Success Criteria** (what must be TRUE):
+
   1. User can open a single image or a folder of images and view them on a pannable, zoomable canvas with a file-list sidebar to navigate between pages
   2. User can run heatmap text detection on a page and see an auto-generated mask of text regions
   3. User can paint masks with an adjustable brush, plus rectangle and lasso fill tools, and erase mask regions
   4. User can run LaMa inpainting on the mask to remove text and restore the underlying artwork
   5. User can undo and redo both mask (painting) and image (inpainting) operations via separate stacks
+
 **Plans**: 6 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 01-01-PLAN.md — Project scaffolding: Entry point, config system, model adapter base classes
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 01-02-PLAN.md — Image viewer: Canvas with pan/zoom, file list sidebar, navigation (CLEAN-01, FLOW-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 01-03-PLAN.md — Text detection: CTD adapter, async detection worker, mask overlay display (CLEAN-02)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 01-04-PLAN.md — Mask editing: Brush, rectangle, lasso, eraser tools with tool panel (CLEAN-03, CLEAN-04, CLEAN-05)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 01-05-PLAN.md — LaMa inpainting: Async inpainting worker, result display, preview toggle (CLEAN-06)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 01-06-PLAN.md — Undo/redo: Separate mask and image stacks, buttons, keyboard shortcuts (FLOW-02)
 
 **UI hint**: yes
 
 ### Phase 2: Cleaning Output & Batch
+
 **Goal**: User can get cleaned results out of the app — export a single cleaned page or batch-process an entire chapter through the cleaning pipeline unattended.
 **Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: PROJ-02, FLOW-03
 **Success Criteria** (what must be TRUE):
+
   1. User can export a cleaned (text-removed, inpainted) page as PNG or JPG
   2. User can select a chapter folder and batch-process it through the cleaning pipeline (detect → clean → save) with a visible progress indicator
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] TBD (defined during `/gsd:plan-phase 2`)
+
 **UI hint**: yes
 
 ### Phase 3: Text Box Detection & Interaction
+
 **Goal**: User can detect text boxes as first-class editable objects (not pixel masks) and correct detection errors by selecting, moving, resizing, and deleting boxes on the canvas.
 **Mode:** mvp
 **Depends on**: Phase 1
 **Requirements**: TEXT-01, TEXT-03
 **Success Criteria** (what must be TRUE):
+
   1. User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
   2. User can select, move, resize, and delete text boxes on the canvas to correct detection errors
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] TBD (defined during `/gsd:plan-phase 3`)
+
 **UI hint**: yes
 
 ### Phase 4: OCR Recognition & Text Editing
+
 **Goal**: User can recognize text in boxes (auto-detected regions or manually drawn), correct OCR mistakes, and add manual translations — the core differentiator no existing tool offers interactively.
 **Mode:** mvp
 **Depends on**: Phase 3
 **Requirements**: TEXT-02, TEXT-04, TEXT-05
 **Success Criteria** (what must be TRUE):
+
   1. User can draw a rectangle on the page and run manga-ocr on just that region to create a box with recognized text (for boxes the auto-detector missed)
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] TBD (defined during `/gsd:plan-phase 4`)
+
 **UI hint**: yes
 
 ### Phase 5: Project Persistence, Image Ops & Export
+
 **Goal**: User can save and resume full project state, apply basic image operations, and export OCR/box data for downstream tools — turning the editor into a resumable, interoperable workspace.
 **Mode:** mvp
 **Depends on**: Phase 1, Phase 4
 **Requirements**: PROJ-01, PROJ-03, PROJ-04
 **Success Criteria** (what must be TRUE):
+
   1. User can save the full page state (image, masks, boxes, text, translation) as a `.mas` project file and reopen it to resume work
   2. User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
   3. User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
+
 **Plans**: TBD
 
 Plans:
+
 - [ ] TBD (defined during `/gsd:plan-phase 5`)
+
 **UI hint**: yes
 
 ## Notes & Out-of-Band Concerns
