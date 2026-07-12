@@ -104,4 +104,4 @@ Last session: 2026-07-12T22:09:13.010Z
 Stopped at: Completed 01-02-PLAN.md (Image Viewer Slice); 2 tasks, 22 tests green
 Resume file: None
 
-> **Pause note (2026-07-12):** Execution paused after Wave 1 (01-01) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Next: `/gsd-execute-phase 1` resumes from Wave 2 (01-02, image viewer slice). 5 incomplete plans remain.
+> **Pause note (2026-07-12, updated):** Execution paused after Wave 2 (01-02) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–2 are complete and committed (22/22 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 3 (01-03, text detection slice — first ML-heavy wave, vendors `comic_text_detector` + `TorchCTDModel` adapter). 4 incomplete plans remain (01-03, 01-04, 01-05, 01-06).
