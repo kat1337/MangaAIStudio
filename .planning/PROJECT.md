@@ -44,8 +44,8 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 **Source architecture:** https://github.com/VoxelCubes/PanelCleaner — cloned to `../PanelCleaner` (sibling directory). This is our primary foundation, not MangaCleaner_GPU. PanelCleaner's GPL v3 license ensures the tool remains open source for the scanlation community.
 
 **What we lift from PanelCleaner:**
-- **GUI framework**: PySide6 (`pcleaner/gui/`) — main window, image viewer, file table, profile system
-- **Config system**: Profile-based settings (`pcleaner/config.py`) — supports PanelCleaner config compatibility
+- **GUI framework**: PySide6 (`pcleaner/gui/` — verified in PanelCleaner `requirements.txt`, not PyQt5) — main window, image viewer, file table, profile system
+- **Config system**: Profile-based settings (`pcleaner/config.py`) — uses **ConfigUpdater (INI)** persistence, not JSON. Supports PanelCleaner config compatibility.
 - **Text detection**: Comic Text Detector (`pcleaner/comic_text_detector/`) — PyTorch-based heatmap detection
 - **OCR integration**: manga-ocr wrapper (`pcleaner/ocr/ocr_mangaocr.py`) — recognition engine
 - **Inpainting**: LaMa via `simple_lama_inpainting` package (`pcleaner/inpainting.py`)
@@ -84,7 +84,7 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 | PanelCleaner as base (GPL v3) | Better architecture, proven config system, GPL v3 keeps tool open source for scanlation community | — Active |
 | PySide6 (Qt for Python) | PanelCleaner uses PySide6; LGPL licensing, actively maintained | — Active |
 | Model adapter interface | Abstracted interfaces allow model swapping; PanelCleaner models default, MangaCleaner_GPU ONNX optional later | — Pending |
-| Single environment preferred | Minimizes rewriting; isolated pyenv fallback for hard conflicts | — Pending |
+| Frontend/backend env split | Backend (model inference) isolated from frontend (GUI) whenever practical; ONNX backend isolated because it needs a newer Python; single-env proven fallback (PanelCleaner requirements.txt confirms PyTorch stack coexists) | — Active (rev. 2026-07-12) |
 | Manual translation now, MT seam later | v1 ships manual entry; design text layer so MT can be plugged in later | — Pending |
 | Windows-first, Linux-portable | Developer environment is Windows; cross-platform Python stack makes Linux feasible later | — Pending |
 | GPL v3 license | PanelCleaner is GPL v3; derivative works must be GPL v3 — ensures tool stays open source | — Active |

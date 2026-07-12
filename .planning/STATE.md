@@ -1,10 +1,10 @@
 ---
 gsd_state_version: '1.0'
-status: planning
+status: executing
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
+  total_plans: 6
   completed_plans: 0
   percent: 0
 ---
@@ -21,9 +21,9 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 1 of 5 (Cleaning Workspace)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-07-11 — Roadmap created (5 phases, 18/18 requirements mapped)
+Plan: 0 of 6 in current phase
+Status: Ready to execute
+Last activity: 2026-07-11 — Phase 1 plan created (6 plans, vertical MVP slices)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -57,7 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- [Roadmap]: 5-phase vertical-slice structure; Phase 1 lifts MangaCleaner_GPU (~60% of app) to cleaning parity before building the novel text/box/OCR track.
+- [Roadmap]: 5-phase vertical-slice structure; Phase 1 adapts PanelCleaner (config, detection, inpainting, viewer) + MangaCleaner_GPU (interactive mask-editing canvas) as the foundation before building the novel text/box/OCR track.
 - [Roadmap]: Packaging has no v1 requirement — deferred to a decimal-phase insertion or v1.1 once formalized.
 
 ### Pending Todos
@@ -70,7 +70,7 @@ None yet.
 
 [Issues that affect future work]
 
-- [Phase 1]: Validate PyTorch + PySide6 + simple_lama_inpainting coexistence on day one; PanelCleaner's stack uses PyTorch, not ONNX.
+- [Phase 1]: ~~Validate PyTorch + PySide6 + simple_lama_inpainting coexistence on day one~~ — RESOLVED by source verification (2026-07-12): PanelCleaner's `requirements.txt` proves the full PyTorch stack (torch + PySide6 + manga_ocr + simple_lama + opencv + numpy) coexists in one env. Remaining open question is the frontend↔backend **subprocess/IPC boundary** (D-07/D-08), not dependency coexistence.
 - [Phase 1]: Design model adapter interface to allow optional MangaCleaner_GPU ONNX models as user-installed modules (future enhancement).
 - [Licensing]: Project is GPL v3 (derivative of PanelCleaner) — must preserve GPL v3 in all distributions and provide source code.
 
@@ -85,5 +85,5 @@ Items acknowledged and carried forward from previous milestone close:
 ## Session Continuity
 
 Last session: 2026-07-11
-Stopped at: Phase 1 context gathered — PanelCleaner foundation, model adapter interface, pyenv isolation strategy decided
-Resume file: .planning/phases/01-cleaning-workspace/01-CONTEXT.md
+Stopped at: Phase 1 planning complete — 6 plans created for vertical MVP slices (scaffolding, viewer, detection, editing, inpainting, undo/redo)
+Resume file: .planning/phases/01-cleaning-workspace/01-01-PLAN.md

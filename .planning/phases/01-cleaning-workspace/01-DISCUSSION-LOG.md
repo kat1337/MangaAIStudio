@@ -109,5 +109,42 @@ None — discussion stayed within phase scope. All decisions support Phase 1 cle
 
 ---
 
+## Verification-Driven Revision (2026-07-12)
+
+Context was re-opened for verification ("used the wrong model for discussion"). Every load-bearing claim in CONTEXT/RESEARCH was checked against the PanelCleaner source at `../PanelCleaner`. Outcome: the discovery was factually accurate on the major claims (PySide6, config classes, TextDetector API, simple_lama, all referenced files, GPL v3). Revisions made:
+
+### Environment isolation strategy (D-07/D-08/D-09) — REVISED
+
+Prior decision: "Proactive per-backend pyenvs" (3 hard-isolated envs, no shared deps, precautionary).
+
+Verification finding: contradicted the project's "single env preferred, isolation as fallback" constraint; PanelCleaner's own `requirements.txt` proves the full PyTorch stack coexists in one env; Phase 1 is all-PyTorch, so the cited torch-vs-onnx/numpy conflict does not manifest. The original discussion options also did not surface the cross-process communication cost of isolating envs.
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Keep 3-way hard isolation (original D-07/D-08) | torch_env / onnx_env / main_env, no shared deps, precautionary | |
+| Pure single-env for Phase 1 | One env; isolation only as a fallback if a conflict actually appears | |
+| Frontend/backend split, isolation "whenever practical" | main_env (frontend) + torch_env (backend subprocess) + onnx_env (isolated for newer Python); single-env fallback | ✓ |
+
+**User's choice:** "Revise to single-env + fixes but we should aim to have the backend env isolated from the frontend env whenever possible, and obviously the onnx env will be isolated as it uses a newer version of python to run."
+**Notes:** ONNX isolation is now justified by a concrete reason (newer Python version), not a precautionary split. The frontend↔backend subprocess boundary (IPC mechanism) is left to planning; assumption A5 updated to track this as the real risk.
+
+### Config format (D-05) — CORRECTED
+
+Verification finding: PanelCleaner persists profiles via `ConfigUpdater` (INI), NOT JSON. `Config.from_json` / `Profile.to_json` / `profile_parser.ProfileParser` / `profile_cli.write_config_file` referenced in RESEARCH do not exist. JSON in PanelCleaner is only for pipeline data (`PageData`, `#clean.json`). Intent (config compatibility) preserved; format corrected to INI/ConfigUpdater. RESEARCH Pattern 2 and the Config Loading example rewritten to the real API.
+
+### Code organization (D-10) — CLARIFIED
+
+Verification finding: PanelCleaner is a batch detector + review viewer (`image_viewer.py` is a QGraphicsView for reviewing OCR bubbles), with no freehand mask painting. Interactive brush/rect/lasso/eraser (CLEAN-03/04/05) comes from MangaCleaner_GPU. Added a `mangacleaner/` adapted-source dir to D-10 so MangaCleaner_GPU's canvas code has a home.
+
+### Minor API corrections in RESEARCH.md
+- `TextDetector.__call__` returns a 5-tuple `(img, mask, mask_refined, blk_list, refine_mode)`, not a 3-tuple; `refine_mode` uses the `REFINEMASK_ANNOTATION` constant (inference.py:166, 204-207).
+- `Profile` field names are `general/text_detector/preprocessor/masker/denoiser/inpainter`, not `*_config` (config.py:941-946).
+
+### Stale text reconciled
+- ROADMAP Phase 1 line + STATE.md "lifts MangaCleaner_GPU ~60%" reframed to the PanelCleaner + MangaCleaner_GPU foundation.
+- PROJECT.md env decision row updated to the frontend/backend split; PySide6 (not PyQt5) and INI (not JSON) noted in the Context section.
+
+---
+
 *Phase: 1-Cleaning Workspace*
-*Discussion date: 2026-07-11*
+*Discussion date: 2026-07-11; revised 2026-07-12 after source verification*

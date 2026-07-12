@@ -9,10 +9,10 @@
 ### Locked Decisions
 - **Model adapter interface with full pipeline hooks** — Type-specific base classes (`DetectionModel`, `OCRModel`, `InpaintModel`) with `load()`, `detect()/recognize()/inpaint()`, `preprocess()`, `postprocess()`, `configure()`, `get_info()` methods
 - **Per-model backend configuration** — Users can mix backends via config (e.g., `detection_backend: torch`, `inpainting_backend: onnx`). Phase 1 default: all PyTorch backends
-- **PanelCleaner config system verbatim** — Adapt entire `config.py` with `Config`, `Profile`, `MaskerConfig`, `DenoiserConfig`, `InpainterConfig` classes for 100% compatibility
-- **JSON export/import for PanelCleaner settings compatibility** — Existing pcleaner configs must load without modification
-- **Proactive per-backend pyenvs** — `torch_env` (PyTorch + transformers + manga-ocr + CTD), `onnx_env` (ONNX Runtime + opencv + numpy), `main_env` (PySide6 + GUI + config + application logic)
-- **Adapters + adapted source layout** — `adapters/` (model interfaces), `panelcleaner/` (adapted PanelCleaner code), `gui/` (PySide6), `core/` (application logic), `config/` (PanelCleaner config)
+- **PanelCleaner config system verbatim** — Adapt entire `config.py` with `GeneralConfig`, `TextDetectorConfig`, `PreprocessorConfig`, `Profile`, `MaskerConfig`, `DenoiserConfig`, `InpainterConfig`, `Config` classes for 100% compatibility
+- **ConfigUpdater/INI export/import for PanelCleaner settings compatibility** — Existing pcleaner configs (INI) must load without modification. PanelCleaner uses `ConfigUpdater`, **NOT JSON**, for profile persistence (`Profile.save/load`, `export_to_conf`/`import_from_conf`, `bundle_config`). (Corrected 2026-07-12 — the prior "JSON export/import" was a misread of the source.)
+- **Frontend/backend env split** — `main_env` (frontend: PySide6 + GUI + config + app logic), `torch_env` (backend: PyTorch + transformers + manga-ocr + CTD/LaMa, run as a worker subprocess), `onnx_env` (ONNX Runtime, isolated because it needs a newer Python). Isolation is the goal "whenever practical"; single-env is the proven fallback (PanelCleaner's requirements.txt proves the full PyTorch stack coexists).
+- **Adapters + adapted source layout** — `adapters/` (model interfaces), `panelcleaner/` (adapted PanelCleaner code: config/detection/inpainting/viewer), `mangacleaner/` (adapted MangaCleaner_GPU code: interactive mask-editing canvas for CLEAN-03/04/05), `gui/` (PySide6), `core/` (application logic), `config/` (PanelCleaner config)
 
 ### Claude's Discretion
 - Package naming within submodules — follow PanelCleaner patterns where sensible
@@ -74,17 +74,25 @@ None — all decisions support Phase 1 cleaning parity goal
 
 **Installation:**
 ```bash
-# Create torch_env (Phase 1 default)
+# Frontend env (main_env) — GUI + config + app logic
+uv venv --python 3.12 main_env
+main_env/bin/activate
+uv pip install PySide6 opencv-python pillow loguru configupdater attrs
+
+# Backend env (torch_env) — PyTorch model inference, run as a worker subprocess.
+# Invoked out-of-process from main_env (D-07/D-08); isolation is the goal
+# "whenever practical" — single-env is the proven fallback.
 uv venv --python 3.12 torch_env
 torch_env/bin/activate
-uv pip install PySide6 torch transformers simple_lama_inpainting opencv-python pillow loguru configupdater attrs
+uv pip install torch transformers simple_lama_inpainting manga-ocr opencv-python pillow
 
-# Create onnx_env (for future ONNX backends)
-uv venv --python 3.12 onnx_env
-onnx_env/bin/activate
-uv pip install onnxruntime opencv-python numpy<2.0
+# ONNX env (onnx_env) — future OPTIONAL backend. Isolated because it needs a
+# NEWER Python than the PyTorch stack (exact version pinned during planning).
+# uv venv --python 3.13 onnx_env && onnx_env/bin/activate \
+#   && uv pip install onnxruntime opencv-python "numpy<2.0"
 
-# Main app uses torch_env dependencies
+# Exact package allocation per env is a planning detail; the structure above
+# (frontend/backend split, ONNX isolated for Python version) is the locked decision.
 ```
 
 **Version verification:** Before writing tasks, verify key packages exist:
@@ -308,9 +316,13 @@ class TorchCTDModel(DetectionModel):
         )
     
     def detect(self, image: np.ndarray) -> Tuple[np.ndarray, list]:
-        mask, mask_refined, blk_list = self.detector(
-            image, 
-            refine_mode="annotation",
+        # TextDetector.__call__ returns a 5-tuple: (img, mask, mask_refined, blk_list, refine_mode)
+        # (verified: comic_text_detector/inference.py:166, 204-207). Use the
+        # REFINEMASK_* constants, not a bare string, for refine_mode.
+        from pcleaner.comic_text_detector.inference import REFINEMASK_ANNOTATION
+        _img, _mask, mask_refined, blk_list, _refine_mode = self.detector(
+            image,
+            refine_mode=REFINEMASK_ANNOTATION,
             keep_undetected_mask=True
         )
         return mask_refined, blk_list
@@ -353,45 +365,45 @@ class TorchLamaModel(InpaintModel):
 **Example:**
 ```python
 # config/profile_manager.py - Wrapper around PanelCleaner config
+#
+# IMPORTANT (corrected 2026-07-12): PanelCleaner persists profiles via
+# ConfigUpdater (INI-style), NOT JSON. Verified against pcleaner/config.py:
+#   - Profile.save(path)                  -> config.py:1217 (writes INI via ConfigUpdater)
+#   - Profile.load(path)  [classmethod]   -> config.py:1015 (reads INI)
+#   - Config.from_config_updater(cu)      -> config.py:1310
+#   - profile.bundle_config() -> ConfigUpdater  -> config.py:948
+#   - Profile fields: general, text_detector, preprocessor, masker, denoiser,
+#     inpainter  (NOT *_config — config.py:941-946)
+#   - each section: export_to_conf(cu, ...) / import_from_conf(cu)
+# The earlier draft here used Config.from_json / Profile.to_json /
+# pcleaner.profile_cli.write_config_file / pcleaner.profile_parser.ProfileParser
+# — NONE of those exist in PanelCleaner. Treat the wrapper's exact shape as a
+# planning detail; the contracts above are what the source actually provides.
 from pathlib import Path
 from pcleaner.config import Config, Profile
-import pcleaner.config as cfg
 
 class ProfileManager:
-    """Manages PanelCleaner profiles with full compatibility."""
-    
+    """Manages PanelCleaner profiles with full (INI/ConfigUpdater) compatibility."""
+
     def __init__(self, config_dir: Path):
         self.config_dir = config_dir
-        self.config = self.load_or_create_config()
-    
-    def load_or_create_config(self) -> Config:
-        """Load existing config or create new one."""
-        config_path = self.config_dir / "config.json"
-        if config_path.exists():
-            return Config.from_json(config_path.read_text())
-        return Config()
-    
+        self.config = Config()  # defaults; per-profile state loaded via load_profile()
+
     def save_profile(self, profile: Profile, name: str) -> Path:
-        """Save a profile to the config directory."""
+        """Save a profile as an INI .profile file (PanelCleaner-compatible)."""
         profile_path = self.config_dir / f"{name}.profile"
-        profile_path.write_text(profile.to_json())
+        profile.save(profile_path)          # Profile.save -> INI via ConfigUpdater
         return profile_path
-    
+
     def load_profile(self, name: str) -> Profile:
-        """Load a profile by name."""
+        """Load a profile from an INI .profile file."""
         profile_path = self.config_dir / f"{name}.profile"
-        return Profile.from_json(profile_path.read_text())
-    
-    def export_to_ini(self, profile: Profile, output_path: Path) -> None:
-        """Export profile to .ini format for PanelCleaner compatibility."""
-        from pcleaner.profile_cli import write_config_file
-        write_config_file(profile, output_path)
-    
-    def import_from_ini(self, ini_path: Path) -> Profile:
-        """Import profile from .ini format."""
-        from pcleaner.profile_parser import ProfileParser
-        parser = ProfileParser(ini_path)
-        return parser.get_profile()
+        return Profile.load(profile_path)   # Profile.load is a classmethod
+
+    def profile_to_config(self, profile: Profile) -> Config:
+        """Materialize a Profile into a Config via ConfigUpdater round-trip."""
+        conf_updater = profile.bundle_config()           # -> ConfigUpdater
+        return Config.from_config_updater(conf_updater)  # config.py:1310
 ```
 
 ### Pattern 3: Mask Editing with QGraphicsView
@@ -708,9 +720,11 @@ class TorchCTDModel:
     
     def detect(self, image: np.ndarray) -> tuple:
         """Run detection, return (mask_refined, text_blocks)."""
-        mask, mask_refined, blk_list = self.detector(
+        # __call__ returns a 5-tuple (img, mask, mask_refined, blk_list, refine_mode).
+        from pcleaner.comic_text_detector.inference import REFINEMASK_ANNOTATION
+        _img, _mask, mask_refined, blk_list, _refine_mode = self.detector(
             image,
-            refine_mode="annotation",
+            refine_mode=REFINEMASK_ANNOTATION,
             keep_undetected_mask=True
         )
         return mask_refined, blk_list
@@ -738,21 +752,27 @@ class LamaInpaintingModel:
 ### Config Loading (PanelCleaner Pattern)
 ```python
 # Source: PanelCleaner pcleaner/config.py
-from pcleaner.config import Config
+# (Corrected 2026-07-12: PanelCleaner uses ConfigUpdater/INI, not JSON.)
+import configupdater as cu
+from pcleaner.config import Config, Profile
 
-# Load config
-config = Config.from_json(config_json_str)
+# Load a profile from an INI .profile file (classmethod)
+profile = Profile.load(profile_path)
 
-# Access current profile
-profile = config.current_profile
+# Materialize into a Config via ConfigUpdater round-trip
+config = Config.from_config_updater(profile.bundle_config())
 
-# Access config sections
-general = profile.general_config
-masker = profile.masker_config
-inpainter = profile.inpainter_config
+# Access config sections (attribute names per config.py:941-946)
+general = profile.general            # GeneralConfig
+detector = profile.text_detector     # TextDetectorConfig
+masker = profile.masker              # MaskerConfig
+inpainter = profile.inpainter        # InpainterConfig
 
-# Export to .ini for PanelCleaner compatibility
-config_str = profile.export_to_conf()
+# Export to INI for PanelCleaner compatibility (writes INTO a ConfigUpdater;
+# export_to_conf does not return a string).
+conf_updater = cu.ConfigUpdater()
+profile.export_to_conf(conf_updater)
+conf_updater.write(open_ini_file_obj)
 ```
 
 ### File Table with Thumbnails (PanelCleaner Pattern)
@@ -808,7 +828,7 @@ class FileTable(QTableWidget):
 | A2 | `simple_lama_inpainting` package works with torch 2.2+ on Python 3.12 | Standard Stack | If version incompatibility exists, may need to upgrade or pin specific versions |
 | A3 | PanelCleaner's config system can be imported without pulling in entire CLI infrastructure | Config System Adaptation | If config is entangled with CLI, may need to extract classes individually |
 | A4 | QThread worker pattern from PanelCleaner is sufficient for Phase 1 async operations | Threading Pattern | If more complex concurrency is needed, may need to extend pattern |
-| A5 | Separate pyenvs for torch_env and onnx_env are sufficient for dependency isolation | pyenv Isolation Strategy | If conflicts arise within single env, may need additional isolation |
+| A5 | The frontend→backend subprocess boundary (dispatching detect/inpaint/OCR across processes and serializing image/mask data over IPC) is tractable and worth the isolation it buys | Environment Isolation Strategy (D-07/D-08) | If IPC complexity/overhead blocks progress, fall back to single-env in-process inference — PanelCleaner's requirements.txt proves the full PyTorch stack coexists in one env |
 
 **If this table is empty:** Not applicable — Phase 1 involves adapting existing code with known patterns, so assumptions are minimal.
 

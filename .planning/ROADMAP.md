@@ -16,7 +16,7 @@ Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and tra
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Cleaning Workspace** - Open/navigate pages, detect masks, edit masks, run LaMa inpainting, undo/redo (MangaCleaner_GPU parity lift)
+- [ ] **Phase 1: Cleaning Workspace** - Open/navigate pages, detect masks, edit masks, run LaMa inpainting, undo/redo (PanelCleaner + MangaCleaner_GPU foundation)
 - [ ] **Phase 2: Cleaning Output & Batch** - Export cleaned pages as PNG/JPG and batch-process a chapter through cleaning
 - [ ] **Phase 3: Text Box Detection & Interaction** - Detect text boxes as editable objects and select/move/resize/delete them
 - [ ] **Phase 4: OCR Recognition & Text Editing** - Draw-to-OCR regions, correct recognized text, add manual translations
@@ -35,10 +35,16 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. User can paint masks with an adjustable brush, plus rectangle and lasso fill tools, and erase mask regions
   4. User can run LaMa inpainting on the mask to remove text and restore the underlying artwork
   5. User can undo and redo both mask (painting) and image (inpainting) operations via separate stacks
-**Plans**: TBD
+**Plans**: 6 plans
 
 Plans:
-- [ ] TBD (defined during `/gsd:plan-phase 1`)
+- [ ] 01-01-PLAN.md — Project scaffolding: Entry point, config system, model adapter base classes
+- [ ] 01-02-PLAN.md — Image viewer: Canvas with pan/zoom, file list sidebar, navigation (CLEAN-01, FLOW-01)
+- [ ] 01-03-PLAN.md — Text detection: CTD adapter, async detection worker, mask overlay display (CLEAN-02)
+- [ ] 01-04-PLAN.md — Mask editing: Brush, rectangle, lasso, eraser tools with tool panel (CLEAN-03, CLEAN-04, CLEAN-05)
+- [ ] 01-05-PLAN.md — LaMa inpainting: Async inpainting worker, result display, preview toggle (CLEAN-06)
+- [ ] 01-06-PLAN.md — Undo/redo: Separate mask and image stacks, buttons, keyboard shortcuts (FLOW-02)
+
 **UI hint**: yes
 
 ### Phase 2: Cleaning Output & Batch
@@ -112,7 +118,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Cleaning Workspace | 0/TBD | Not started | - |
+| 1. Cleaning Workspace | 0/6 | Ready to execute | - |
 | 2. Cleaning Output & Batch | 0/TBD | Not started | - |
 | 3. Text Box Detection & Interaction | 0/TBD | Not started | - |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
