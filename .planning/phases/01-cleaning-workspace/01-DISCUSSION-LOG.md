@@ -144,6 +144,16 @@ Verification finding: PanelCleaner is a batch detector + review viewer (`image_v
 - ROADMAP Phase 1 line + STATE.md "lifts MangaCleaner_GPU ~60%" reframed to the PanelCleaner + MangaCleaner_GPU foundation.
 - PROJECT.md env decision row updated to the frontend/backend split; PySide6 (not PyQt5) and INI (not JSON) noted in the Context section.
 
+### Adaptation / licensing policy (D-12) — ADDED
+
+User clarification: MangaCleaner_GPU is to be used as a **reference** for our own implementation, **not copied verbatim**. PanelCleaner remains near-verbatim (GPL v3 ↔ GPL v3, intended derivative).
+
+Verification added a concrete legal reason this is the right call: MangaCleaner_GPU at `~/Downloads/MangaCleaner_GPU` is a PyInstaller **binary distribution with no LICENSE file** — absent a license its code is all-rights-reserved and cannot be vendored into a GPL v3 derivative. Readable source for reference lives at `_internal/src/` (`frontend/canvas.py`, `backend/onnx_engine.py`).
+
+Code-org consequence (D-10): dropped the `mangacleaner/` adapted-source directory — the interactive mask-editing canvas is now our own code in `gui/`+`core/`, patterned after MangaCleaner_GPU. Only `panelcleaner/` holds vendored upstream source.
+
+**User's choice:** "we are not copying the code verbatim from mangacleaner we can definitely base our implementation on that but not quite copy it verbatim."
+
 ---
 
 *Phase: 1-Cleaning Workspace*

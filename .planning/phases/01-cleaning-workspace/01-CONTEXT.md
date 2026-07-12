@@ -31,14 +31,16 @@ The model adapter interface enables modularity: PyTorch backends (PanelCleaner s
 - **D-09b:** Single-env is the proven fallback. PanelCleaner's own `requirements.txt` confirms the full PyTorch stack (torch + PySide6 + manga_ocr + simple_lama_inpainting + opencv + numpy) coexists in one environment today. "Whenever possible" means: isolation is the goal, not an absolute — if the subprocess split blocks progress for a given backend, that backend may run in-process.
 
 ### Code Organization
-- **D-10:** Adapters + adapted source layout — explicit organization showing what is adapted from each upstream source vs. original adapter interfaces:
-  - `adapters/` — Model adapter interfaces
-  - `panelcleaner/` — Adapted PanelCleaner source (config, CTD detection, LaMa inpainting, masker, image ops, file table, image viewer). PanelCleaner is a batch detector + review viewer — it has no freehand mask painting.
-  - `mangacleaner/` — Adapted MangaCleaner_GPU source for the interactive mask-editing canvas (brush/rectangle/lasso/eraser tools, history manager). This is where CLEAN-03/04/05's interactive editing is lifted from, since PanelCleaner does not provide it.
-  - `gui/` — PySide6 interface (our own, reusing patterns from both sources)
-  - `core/` — Application logic
+- **D-10:** Adapters + adapted source layout — explicit organization distinguishing vendored PanelCleaner source from our own code:
+  - `adapters/` — Model adapter interfaces (our own)
+  - `panelcleaner/` — Adapted PanelCleaner source, **vendored near-verbatim per D-12** (config, CTD detection, LaMa inpainting, masker, image ops, file table, image viewer). PanelCleaner is a batch detector + review viewer — it has no freehand mask painting.
+  - `gui/` — PySide6 interface (our own). Includes the interactive mask-editing canvas (`canvas.py`: brush/rectangle/lasso/eraser) for CLEAN-03/04/05 — **our own reimplementation patterned after MangaCleaner_GPU, NOT vendored source** (PanelCleaner has no freehand painting; MangaCleaner_GPU is reference-only per D-12).
+  - `core/` — Application logic (our own), including mask-editing ops and the history/undo manager (patterned after MangaCleaner_GPU, reimplemented).
   - `config/` — PanelCleaner config system
-- **D-11:** Adapter structure: `adapters/base.py` (base classes), `adapters/torch_impl.py` (PanelCleaner PyTorch implementations), `adapters/onnx_impl.py` (MangaCleaner_GPU ONNX implementations)
+- **D-11:** Adapter structure: `adapters/base.py` (base classes), `adapters/torch_impl.py` (PanelCleaner PyTorch implementations), `adapters/onnx_impl.py` (ONNX implementations — written against the ONNX Runtime API, referencing MangaCleaner_GPU's approach but not copying its source)
+
+### Adaptation / Licensing Policy
+- **D-12:** PanelCleaner source is adapted **near-verbatim** — it is GPL v3 and we are GPL v3, so derivative copying is intended and license-compatible. MangaCleaner_GPU is **reference-only**: read it for patterns and re-implement in our own code; do **not** copy its source into the repo. Two reasons: (1) MangaCleaner_GPU ships as a binary distribution at `~/Downloads/MangaCleaner_GPU` (`.exe` + `_internal/`) with **no LICENSE file** — absent a license, the code is all-rights-reserved and cannot be vendored into a GPL v3 derivative; (2) the user's explicit policy: base the implementation on it, don't copy verbatim. Readable source for reference lives at `~/Downloads/MangaCleaner_GPU/_internal/src/` (`frontend/canvas.py`, `backend/onnx_engine.py`, etc.).
 
 ### Claude's Discretion
 - Package naming within submodules (e.g., `gui/widgets.py` vs `gui/components/widgets.py`) — follow PanelCleaner patterns where sensible
@@ -68,7 +70,7 @@ The model adapter interface enables modularity: PyTorch backends (PanelCleaner s
   - `../PanelCleaner/pcleaner/image_ops.py` — Image operations (crop, rotate, levels)
   - `../PanelCleaner/pcleaner/ocr/ocr_mangaocr.py` — manga-ocr wrapper (for Phase 4)
   - `../PanelCleaner/pcleaner/model_downloader.py` — Model fetch logic (HuggingFace)
-- `~/Downloads/MangaCleaner_GPU/` — MangaCleaner_GPU reference source (ONNX stack). Source for the interactive mask-editing canvas (CLEAN-03/04/05), QThread worker pattern, and ONNX model loading. See `.planning/research/ARCHITECTURE.md` for the component map.
+- `~/Downloads/MangaCleaner_GPU/_internal/src/` — MangaCleaner_GPU readable source (ONNX stack; bundled inside the PyInstaller binary distribution at `~/Downloads/MangaCleaner_GPU`). **Reference-only per D-12 — do NOT copy verbatim** (the distribution carries no LICENSE, so its code is all-rights-reserved). Use as a pattern reference for the interactive mask-editing canvas (`frontend/canvas.py`), QThread worker pattern, and ONNX model loading (`backend/onnx_engine.py`); re-implement in our own code. See `.planning/research/ARCHITECTURE.md` for the component map.
 
 ### Technology Stack
 - `.claude/CLAUDE.md` §Technology Stack — PySide6, Python 3.12, PyTorch, ONNX Runtime, OpenCV, NumPy. (Note: CLAUDE.md's claim that "PanelCleaner uses PyQt5" is **stale** — the cloned source at `../PanelCleaner` uses PySide6; verified 2026-07-12.)
@@ -87,7 +89,7 @@ The model adapter interface enables modularity: PyTorch backends (PanelCleaner s
 - `pcleaner/ocr/ocr_mangaocr.py` — manga-ocr wrapper (Phase 4 OCR recognition).
 - `pcleaner/masker.py` — Mask refinement, box handling, and processing utilities (batch-oriented).
 - `pcleaner/image_ops.py` — Image operations: crop, rotate, levels/curves adjustment.
-- MangaCleaner_GPU `frontend/canvas.py` (ONNX stack) — Interactive mask-editing canvas (brush/rect/lasso/eraser) and history manager. Source for CLEAN-03/04/05 since PanelCleaner has no freehand painting.
+- MangaCleaner_GPU `frontend/canvas.py` (ONNX stack, at `~/Downloads/MangaCleaner_GPU/_internal/src/`) — Interactive mask-editing canvas (brush/rect/lasso/eraser) and history manager. **Reference-only (D-12)** — a pattern for our *own reimplementation* of CLEAN-03/04/05, since PanelCleaner has no freehand painting. Do not vendor.
 
 ### Established Patterns
 - **Profile-driven config** — Settings organized into profiles with ConfigUpdater (INI) export/import. Changes trigger `profile_values_changed` signals.
@@ -104,7 +106,7 @@ The model adapter interface enables modularity: PyTorch backends (PanelCleaner s
 
 - **Per-model backend config granularity** — Users can run CTD on PyTorch while using ONNX Runtime for LaMa inpainting if they prefer. Config keys: `detection_backend`, `ocr_backend`, `inpainting_backend`
 - **Frontend/backend env isolation** — Backend model inference runs in a separate env (and process) from the GUI whenever practical; ONNX backend is isolated specifically because it needs a newer Python than the PyTorch stack. Single-env remains the proven fallback (PanelCleaner's `requirements.txt` confirms the full PyTorch stack coexists).
-- **Explicit adapted source layout** — `panelcleaner/` and `mangacleaner/` directories make it clear which upstream each piece of adapted code comes from (PanelCleaner for config/detection/inpainting/viewer; MangaCleaner_GPU for the interactive mask-editing canvas).
+- **Explicit vendored-vs-original layout** — a `panelcleaner/` directory holds near-verbatim PanelCleaner source (GPL v3, vendored per D-12); our own mask-editing canvas lives in `gui/`/`core/`, patterned after MangaCleaner_GPU but **not** vendored (D-12 — no license on the MangaCleaner_GPU distribution).
 
 ## Deferred Ideas
 
