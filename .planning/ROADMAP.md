@@ -2,7 +2,7 @@
 
 ## Overview
 
-Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and translation layout into one PySide6 desktop app. The journey starts by lifting the existing MangaCleaner_GPU codebase (~60% of the target app) to reach cleaning parity immediately, then builds the novel differentiator — editable text boxes with per-box manga-ocr and a translation layer — and finally lands the project system (save/resume, image ops, JSON export) that turns the editor into a resumable workspace. Each phase is a vertical slice delivering one complete, user-observable capability.
+Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and translation layout into one PySide6 desktop app. The journey starts by adapting PanelCleaner (GPL v3) as the foundation with a model adapter interface, reaching cleaning parity immediately, then builds the novel differentiator — editable text boxes with per-box manga-ocr and a translation layer — and finally lands the project system (save/resume, image ops, JSON export) that turns the editor into a resumable workspace. Each phase is a vertical slice delivering one complete, user-observable capability.
 
 **Mode:** mvp
 **Granularity:** standard (5 phases)
@@ -25,9 +25,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Cleaning Workspace
-**Goal**: User can clean manga pages interactively — open and navigate images, detect text masks, edit masks, run LaMa inpainting, and undo/redo — reaching parity with MangaCleaner_GPU as the app foundation.
+**Goal**: User can clean manga pages interactively — open and navigate images, detect text masks, edit masks, run LaMa inpainting, and undo/redo — reaching cleaning parity using PanelCleaner as the foundation with a model adapter interface.
 **Mode:** mvp
-**Depends on**: Nothing (first phase — foundation lift from MangaCleaner_GPU)
+**Depends on**: Nothing (first phase — PanelCleaner-based foundation with model adapter interface design)
 **Requirements**: CLEAN-01, CLEAN-02, CLEAN-03, CLEAN-04, CLEAN-05, CLEAN-06, FLOW-01, FLOW-02
 **Success Criteria** (what must be TRUE):
   1. User can open a single image or a folder of images and view them on a pannable, zoomable canvas with a file-list sidebar to navigate between pages

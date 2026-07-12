@@ -39,17 +39,32 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 ## Context
 
-**Source tools to reuse (all open source):**
+**Primary codebase: PanelCleaner (GPL v3)**
 
-- **PanelCleaner (pcleaner)** — https://github.com/VoxelCubes/PanelCleaner — the foundation for the cleaning pipeline. Reuse its settings/parameters as-is, the mask auto-detection, the paint-like masking canvas, and the LaMa inpainting model integration. The masking canvas UI is the direct ancestor of this app's mask editor.
-- **mokuro** — https://github.com/kha-white/mokuro — provides the text-box detection model and pipeline architecture. We adopt the box-detection approach but replace its OCR with MangaOCR.
-- **manga-ocr** — the OCR model (mokuro uses it; we use it directly) for recognizing Japanese text in detected/drawn boxes.
+**Source architecture:** https://github.com/VoxelCubes/PanelCleaner — cloned to `../PanelCleaner` (sibling directory). This is our primary foundation, not MangaCleaner_GPU. PanelCleaner's GPL v3 license ensures the tool remains open source for the scanlation community.
 
-**Repository layout:** PanelCleaner to be cloned to `../PanelCleaner` (sibling of this project) for reference and code reuse.
+**What we lift from PanelCleaner:**
+- **GUI framework**: PySide6 (`pcleaner/gui/`) — main window, image viewer, file table, profile system
+- **Config system**: Profile-based settings (`pcleaner/config.py`) — supports PanelCleaner config compatibility
+- **Text detection**: Comic Text Detector (`pcleaner/comic_text_detector/`) — PyTorch-based heatmap detection
+- **OCR integration**: manga-ocr wrapper (`pcleaner/ocr/ocr_mangaocr.py`) — recognition engine
+- **Inpainting**: LaMa via `simple_lama_inpainting` package (`pcleaner/inpainting.py`)
+- **Image operations**: crop, rotate, levels (`pcleaner/image_ops.py`)
+- **Mask processing**: mask refinement and box handling (`pcleaner/masker.py`)
 
-**Integration strategy:** Import and adapt the relevant source (LaMa pipeline, masking canvas, manga-ocr model) into one codebase where dependencies coexist. Fall back to isolated pyenv environments only when a tool requires an incompatible Python version or has hard dependency conflicts — prefer a single environment to minimize code rewriting.
+**Model adapter interface (modularity):**
+- Design abstracted interfaces for: detection, OCR, inpainting models
+- PanelCleaner's models (CTD, manga-ocr, LaMa) are the default v1 implementation
+- MangaCleaner_GPU's ONNX models can be optional add-on modules later (user-installed)
+- This allows advanced users to swap in better models without core changes
 
-**Environment:** Developer is on Windows (win32, Git Bash). Python ecosystem is the common ground (PanelCleaner is PyQt5, mokuro and manga-ocr are PyTorch-based).
+**Repository layout:**
+- `../PanelCleaner` — Reference source (GPL v3)
+- `C:\Src\Manga AI Studio` — Our fork/adaptation
+
+**Integration strategy:** Import and adapt PanelCleaner's core modules, preserving the profile system and config compatibility. Fall back to isolated pyenv environments only when a tool requires an incompatible Python version — prefer a single environment.
+
+**Environment:** Developer is on Windows (win32, Git Bash). PanelCleaner uses PySide6 + PyTorch + loguru.
 
 **Audience:** Small group of hobbyist scanlators/preservationists. Needs to be installable by non-developers, with some documentation and tolerable UX — but not the packaging/onboarding investment of a broad public release.
 
@@ -66,12 +81,13 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| PyQt/PySide desktop over web UI | Reuses PanelCleaner's Qt patterns directly; best fit for a canvas-based image editor; avoids browser canvas performance concerns | — Pending |
-| Import & adapt code, not subprocess orchestration | Minimizes rewriting; single environment is simpler than managing multiple isolated runtimes for a small hobbyist app | — Pending |
-| Isolated pyenvs only on hard conflicts | Fallback for Python-version or dependency conflicts that can't be resolved in one env; default is one env | — Pending |
-| Manual translation now, MT seam later | v1 ships manual entry; design the text layer so MT can be plugged in without rework | — Pending |
-| Replace mokuro's OCR with MangaOCR | MangaOCR is purpose-built for manga and more accurate; keep mokuro's box detection | — Pending |
-| Windows-first, Linux-portable | Developer environment is Windows; cross-platform Python stack makes Linux feasible later without redesign | — Pending |
+| PanelCleaner as base (GPL v3) | Better architecture, proven config system, GPL v3 keeps tool open source for scanlation community | — Active |
+| PySide6 (Qt for Python) | PanelCleaner uses PySide6; LGPL licensing, actively maintained | — Active |
+| Model adapter interface | Abstracted interfaces allow model swapping; PanelCleaner models default, MangaCleaner_GPU ONNX optional later | — Pending |
+| Single environment preferred | Minimizes rewriting; isolated pyenv fallback for hard conflicts | — Pending |
+| Manual translation now, MT seam later | v1 ships manual entry; design text layer so MT can be plugged in later | — Pending |
+| Windows-first, Linux-portable | Developer environment is Windows; cross-platform Python stack makes Linux feasible later | — Pending |
+| GPL v3 license | PanelCleaner is GPL v3; derivative works must be GPL v3 — ensures tool stays open source | — Active |
 
 ## Evolution
 

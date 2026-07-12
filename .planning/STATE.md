@@ -16,7 +16,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 1 — Cleaning Workspace (MangaCleaner_GPU parity lift)
+**Current focus:** Phase 1 — Cleaning Workspace (PanelCleaner-based foundation, model adapter interface)
 
 ## Current Position
 
@@ -70,9 +70,9 @@ None yet.
 
 [Issues that affect future work]
 
-- [Phase 1]: Validate torch + onnxruntime + numpy<2 coexistence on day one (pitfall P1); isolated-pyenv subprocess is the fallback if they conflict.
-- [Phase 1]: Fix MangaCleaner_GPU's latent QImage buffer bug in `on_task_finished` when lifting canvas code (pitfall P5).
-- [Phase 1]: Confirm licensing (PanelCleaner GPL v3, MangaCleaner_GPU origin unknown) before code reuse/publishing (pitfall P13).
+- [Phase 1]: Validate PyTorch + PySide6 + simple_lama_inpainting coexistence on day one; PanelCleaner's stack uses PyTorch, not ONNX.
+- [Phase 1]: Design model adapter interface to allow optional MangaCleaner_GPU ONNX models as user-installed modules (future enhancement).
+- [Licensing]: Project is GPL v3 (derivative of PanelCleaner) — must preserve GPL v3 in all distributions and provide source code.
 
 ## Deferred Items
 
