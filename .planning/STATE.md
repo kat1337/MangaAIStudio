@@ -2,19 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 1
-current_phase_name: Cleaning Workspace
+current_phase: 01
+current_phase_name: cleaning-workspace
 status: executing
-stopped_at: Phase 1 UI-SPEC approved (5 PASS + 1 non-blocking FLAG); ready for plan-phase
-last_updated: "2026-07-12T16:38:44.905Z"
-last_activity: 2026-07-11
-last_activity_desc: Phase 1 plan created (6 plans, vertical MVP slices)
+stopped_at: Completed 01-01-PLAN.md (Walking Skeleton); 2 tasks, 8 tests green
+last_updated: "2026-07-12T21:42:43.379Z"
+last_activity: 2026-07-12
+last_activity_desc: Phase 01 execution started
 progress:
-  total_phases: 5
+  total_phases: 1
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 6
+  completed_plans: 1
 ---
 
 # Project State
@@ -24,30 +23,30 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 1 — Cleaning Workspace (PanelCleaner-based foundation, model adapter interface)
+**Current focus:** Phase 01 — cleaning-workspace
 
 ## Current Position
 
-Phase: 1 of 5 (Cleaning Workspace)
-Plan: 0 of 6 in current phase
+Phase: 01 (cleaning-workspace) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-07-11 — Phase 1 plan created (6 plans, vertical MVP slices)
+Last activity: 2026-07-12 — Plan 01-01 (Walking Skeleton) complete
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: — min
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 15 min
+- Total execution time: 0.25 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1. Cleaning Workspace | 0 | — | — |
+| 1. Cleaning Workspace | 1 | 15 min | 15 min |
 | 2. Cleaning Output & Batch | 0 | — | — |
 | 3. Text Box Detection & Interaction | 0 | — | — |
 | 4. OCR Recognition & Text Editing | 0 | — | — |
@@ -55,10 +54,11 @@ Progress: [░░░░░░░░░░] 0%
 
 **Recent Trend:**
 
-- Last 5 plans: —
-- Trend: — (no execution yet)
+- Last 5 plans: 01-01 (15 min)
+- Trend: baseline established
 
 *Updated after each plan completion*
+| Phase 01 P01 | 15 | 2 tasks | 29 files |
 
 ## Accumulated Context
 
@@ -69,6 +69,8 @@ Recent decisions affecting current work:
 
 - [Roadmap]: 5-phase vertical-slice structure; Phase 1 adapts PanelCleaner (config, detection, inpainting, viewer) + MangaCleaner_GPU (interactive mask-editing canvas) as the foundation before building the novel text/box/OCR track.
 - [Roadmap]: Packaging has no v1 requirement — deferred to a decimal-phase insertion or v1.1 once formalized.
+- [Phase ?]: 01-01: ProfileManager.profile_to_config assigns current_profile directly (Config.from_config_updater needs a full config.ini with Saved Profiles, not a bare Profile.bundle_config())
+- [Phase ?]: 01-01: create_app reuses existing QApplication singleton (avoids Qt singleton guard under pytest-qt / re-entry)
 
 ### Pending Todos
 
@@ -94,6 +96,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-12T16:38:44.894Z
-Stopped at: Phase 1 UI-SPEC approved (5 PASS + 1 non-blocking FLAG); ready for plan-phase
-Resume file: .planning/phases/01-cleaning-workspace/01-UI-SPEC.md
+Last session: 2026-07-12T21:42:43.369Z
+Stopped at: Completed 01-01-PLAN.md (Walking Skeleton); 2 tasks, 8 tests green
+Resume file: None
