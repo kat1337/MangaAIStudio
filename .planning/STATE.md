@@ -5,15 +5,16 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
 status: executing
-stopped_at: Completed 01-01-PLAN.md (Walking Skeleton); 2 tasks, 8 tests green
-last_updated: "2026-07-12T21:42:43.379Z"
+stopped_at: Completed 01-02-PLAN.md (Image Viewer Slice); 2 tasks, 22 tests green
+last_updated: "2026-07-12T22:09:26.304Z"
 last_activity: 2026-07-12
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Plan 01-01 (Walking Skeleton) complete
 progress:
-  total_phases: 1
+  total_phases: 5
   completed_phases: 0
   total_plans: 6
-  completed_plans: 1
+  completed_plans: 2
+  percent: 0
 ---
 
 # Project State
@@ -28,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 01 (cleaning-workspace) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-07-12 — Plan 01-01 (Walking Skeleton) complete
 
@@ -59,6 +60,7 @@ Progress: [██░░░░░░░░] 17%
 
 *Updated after each plan completion*
 | Phase 01 P01 | 15 | 2 tasks | 29 files |
+| Phase 01 P02 | 12 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -71,6 +73,8 @@ Recent decisions affecting current work:
 - [Roadmap]: Packaging has no v1 requirement — deferred to a decimal-phase insertion or v1.1 once formalized.
 - [Phase ?]: 01-01: ProfileManager.profile_to_config assigns current_profile directly (Config.from_config_updater needs a full config.ini with Saved Profiles, not a bare Profile.bundle_config())
 - [Phase ?]: 01-01: create_app reuses existing QApplication singleton (avoids Qt singleton guard under pytest-qt / re-entry)
+- [Phase ?]: 01-02: image_files natural-sorted in MainWindow._set_pages to match sidebar display order (index lookups depend on consistency)
+- [Phase ?]: 01-02: FileTable uses QStandardItemModel + QListView (plan contracts QListView.ListMode, not QListWidget); drag-drop handled by sidebar only
 
 ### Pending Todos
 
@@ -96,8 +100,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-12T21:42:43.369Z
-Stopped at: Completed 01-01-PLAN.md (Walking Skeleton); 2 tasks, 8 tests green
+Last session: 2026-07-12T22:09:13.010Z
+Stopped at: Completed 01-02-PLAN.md (Image Viewer Slice); 2 tasks, 22 tests green
 Resume file: None
 
 > **Pause note (2026-07-12):** Execution paused after Wave 1 (01-01) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Next: `/gsd-execute-phase 1` resumes from Wave 2 (01-02, image viewer slice). 5 incomplete plans remain.

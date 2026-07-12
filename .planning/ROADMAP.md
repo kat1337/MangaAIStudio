@@ -39,7 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. User can run LaMa inpainting on the mask to remove text and restore the underlying artwork
   5. User can undo and redo both mask (painting) and image (inpainting) operations via separate stacks
 
-**Plans**: 1/6 plans executed
+**Plans**: 2/6 plans executed
 
 Plans:
 **Wave 1**
@@ -48,7 +48,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — Image viewer: Canvas with pan/zoom, file list sidebar, navigation (CLEAN-01, FLOW-01)
+- [x] 01-02-PLAN.md — Image viewer: Canvas with pan/zoom, file list sidebar, navigation (CLEAN-01, FLOW-01)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -159,7 +159,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Cleaning Workspace | 1/6 | In Progress|  |
+| 1. Cleaning Workspace | 2/6 | In Progress|  |
 | 2. Cleaning Output & Batch | 0/TBD | Not started | - |
 | 3. Text Box Detection & Interaction | 0/TBD | Not started | - |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
