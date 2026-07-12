@@ -1,10 +1,11 @@
 ---
 phase: 1
 slug: cleaning-workspace
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-07-12
+reviewed_at: 2026-07-12
 ---
 
 # Phase 1 — UI Design Contract (Cleaning Workspace)
@@ -319,11 +320,13 @@ No third-party UI component registries. No `npx shadcn` operations. Safety gate 
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+Verified by gsd-ui-checker (2026-07-12) — **5 PASS + 1 non-blocking FLAG → APPROVED.**
 
-**Approval:** pending
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
+- [~] Dimension 1 Copywriting: **FLAG (non-blocking)** — the primary CTA **"Inpaint"** is a bare verb, which violates the spec's own copywriting rule (verb + noun, as used by the parallel "Detect Text" CTA). **Recommendation:** rename the CTA to **"Inpaint Mask"** (or "Remove Text") in: the Copywriting table (line ~122), Tools menu (`C`), toolbar button, surface 7 (`Tools → Inpaint`), and the shortcut reference table. Left as "Inpaint" for now — the team may consider "inpaint" an unambiguous scanlation domain term (the checker explicitly allowed leaving as-is). Status strings (`Inpainting… {percent}%`) and section headings (`LaMa inpainting surface`) are unaffected and correct.
+
+**Approval:** approved (2026-07-12) — 5 PASS + 1 non-blocking FLAG carried forward. Planning may proceed.
