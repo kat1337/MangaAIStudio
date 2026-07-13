@@ -15,11 +15,20 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtGui import QColor, QImage, QPalette, QPixmap  # noqa: E402
-from PySide6.QtWidgets import QGraphicsPixmapItem, QApplication  # noqa: E402
+from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QImage,
+    QMouseEvent,
+    QPalette,
+    QPixmap,
+    QShortcut,
+)
+from PySide6.QtWidgets import QApplication, QGraphicsPixmapItem  # noqa: E402
 
 from manga_ai_studio.app import create_app  # noqa: E402
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
+from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode  # noqa: E402
 from manga_ai_studio.gui.canvas import (  # noqa: E402
     MAX_IMAGE_DIMENSION,
     MAX_ZOOM_FACTOR,
@@ -28,6 +37,7 @@ from manga_ai_studio.gui.canvas import (  # noqa: E402
     validate_image_path,
 )
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
+from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
 
 
 def _solid_pixmap(size: int, color: QColor) -> QPixmap:
@@ -190,3 +200,287 @@ def test_empty_state_heading(qtbot) -> None:
     assert canvas._empty_heading in canvas.scene().items()
     assert canvas._empty_body in canvas.scene().items()
 
+
+# ---------------------------------------------------------------------------
+# Plan 04 Task 2 tests — ToolsPanel + canvas tool dispatch + cursor visuals
+# ---------------------------------------------------------------------------
+
+def _press(canvas, sx: float, sy: float, button=Qt.MouseButton.LeftButton) -> QMouseEvent:
+    """Build a mouse-press at viewport coords that map to SCENE (sx, sy).
+
+    QGraphicsView centers the scene in the viewport, so viewport (sx, sy) !=
+    scene (sx, sy). We map the desired scene point back to viewport coords so
+    the canvas's ``mapToScene`` lands the stroke where the test asserts.
+    """
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        button,
+        button,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _move(canvas, sx: float, sy: float) -> QMouseEvent:
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(vp),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _release(canvas, sx: float, sy: float, button=Qt.MouseButton.LeftButton) -> QMouseEvent:
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(vp),
+        button,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _canvas_with_image(qtbot, size: int = 100) -> EditorCanvas:
+    """Build a shown canvas with a solid image + initialized mask."""
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(300, 300)
+    canvas.set_image(_solid_pixmap(size, QColor("white")))
+    canvas.show()
+    canvas.viewport().show()
+    QApplication.processEvents()
+    return canvas
+
+
+# --- ToolsPanel tests ---
+
+def test_tools_panel_tool_group_exclusive(qtbot) -> None:
+    """ToolsPanel exposes 5 exclusive checkable actions; checking one unchecks others."""
+    panel = ToolsPanel()
+    qtbot.addWidget(panel)
+
+    # 5 actions in the group, all checkable.
+    actions = panel.tool_group.actions()
+    assert len(actions) == 5
+    assert panel.tool_group.isExclusive()
+    for act in actions:
+        assert act.isCheckable()
+
+    # Move is checked initially (default tool).
+    assert panel.action_move.isChecked()
+    assert panel.active_tool() == ToolMode.MOVE
+
+    # Checking Brush unchecks Move and emits tool_changed(BRUSH).
+    with qtbot.waitSignal(panel.tool_changed, timeout=1000) as blocker:
+        panel.action_brush.setChecked(True)
+    assert blocker.args == [ToolMode.BRUSH]
+    assert not panel.action_move.isChecked()
+    assert panel.active_tool() == ToolMode.BRUSH
+
+
+def test_tools_panel_brush_slider_spinbox_sync(qtbot) -> None:
+    """Slider <-> spinbox stay in sync; label updates; brush_size_changed fires."""
+    panel = ToolsPanel()
+    qtbot.addWidget(panel)
+
+    with qtbot.waitSignal(panel.brush_size_changed, timeout=1000) as blocker:
+        panel.brush_slider.setValue(73)
+    assert blocker.args == [73]
+    assert panel.brush_spinbox.value() == 73
+    assert "73 px" in panel.brush_label.text()
+
+    # Spinbox -> slider sync.
+    with qtbot.waitSignal(panel.brush_size_changed, timeout=1000) as blocker:
+        panel.brush_spinbox.setValue(150)
+    assert blocker.args == [150]
+    assert panel.brush_slider.value() == 150
+    assert "150 px" in panel.brush_label.text()
+
+
+def test_tools_panel_brush_range_clamped(qtbot) -> None:
+    """The spinbox/slider enforce [1, 300] (setMinimum/setMaximum)."""
+    panel = ToolsPanel()
+    qtbot.addWidget(panel)
+    assert panel.brush_slider.minimum() == 1
+    assert panel.brush_slider.maximum() == 300
+    assert panel.brush_spinbox.minimum() == 1
+    assert panel.brush_spinbox.maximum() == 300
+    assert panel.brush_slider.value() == DEFAULT_BRUSH_SIZE == 40
+
+
+# --- Canvas tool-dispatch tests ---
+
+def test_canvas_set_tool_routes_to_mask_editor_brush(qtbot) -> None:
+    """BRUSH tool + a left-drag paints a red band on the mask via core ops."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(10)
+
+    # Before painting, the mask center is transparent.
+    assert canvas.get_mask().pixelColor(50, 10).alpha() == 0
+
+    # Simulate a press-move-release drag across row 10.
+    canvas.mousePressEvent(_press(canvas, 10, 10))
+    canvas.mouseMoveEvent(_move(canvas, 90, 10))
+    canvas.mouseReleaseEvent(_release(canvas, 90, 10))
+
+    # The brush routed through paint_mask_stroke -> painted band on row ~10.
+    assert canvas.get_mask().pixelColor(50, 10).alpha() > 0
+
+
+def test_canvas_set_tool_routes_to_mask_editor_rectangle(qtbot) -> None:
+    """RECTANGLE tool drag commits a filled rect on release."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.RECTANGLE)
+
+    canvas.mousePressEvent(_press(canvas, 20, 20))
+    canvas.mouseMoveEvent(_move(canvas, 80, 80))
+    canvas.mouseReleaseEvent(_release(canvas, 80, 80))
+
+    mask = canvas.get_mask()
+    assert mask.pixelColor(50, 50).alpha() > 0
+    assert mask.pixelColor(5, 5).alpha() == 0
+
+
+def test_canvas_set_tool_routes_to_mask_editor_lasso(qtbot) -> None:
+    """LASSO tool drag commits a filled (closed) path on release."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.LASSO)
+
+    # A triangular-ish drag: down-right, across, up-left, back to start.
+    canvas.mousePressEvent(_press(canvas, 50, 10))
+    canvas.mouseMoveEvent(_move(canvas, 90, 90))
+    canvas.mouseMoveEvent(_move(canvas, 10, 90))
+    canvas.mouseReleaseEvent(_release(canvas, 50, 10))
+
+    mask = canvas.get_mask()
+    # Interior of the triangle near the centroid should be painted.
+    assert mask.pixelColor(50, 65).alpha() > 0
+
+
+def test_canvas_eraser_tool_clears(qtbot) -> None:
+    """ERASER tool strokes clear a pre-painted region (CompositionMode_Clear)."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(20)
+    canvas.mousePressEvent(_press(canvas, 10, 50))
+    canvas.mouseMoveEvent(_move(canvas, 90, 50))
+    canvas.mouseReleaseEvent(_release(canvas, 90, 50))
+    assert canvas.get_mask().pixelColor(50, 50).alpha() > 0
+
+    # Switch to Eraser and stroke over the same region.
+    canvas.set_tool(ToolMode.ERASER)
+    canvas.mousePressEvent(_press(canvas, 10, 50))
+    canvas.mouseMoveEvent(_move(canvas, 90, 50))
+    canvas.mouseReleaseEvent(_release(canvas, 90, 50))
+    assert canvas.get_mask().pixelColor(50, 50).alpha() == 0
+
+
+def test_canvas_shift_toggles_brush_eraser(qtbot) -> None:
+    """Shift while in Brush makes strokes erase (transient modifier)."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.BRUSH)
+    assert canvas._effective_eraser() is False
+
+    # Pressing Shift turns on the transient eraser modifier.
+    shift_press = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Shift,
+        Qt.KeyboardModifier.ShiftModifier,
+    )
+    canvas.keyPressEvent(shift_press)
+    assert canvas.is_eraser_modifier is True
+    assert canvas._effective_eraser() is True
+    # The active tool ACTION stays Brush (modifier is transient).
+    assert canvas.current_tool == ToolMode.BRUSH
+
+    # Releasing Shift restores Brush behavior.
+    shift_release = QKeyEvent(
+        QEvent.Type.KeyRelease,
+        Qt.Key.Key_Shift,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.keyReleaseEvent(shift_release)
+    assert canvas.is_eraser_modifier is False
+    assert canvas._effective_eraser() is False
+
+
+def test_cursor_circle_follows_brush_size(qtbot) -> None:
+    """The cursor_item rect resizes with brush_size and colors by tool."""
+    canvas = _canvas_with_image(qtbot, 100)
+
+    # Default brush color is red (paint mode).
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(80)
+    rect = canvas.cursor_item.rect()
+    assert int(rect.width()) == 80
+    assert int(rect.height()) == 80
+    assert canvas.cursor_item.pen().color().red() == 255
+
+    # Eraser tool -> cyan cursor.
+    canvas.set_tool(ToolMode.ERASER)
+    pen_color = canvas.cursor_item.pen().color()
+    assert pen_color.red() == 0
+    assert pen_color.green() == 212
+    assert pen_color.blue() == 255
+
+
+def test_preview_item_dashed_cyan(qtbot) -> None:
+    """The canvas preview_item pen is QPen(cyan 0,212,255, 2, DashLine)."""
+    canvas = _canvas_with_image(qtbot, 100)
+    pen = canvas.preview_item.pen()
+    c = pen.color()
+    assert c.red() == 0
+    assert c.green() == 212
+    assert c.blue() == 255
+    assert c.alpha() == 200
+    assert pen.style() == Qt.PenStyle.DashLine
+
+
+# --- MainWindow tool wiring tests ---
+
+def test_main_window_tool_shortcuts(qtbot, tmp_path) -> None:
+    """MainWindow installs B/R/L/E/V shortcuts and wires the Tools dock."""
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+
+    # The Tools dock is populated with the ToolsPanel (not the placeholder).
+    assert isinstance(window.dock_tools.widget(), ToolsPanel)
+
+    # Tool actions exist and are enabled when a page is open. Without a page,
+    # Move is enabled (no-op safe) and the painting tools are disabled.
+    assert window.action_tool_move.isEnabled()
+    assert window.action_tool_brush.isEnabled() is False  # no page yet
+
+    # B/R/L/E/V shortcuts are registered on the window.
+    shortcuts = window.findChildren(QShortcut)
+    keys = {s.key().toString().upper() for s in shortcuts}
+    for key in ("B", "R", "L", "E", "V"):
+        assert key in keys, f"missing tool shortcut {key}"
+
+
+def test_canvas_emits_mask_modified(qtbot) -> None:
+    """A completed brush stroke emits mask_modified exactly once (mouseRelease)."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(10)
+
+    emitted: list[None] = []
+    canvas.mask_modified.connect(lambda: emitted.append(None))
+
+    # A full press-move-release.
+    canvas.mousePressEvent(_press(canvas, 10, 10))
+    canvas.mouseMoveEvent(_move(canvas, 90, 10))
+    canvas.mouseMoveEvent(_move(canvas, 50, 10))  # extra move — must NOT emit
+    canvas.mouseReleaseEvent(_release(canvas, 90, 10))
+
+    # Exactly one emission on release (the plan-06 history hook).
+    assert len(emitted) == 1

@@ -38,14 +38,28 @@ from PySide6.QtGui import (
     QImage,
     QImageReader,
     QPainter,
+    QPainterPath,
+    QPen,
     QPixmap,
     QTransform,
 )
 from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
+)
+
+from manga_ai_studio.core.mask_editor import (
+    DEFAULT_BRUSH_SIZE,
+    MASK_PAINT_COLOR,
+    ToolMode,
+    clamp_brush_size,
+    paint_mask_lasso,
+    paint_mask_rect,
+    paint_mask_stroke,
 )
 
 
@@ -98,6 +112,10 @@ class EditorCanvas(QGraphicsView):
 
     # Emitted whenever the zoom factor changes (UI-SPEC surface 1 status bar).
     zoom_changed = Signal(float)
+    # Emitted ONCE per completed mask-editing stroke (mouseRelease), NOT per
+    # mouseMove. The plan-06 history/undo manager consumes this to snapshot the
+    # mask (UI-SPEC surface 8).
+    mask_modified = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -113,6 +131,22 @@ class EditorCanvas(QGraphicsView):
         # mask_item stacks above image_item (added after it).
         self._scene.addItem(self.image_item)
         self._scene.addItem(self.mask_item)
+
+        # Mask-editing overlay items (plan 04). preview_item holds the
+        # dashed-cyan rect/lasso drag preview (z=900); cursor_item is the
+        # brush-size outline circle that follows the pointer (z=1000, above
+        # everything). Reimplemented patterned after MangaCleaner_GPU
+        # canvas.py:31-42 (D-12 reference-only).
+        self.preview_item = QGraphicsPathItem()
+        self.preview_item.setPen(
+            QPen(QColor(0, 212, 255, 200), 2, Qt.PenStyle.DashLine)
+        )
+        self.preview_item.setZValue(900)
+        self._scene.addItem(self.preview_item)
+
+        self.cursor_item = QGraphicsEllipseItem()
+        self.cursor_item.setZValue(1000)
+        self._scene.addItem(self.cursor_item)
 
         # Empty-state overlay (UI-SPEC §Surface 9 / §Copywriting). A top-most
         # text item shown only when no image is loaded.
@@ -161,6 +195,23 @@ class EditorCanvas(QGraphicsView):
         # transparent with no content; set_mask populates + shows it.
         self._mask_visible = False
 
+        # Mask-editing tool state (plan 04). The editable mask QImage is held
+        # in self._mask (distinct from mask_item, the QGraphicsPixmapItem that
+        # DISPLAYS it). current_tool drives the mouse-event dispatch;
+        # is_eraser_modifier is the transient Shift toggle on Brush (UI-SPEC
+        # surface 6 modifier).
+        self.current_tool = ToolMode.MOVE
+        self.brush_size = DEFAULT_BRUSH_SIZE
+        self.is_eraser_modifier = False
+        self._mask: QImage | None = None  # set in set_image / set_mask
+        self._is_painting = False
+        self._last_pt = QPointF()
+        self._start_pt = QPointF()
+        self._lasso_path = QPainterPath()
+        # Cursor follows the pointer even without a held button.
+        self.setMouseTracking(True)
+        self._update_cursor_visuals()
+
         # Show the empty state on a fresh canvas.
         self._update_empty_state()
 
@@ -170,10 +221,14 @@ class EditorCanvas(QGraphicsView):
         self.image_item.setPixmap(pixmap)
         self.setSceneRect(QRectF(pixmap.rect()))
 
-        # Initialize the mask overlay to a transparent image of the same size.
+        # Initialize the editable mask QImage to a transparent image of the
+        # same size (plan 04: self._mask is the painting target).
         mask = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
         mask.fill(Qt.GlobalColor.transparent)
+        self._mask = mask
         self.mask_item.setPixmap(QPixmap.fromImage(mask))
+        self.mask_item.setVisible(True)
+        self._mask_visible = True
 
         self._update_empty_state()
 
@@ -209,6 +264,7 @@ class EditorCanvas(QGraphicsView):
         self.setSceneRect(QRectF())
         self.zoom_factor = 1.0
         self._mask_visible = False
+        self._mask = None
         self.setTransform(QTransform())
         self._update_empty_state()
 
@@ -253,7 +309,12 @@ class EditorCanvas(QGraphicsView):
         out[mask_pixels] = [0, 0, 255, 160]  # BGRA: red @ alpha 160/255~=0.63
         # Attach to a QImage and copy-detach so the array may be GC'd.
         tinted = QImage(out.data, w, h, w * 4, QImage.Format.Format_ARGB32)
-        self.mask_item.setPixmap(QPixmap.fromImage(tinted.copy()))
+        tinted = tinted.copy()
+        # Store as the editable mask (plan 04): subsequent brush/eraser strokes
+        # compose onto this same QImage in place (RESEARCH Pitfall 4 — mutate,
+        # do not reallocate per mouse-move).
+        self._mask = tinted
+        self.mask_item.setPixmap(QPixmap.fromImage(tinted))
         self.mask_item.setVisible(True)
         self._mask_visible = True
 
@@ -264,18 +325,84 @@ class EditorCanvas(QGraphicsView):
         self._mask_visible = visible
 
     def has_mask(self) -> bool:
-        """Return True iff the mask layer has a non-null pixmap."""
-        return not self.mask_item.pixmap().isNull()
+        """Return True iff the editable mask has content (a non-null QImage)."""
+        return self._mask is not None and not self._mask.isNull()
 
     def clear_mask(self) -> None:
-        """Clear the mask overlay to transparent (Edit -> Clear Mask, plan 04)."""
-        if self.image_item.pixmap().isNull():
-            self.mask_item.setPixmap(QPixmap())
+        """Clear the editable mask to transparent (Edit -> Clear Mask, plan 04).
+
+        Mutates ``self._mask`` in place and refreshes the display (no new QImage
+        is allocated — RESEARCH Pitfall 4).
+        """
+        if self._mask is None or self._mask.isNull():
+            return
+        self._mask.fill(Qt.GlobalColor.transparent)
+        self.update_mask_display()
+        self.mask_modified.emit()
+
+    def get_mask(self) -> QImage | None:
+        """Return the editable mask QImage (None when no page is loaded).
+
+        Consumed by plan 05's inpaint dispatch and plan 06's history manager.
+        """
+        return self._mask
+
+    def update_mask_display(self) -> None:
+        """Refresh mask_item from the editable ``self._mask`` QImage.
+
+        Called after every brush/rect/lasso/erase mutation (RESEARCH Pitfall 4
+        — mutate the existing QImage in place, then refresh the pixmap; no new
+        QImage is allocated per mouse-move).
+        """
+        if self._mask is None or self._mask.isNull():
+            return
+        self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
+
+    # ------------------------------------------------------------- tool state
+    def set_tool(self, tool: ToolMode) -> None:
+        """Set the active mask-editing tool (UI-SPEC surface 6).
+
+        Resets the Shift eraser-modifier (it is transient — only Brush+Shift
+        means erase).
+        """
+        self.current_tool = tool
+        self.is_eraser_modifier = False
+        self._update_cursor_visuals()
+
+    def set_brush_size(self, size: int) -> None:
+        """Set the brush size, clamped to [1, 300] (T-01-09)."""
+        self.brush_size = clamp_brush_size(size)
+        self._update_cursor_visuals()
+
+    def _effective_eraser(self) -> bool:
+        """True iff the next stroke should erase.
+
+        The Eraser tool always erases; Brush erases while Shift is held (the
+        transient modifier per UI-SPEC surface 6). Rectangle/Lasso paint/erase
+        based on this flag too (a Shift+Rect drag is an erase-rect).
+        """
+        return self.current_tool == ToolMode.ERASER or (
+            self.current_tool == ToolMode.BRUSH and self.is_eraser_modifier
+        )
+
+    def _update_cursor_visuals(self) -> None:
+        """Set the cursor circle color/size from the active tool + brush size.
+
+        Eraser mode -> cyan (QColor(0,212,255,...)); paint mode -> red
+        (QColor(255,0,0,...)). The rect is centered on the cursor origin
+        (setPos in mouseMoveEvent). Reimplemented patterned after
+        MangaCleaner_GPU canvas.py:54-63 (D-12 reference-only).
+        """
+        if self._effective_eraser():
+            pen = QPen(QColor(0, 212, 255, 200), 1)
+            brush = QBrush(QColor(0, 212, 255, 60))
         else:
-            mask = QImage(self.image_item.pixmap().size(), QImage.Format.Format_ARGB32)
-            mask.fill(Qt.GlobalColor.transparent)
-            self.mask_item.setPixmap(QPixmap.fromImage(mask))
-        self._mask_visible = False
+            pen = QPen(QColor(255, 0, 0, 200), 1)
+            brush = QBrush(QColor(255, 0, 0, 60))
+        self.cursor_item.setPen(pen)
+        self.cursor_item.setBrush(brush)
+        r = self.brush_size / 2
+        self.cursor_item.setRect(-r, -r, self.brush_size, self.brush_size)
 
     # -------------------------------------------------------------- validation
     def validate_image_size(self, width: int, height: int) -> bool:
@@ -392,9 +519,15 @@ class EditorCanvas(QGraphicsView):
         """Alias for :meth:`fit_to_window` (image_viewer.py:160 name)."""
         self.fit_to_window()
 
-    # -------------------------------------------------------------------- pan
+    # ------------------------------------------------------- pan + tool dispatch
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        """Begin pan on middle button OR Space+left button (UI-SPEC surface 2)."""
+        """Route left-button to the active tool; middle/Space+left pans.
+
+        Pan (middle button OR Space+left) takes priority. Otherwise a left
+        click with a non-MOVE tool active (and a mask present) starts a
+        stroke/rect/lasso; everything else falls through to the base
+        QGraphicsView (item selection, scrollbar click, etc.).
+        """
         middle = event.button() == Qt.MouseButton.MiddleButton
         space_left = self._space_held and event.button() == Qt.MouseButton.LeftButton
         if middle or space_left:
@@ -404,10 +537,25 @@ class EditorCanvas(QGraphicsView):
             self._cursor_overridden = True
             event.accept()
             return
+
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.current_tool != ToolMode.MOVE
+            and self._mask is not None
+            and not self._mask.isNull()
+        ):
+            self._begin_paint(event)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        """Scroll by the drag delta while panning."""
+        """Pan when panning; advance the active stroke; else track the cursor.
+
+        The cursor circle follows the pointer in every mode (setMouseTracking
+        is on). While painting, BRUSH/ERASER strokes, RECTANGLE previews, and
+        LASSO path previews are updated here.
+        """
         if self._panning:
             delta = event.position() - self._last_pan_pos
             self._last_pan_pos = event.position()
@@ -419,10 +567,18 @@ class EditorCanvas(QGraphicsView):
             )
             event.accept()
             return
+
+        curr = self._scene_pos(event)
+        self.cursor_item.setPos(curr)
+
+        if self._is_painting:
+            self._advance_paint(curr)
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        """End pan and restore the cursor."""
+        """End pan OR commit the active stroke (emits mask_modified once)."""
         if self._panning and event.button() in (
             Qt.MouseButton.MiddleButton,
             Qt.MouseButton.LeftButton,
@@ -435,10 +591,77 @@ class EditorCanvas(QGraphicsView):
                 self._cursor_overridden = False
             event.accept()
             return
+
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._is_painting
+        ):
+            self._end_paint(event)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
+    # ----------------------------------------------------------- paint helpers
+    def _scene_pos(self, event) -> QPointF:
+        """Map a mouse event's viewport position to scene coordinates.
+
+        ``QGraphicsView.mapToScene`` takes a ``QPoint`` (int), but
+        ``QMouseEvent.position()`` returns a ``QPointF`` (float); convert via
+        ``toPoint()`` then back to ``QPointF`` so painting lands at sub-pixel-
+        accurate scene coordinates regardless of zoom/pan.
+        """
+        return QPointF(self.mapToScene(event.position().toPoint()))
+
+    def _begin_paint(self, event) -> None:
+        """Start a stroke/rect/lasso on left-press (UI-SPEC surface 6)."""
+        self._is_painting = True
+        start = self._scene_pos(event)
+        self._start_pt = start
+        self._last_pt = start
+        eraser = self._effective_eraser()
+        if self.current_tool == ToolMode.LASSO:
+            self._lasso_path = QPainterPath()
+            self._lasso_path.moveTo(start)
+        elif self.current_tool in (ToolMode.BRUSH, ToolMode.ERASER):
+            # A click paints a single dot: stroke from the point to itself
+            # (RoundCap fills the cap disc).
+            paint_mask_stroke(self._mask, start, start, self.brush_size, eraser)
+            self.update_mask_display()
+
+    def _advance_paint(self, curr: QPointF) -> None:
+        """Advance the in-progress stroke/preview (called on mouseMove)."""
+        eraser = self._effective_eraser()
+        if self.current_tool in (ToolMode.BRUSH, ToolMode.ERASER):
+            paint_mask_stroke(self._mask, self._last_pt, curr, self.brush_size, eraser)
+            self._last_pt = curr
+            self.update_mask_display()
+        elif self.current_tool == ToolMode.RECTANGLE:
+            path = QPainterPath()
+            path.addRect(QRectF(self._start_pt, curr).normalized())
+            self.preview_item.setPath(path)
+        elif self.current_tool == ToolMode.LASSO:
+            self._lasso_path.lineTo(curr)
+            self.preview_item.setPath(self._lasso_path)
+
+    def _end_paint(self, event) -> None:
+        """Commit the stroke on left-release (emits mask_modified ONCE)."""
+        curr = self._scene_pos(event)
+        eraser = self._effective_eraser()
+        if self.current_tool == ToolMode.RECTANGLE:
+            paint_mask_rect(self._mask, self._start_pt, curr, eraser)
+            self.update_mask_display()
+        elif self.current_tool == ToolMode.LASSO:
+            self._lasso_path.closeSubpath()
+            paint_mask_lasso(self._mask, self._lasso_path, eraser)
+            self.update_mask_display()
+        self._is_painting = False
+        self.preview_item.setPath(QPainterPath())  # clear the dashed preview
+        # Single emission per completed stroke — the plan-06 history hook.
+        self.mask_modified.emit()
+
+    # ----------------------------------------------------------- keyboard
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        """Track Space for Space+left-drag pan (UI-SPEC surface 2)."""
+        """Track Space for pan; Shift toggles Brush<->Eraser (UI-SPEC surface 6)."""
         if event.key() == Qt.Key.Key_Space and not self._space_held:
             self._space_held = True
             if not self._panning:
@@ -446,10 +669,21 @@ class EditorCanvas(QGraphicsView):
                 self._cursor_overridden = True
             event.accept()
             return
+        # Shift toggles Brush<->Eraser transiently (does not consume the event).
+        # NOTE: Qt delivers the Shift KeyPress with modifiers() == NoModifier
+        # (modifiers reflect state BEFORE the press), so we key off event.key()
+        # rather than event.modifiers() for the Shift press/release detection.
+        if (
+            event.key() == Qt.Key.Key_Shift
+            and self.current_tool == ToolMode.BRUSH
+            and not self.is_eraser_modifier
+        ):
+            self.is_eraser_modifier = True
+            self._update_cursor_visuals()
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:  # noqa: N802
-        """Clear the Space-pan flag on release."""
+        """Clear the Space-pan flag; Shift release restores Brush from Eraser."""
         if event.key() == Qt.Key.Key_Space and self._space_held:
             self._space_held = False
             if not self._panning:
@@ -457,6 +691,15 @@ class EditorCanvas(QGraphicsView):
                 self._cursor_overridden = False
             event.accept()
             return
+        # Shift release ends the transient eraser modifier (only when the
+        # active tool is Brush — see keyPressEvent for the modifiers() caveat).
+        if (
+            event.key() == Qt.Key.Key_Shift
+            and self.current_tool == ToolMode.BRUSH
+            and self.is_eraser_modifier
+        ):
+            self.is_eraser_modifier = False
+            self._update_cursor_visuals()
         super().keyReleaseEvent(event)
 
     # ----------------------------------------------------------- empty state

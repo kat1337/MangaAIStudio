@@ -33,7 +33,7 @@ from pathlib import Path
 from loguru import logger
 from natsort import natsorted
 from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -42,13 +42,16 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QToolBar,
+    QToolButton,
 )
 
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
 from manga_ai_studio.core.image_file import ImageFile
+from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
+from manga_ai_studio.gui.tools_panel import ToolsPanel
 from manga_ai_studio.gui.worker_thread import Worker
 
 # Maximum number of entries kept in the Recent Files submenu (UI-SPEC surface 1).
@@ -95,6 +98,8 @@ class MainWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
         # Wire the plan-03 actions (Detect Text, Toggle Mask Overlay).
         self._wire_detection_actions()
+        # Wire the plan-04 actions (ToolsPanel, tool shortcuts, Clear Mask).
+        self._wire_tool_actions()
 
         # Note: drag-drop is handled by the FileTable sidebar (surface 3/4). The
         # FileTable emits files_dropped/folder_dropped, which this window routes
@@ -121,16 +126,14 @@ class MainWindow(QMainWindow):
         self.dock_pages.setWidget(self.file_table)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_pages)
 
-        # Tools dock -> placeholder widget (real tools panel lands in plan 04).
+        # Tools dock -> ToolsPanel (plan 04: the 5-tool panel + brush slider).
         self.dock_tools = QDockWidget("Tools", self)
         self.dock_tools.setObjectName("dock_tools")
         self.dock_tools.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        tools_placeholder = QLabel("No tools yet — mask tools land in plan 04.")
-        tools_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tools_placeholder.setStyleSheet("color: #9a9aa2;")
-        self.dock_tools.setWidget(tools_placeholder)
+        self.tools_panel = ToolsPanel()
+        self.dock_tools.setWidget(self.tools_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_tools)
 
     # ---------------------------------------------------------------- menus
@@ -261,26 +264,37 @@ class MainWindow(QMainWindow):
         self.action_inpaint.setShortcut(QKeySequence("C"))
         self.action_inpaint.setEnabled(False)
 
-        # Tool selection (plan 04 mask tools — disabled here).
+        # Tool selection (plan 04 mask tools — wired to ToolsPanel).
+        # Shortcuts are installed via QShortcut in _wire_tool_actions so they
+        # don't conflict with the ToolsPanel's own action shortcuts.
+        # Each action's data() carries its ToolMode for toolbar-button sync.
         self.action_tool_move = QAction("Move/Pan", self)
-        self.action_tool_move.setShortcut(QKeySequence("V"))
-        self.action_tool_move.setEnabled(False)
+        self.action_tool_move.setData(ToolMode.MOVE)
+        self.action_tool_move.triggered.connect(lambda: self.set_active_tool(ToolMode.MOVE))
 
         self.action_tool_brush = QAction("Brush", self)
-        self.action_tool_brush.setShortcut(QKeySequence("B"))
-        self.action_tool_brush.setEnabled(False)
+        self.action_tool_brush.setData(ToolMode.BRUSH)
+        self.action_tool_brush.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.BRUSH)
+        )
 
         self.action_tool_rectangle = QAction("Rectangle", self)
-        self.action_tool_rectangle.setShortcut(QKeySequence("R"))
-        self.action_tool_rectangle.setEnabled(False)
+        self.action_tool_rectangle.setData(ToolMode.RECTANGLE)
+        self.action_tool_rectangle.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.RECTANGLE)
+        )
 
         self.action_tool_lasso = QAction("Lasso", self)
-        self.action_tool_lasso.setShortcut(QKeySequence("L"))
-        self.action_tool_lasso.setEnabled(False)
+        self.action_tool_lasso.setData(ToolMode.LASSO)
+        self.action_tool_lasso.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.LASSO)
+        )
 
         self.action_tool_eraser = QAction("Eraser", self)
-        self.action_tool_eraser.setShortcut(QKeySequence("E"))
-        self.action_tool_eraser.setEnabled(False)
+        self.action_tool_eraser.setData(ToolMode.ERASER)
+        self.action_tool_eraser.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.ERASER)
+        )
 
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
@@ -320,6 +334,15 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_zoom_in)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_detect_text)
+        self.toolbar.addSeparator()
+        # Tool-buttons section (plan 04): checkable QToolButtons sharing the
+        # ToolsPanel's QActionGroup so the toolbar and dock stay in sync
+        # (UI-SPEC surface 1 toolbar layout).
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_move))
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_brush))
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_rectangle))
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_lasso))
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_toggle_mask_overlay)
 
@@ -387,10 +410,25 @@ class MainWindow(QMainWindow):
 
         - Detect Text (D): enabled iff a page is open AND no async op running.
         - Toggle Mask Overlay (M): enabled iff a mask exists on the canvas.
+        - Mask tools (V/B/R/L/E): enabled iff a page is open (Move always
+          enabled as a no-op-safe default).
+        - Clear Mask: enabled iff a mask exists.
         """
         page_open = self._current_page_index() is not None
+        has_mask = self.canvas.has_mask()
         self.action_detect_text.setEnabled(page_open and not self._op_running)
-        self.action_toggle_mask_overlay.setEnabled(self.canvas.has_mask())
+        self.action_toggle_mask_overlay.setEnabled(has_mask)
+        self.action_clear_mask.setEnabled(has_mask)
+        # The painting tools are usable only with a page open (they paint on
+        # the mask layer, which is sized to the image). Move stays usable.
+        self.action_tool_move.setEnabled(True)
+        for act in (
+            self.action_tool_brush,
+            self.action_tool_rectangle,
+            self.action_tool_lasso,
+            self.action_tool_eraser,
+        ):
+            act.setEnabled(page_open)
 
     def _current_page_index(self) -> int | None:
         """Return the 0-indexed position of the path shown in the canvas."""
@@ -581,6 +619,107 @@ class MainWindow(QMainWindow):
         method refreshes the enable/disable state now that the canvas exists.
         """
         self._refresh_action_states()
+
+    # ------------------------------------------------------- tool panel (plan 04)
+    def _wire_tool_actions(self) -> None:
+        """Connect the ToolsPanel, tool shortcuts, and Clear Mask.
+
+        - ToolsPanel.tool_changed -> set_active_tool -> canvas.set_tool
+        - ToolsPanel.brush_size_changed -> canvas.set_brush_size
+        - QShortcuts B/R/L/E/V (UI-SPEC §Keyboard) map to the 5 tools.
+        - Clear Mask -> canvas.clear_mask (with the UI-SPEC confirmation in a
+          follow-up; plan 04 wires the action, the destructive confirmation is
+          part of the same flow).
+        """
+        self.tools_panel.tool_changed.connect(self.set_active_tool)
+        self.tools_panel.brush_size_changed.connect(self.canvas.set_brush_size)
+        # Default brush size so the canvas and panel agree on startup.
+        self.canvas.set_brush_size(DEFAULT_BRUSH_SIZE)
+
+        # Keyboard shortcuts (UI-SPEC §Keyboard surface 6). Installed on the
+        # main window so they fire regardless of focus (as long as a child
+        # widget doesn't consume them first). Reimplemented patterned after
+        # MangaCleaner_GPU main_window.py:160-163 (D-12 reference-only).
+        for key, tool in (
+            ("V", ToolMode.MOVE),
+            ("B", ToolMode.BRUSH),
+            ("R", ToolMode.RECTANGLE),
+            ("L", ToolMode.LASSO),
+            ("E", ToolMode.ERASER),
+        ):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(lambda _t=tool: self.set_active_tool(_t))
+
+        # Clear Mask (plan 04) — wired to the canvas.
+        self.action_clear_mask.triggered.connect(self._on_clear_mask)
+        self._refresh_action_states()
+
+    def _make_tool_toolbar_button(self, action: QAction) -> QToolButton:
+        """Build a checkable toolbar tool-button bound to ``action``.
+
+        The buttons share the ToolsPanel's QActionGroup (passed implicitly via
+        the action's group membership) so the toolbar and dock highlight the
+        same active tool.
+        """
+        btn = QToolButton(self.toolbar)
+        btn.setDefaultAction(action)
+        btn.setCheckable(True)
+        btn.setText(action.text())
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        return btn
+
+    def set_active_tool(self, tool: ToolMode) -> None:
+        """Activate ``tool`` everywhere: ToolsPanel, toolbar, and canvas.
+
+        Keeps the Tools dock, the toolbar tool-buttons, and the canvas in sync
+        so a tool selected via menu, shortcut, or panel-button is reflected in
+        all three (UI-SPEC surface 6).
+        """
+        self.canvas.set_tool(tool)
+        # Sync the ToolsPanel (its actions drive the dock highlight) without
+        # re-emitting tool_changed (the canvas is already updated).
+        self.tools_panel.set_active_tool(tool)
+        # Sync the toolbar buttons: the QActionGroup's checked action mirrors
+        # the active tool. Match by data (the ToolMode stored on the action).
+        for btn in self.toolbar.findChildren(QToolButton):
+            act = btn.defaultAction()
+            if act is not None and act.data() == tool:
+                was = btn.blockSignals(True)
+                btn.setChecked(True)
+                btn.blockSignals(was)
+
+    def _on_clear_mask(self) -> None:
+        """Edit -> Clear Mask: clear the canvas mask (destructive, plan 04).
+
+        UI-SPEC §Copywriting mandates a [Cancel][Clear Mask] confirmation
+        before clearing. The canvas.clear_mask call mutates the mask in place
+        and emits mask_modified (consumed by plan 06 history).
+        """
+        if not self.canvas.has_mask():
+            return
+        if not self._confirm_clear_mask():
+            return
+        self.canvas.clear_mask()
+        self._refresh_action_states()
+
+    def _confirm_clear_mask(self) -> bool:
+        """Show the Clear Mask confirmation (UI-SPEC §Copywriting destructive).
+
+        Returns True only on Clear Mask; False on Cancel. Uses custom buttons
+        so the UI-SPEC copy renders exactly (no Clear standard button member).
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Clear Mask")
+        box.setText(
+            "Clear the entire mask on this page? You can undo with mask undo"
+            " (Alt+Z)."
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        clear_btn = box.addButton("Clear Mask", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(clear_btn)
+        box.exec()
+        return box.clickedButton() is clear_btn
 
     def _detection_backend(self) -> str:
         """Return the configured detection backend (D-02), default 'torch'."""
