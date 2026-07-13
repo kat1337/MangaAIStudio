@@ -106,4 +106,4 @@ Last session: 2026-07-13T03:16:07.653Z
 Stopped at: Completed 01-03-PLAN.md (Text Detection Slice); 2 tasks, 39 tests green
 Resume file: None
 
-> **Pause note (2026-07-12, updated):** Execution paused after Wave 2 (01-02) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–2 are complete and committed (22/22 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 3 (01-03, text detection slice — first ML-heavy wave, vendors `comic_text_detector` + `TorchCTDModel` adapter). 4 incomplete plans remain (01-03, 01-04, 01-05, 01-06).
+> **Pause note (2026-07-13, updated):** Execution paused after Wave 3 (01-03) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–3 are complete and committed (39/39 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 4 (01-04, mask editing slice — brush/rect/lasso/erase tools via `core/mask_editor.py` pure functions). 3 incomplete plans remain (01-04, 01-05, 01-06).
