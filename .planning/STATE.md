@@ -111,4 +111,4 @@ Last session: 2026-07-13T18:16:53.839Z
 Stopped at: Completed 01-04-PLAN.md (Mask Editing Slice); 2 tasks, 69 tests green
 Resume file: None
 
-> **Pause note (2026-07-13, updated):** Execution paused after Wave 3 (01-03) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–3 are complete and committed (39/39 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 4 (01-04, mask editing slice — brush/rect/lasso/erase tools via `core/mask_editor.py` pure functions). 3 incomplete plans remain (01-04, 01-05, 01-06).
+> **Pause note (2026-07-13, updated):** Execution paused after Wave 4 (01-04) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–4 are complete and committed (69/69 tests green; CLEAN-01..05 + FLOW-01 done). Next: `/gsd-execute-phase 1` resumes from Wave 5 (01-05, LaMa inpainting slice — `TorchLamaModel(InpaintModel)` adapter wrapping vendored `panelcleaner.inpainting.InpaintingModel`/SimpleLama; async progress + before/after toggle). 2 incomplete plans remain (01-05, 01-06).
