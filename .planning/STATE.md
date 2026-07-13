@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
 status: executing
-stopped_at: Completed 01-03-PLAN.md (Text Detection Slice); 2 tasks, 39 tests green
-last_updated: "2026-07-13T03:16:07.685Z"
-last_activity: 2026-07-12
-last_activity_desc: Plan 01-01 (Walking Skeleton) complete
+stopped_at: Completed 01-04-PLAN.md (Mask Editing Slice); 2 tasks, 69 tests green
+last_updated: "2026-07-13T18:16:53.849Z"
+last_activity: 2026-07-13
+last_activity_desc: Plan 01-04 (Mask Editing Slice) complete
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 01 (cleaning-workspace) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
-Last activity: 2026-07-13 — Plan 01-03 (Text Detection Slice) complete
+Last activity: 2026-07-13 — Plan 01-04 (Mask Editing Slice) complete
 
-Progress: [█████░░░░░] 50%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [█████░░░░░] 50%
 | Phase 01 P01 | 15 | 2 tasks | 29 files |
 | Phase 01 P02 | 12 min | 2 tasks | 7 files |
 | Phase 01 P03 | 39 min | 2 tasks | 29 files |
+| Phase 01 P04 | 22 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-02: FileTable uses QStandardItemModel + QListView (plan contracts QListView.ListMode, not QListWidget); drag-drop handled by sidebar only
 - [Phase ?]: 01-03: TextDetector.__call__ returns VERIFIED 3-tuple (mask, mask_refined, blk_list) at inference.py:210, NOT the 5-tuple in CONTEXT/RESEARCH — orchestrator pattern-mapper correction is authoritative
 - [Phase ?]: 01-03: vendored FULL comic_text_detector tree (incl models/yolov5 + utils/weight_init) because basemodel.py imports them — inference.py unimportable without them
+- [Phase ?]: 01-04: mask_to_numpy_binary thresholds alpha>0 to a true binary 0/255 mask (not raw alpha 160) — the inpaint backend needs a crisp binary; the 160-alpha overlay is a display concern
+- [Phase ?]: 01-04: QActionGroup tool_changed wired via action.toggled(checked=True) not group.triggered — triggered misses programmatic setChecked (set_active_tool); toggled fires for both
+- [Phase ?]: 01-04: QGraphicsView.mapToScene takes QPoint not QPointF (PySide6); _scene_pos helper converts via toPoint(); test events use mapFromScene for viewport coords landing at the desired scene pixel
+- [Phase ?]: 01-04: Shift Brush<->Eraser modifier keyed off event.key()==Key_Shift not event.modifiers() — Qt delivers Shift KeyPress with modifiers()==NoModifier (pre-press state)
 
 ### Pending Todos
 
@@ -102,8 +107,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-13T03:16:07.653Z
-Stopped at: Completed 01-03-PLAN.md (Text Detection Slice); 2 tasks, 39 tests green
+Last session: 2026-07-13T18:16:53.839Z
+Stopped at: Completed 01-04-PLAN.md (Mask Editing Slice); 2 tasks, 69 tests green
 Resume file: None
 
 > **Pause note (2026-07-13, updated):** Execution paused after Wave 3 (01-03) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–3 are complete and committed (39/39 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 4 (01-04, mask editing slice — brush/rect/lasso/erase tools via `core/mask_editor.py` pure functions). 3 incomplete plans remain (01-04, 01-05, 01-06).
