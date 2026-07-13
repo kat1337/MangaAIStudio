@@ -10,5 +10,6 @@ backend modules — all model operations flow through these interfaces (D-03).
 """
 
 from manga_ai_studio.adapters.base import DetectionModel, InpaintModel, OCRModel
+from manga_ai_studio.adapters.factory import backend_factory
 
-__all__ = ["DetectionModel", "OCRModel", "InpaintModel"]
+__all__ = ["DetectionModel", "OCRModel", "InpaintModel", "backend_factory"]
