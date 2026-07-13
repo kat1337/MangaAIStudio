@@ -5,16 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
 status: executing
-stopped_at: Completed 01-02-PLAN.md (Image Viewer Slice); 2 tasks, 22 tests green
-last_updated: "2026-07-12T22:09:26.304Z"
+stopped_at: Completed 01-03-PLAN.md (Text Detection Slice); 2 tasks, 39 tests green
+last_updated: "2026-07-13T03:16:07.685Z"
 last_activity: 2026-07-12
 last_activity_desc: Plan 01-01 (Walking Skeleton) complete
 progress:
-  total_phases: 5
+  total_phases: 1
   completed_phases: 0
   total_plans: 6
-  completed_plans: 2
-  percent: 0
+  completed_plans: 3
 ---
 
 # Project State
@@ -29,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 01 (cleaning-workspace) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
-Last activity: 2026-07-12 — Plan 01-01 (Walking Skeleton) complete
+Last activity: 2026-07-13 — Plan 01-03 (Text Detection Slice) complete
 
-Progress: [██░░░░░░░░] 17%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -61,6 +60,7 @@ Progress: [██░░░░░░░░] 17%
 *Updated after each plan completion*
 | Phase 01 P01 | 15 | 2 tasks | 29 files |
 | Phase 01 P02 | 12 min | 2 tasks | 7 files |
+| Phase 01 P03 | 39 min | 2 tasks | 29 files |
 
 ## Accumulated Context
 
@@ -75,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-01: create_app reuses existing QApplication singleton (avoids Qt singleton guard under pytest-qt / re-entry)
 - [Phase ?]: 01-02: image_files natural-sorted in MainWindow._set_pages to match sidebar display order (index lookups depend on consistency)
 - [Phase ?]: 01-02: FileTable uses QStandardItemModel + QListView (plan contracts QListView.ListMode, not QListWidget); drag-drop handled by sidebar only
+- [Phase ?]: 01-03: TextDetector.__call__ returns VERIFIED 3-tuple (mask, mask_refined, blk_list) at inference.py:210, NOT the 5-tuple in CONTEXT/RESEARCH — orchestrator pattern-mapper correction is authoritative
+- [Phase ?]: 01-03: vendored FULL comic_text_detector tree (incl models/yolov5 + utils/weight_init) because basemodel.py imports them — inference.py unimportable without them
 
 ### Pending Todos
 
@@ -100,8 +102,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-12T22:09:13.010Z
-Stopped at: Completed 01-02-PLAN.md (Image Viewer Slice); 2 tasks, 22 tests green
+Last session: 2026-07-13T03:16:07.653Z
+Stopped at: Completed 01-03-PLAN.md (Text Detection Slice); 2 tasks, 39 tests green
 Resume file: None
 
 > **Pause note (2026-07-12, updated):** Execution paused after Wave 2 (01-02) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–2 are complete and committed (22/22 tests green). Next: `/gsd-execute-phase 1` resumes from Wave 3 (01-03, text detection slice — first ML-heavy wave, vendors `comic_text_detector` + `TorchCTDModel` adapter). 4 incomplete plans remain (01-03, 01-04, 01-05, 01-06).

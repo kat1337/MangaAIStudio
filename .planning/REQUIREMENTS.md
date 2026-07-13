@@ -10,7 +10,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Cleaning
 
 - [x] **CLEAN-01**: User can open a single image or a folder of images and view them on a pannable, zoomable canvas
-- [ ] **CLEAN-02**: User can run heatmap text detection on a page to auto-generate a mask of text regions
+- [x] **CLEAN-02**: User can run heatmap text detection on a page to auto-generate a mask of text regions
 - [ ] **CLEAN-03**: User can paint a mask freehand with a brush tool (adjustable brush size)
 - [ ] **CLEAN-04**: User can paint a mask with rectangle and lasso fill tools
 - [ ] **CLEAN-05**: User can erase parts of the mask (eraser toggle)
@@ -80,7 +80,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | CLEAN-01 | Phase 1 | Complete |
-| CLEAN-02 | Phase 1 | Pending |
+| CLEAN-02 | Phase 1 | Complete |
 | CLEAN-03 | Phase 1 | Pending |
 | CLEAN-04 | Phase 1 | Pending |
 | CLEAN-05 | Phase 1 | Pending |
