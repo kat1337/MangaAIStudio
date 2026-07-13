@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -156,6 +157,10 @@ class EditorCanvas(QGraphicsView):
         self._space_held = False
         self._cursor_overridden = False
 
+        # Mask overlay visibility state (plan 03). The mask_item starts
+        # transparent with no content; set_mask populates + shows it.
+        self._mask_visible = False
+
         # Show the empty state on a fresh canvas.
         self._update_empty_state()
 
@@ -203,8 +208,74 @@ class EditorCanvas(QGraphicsView):
         self.mask_item.setPixmap(QPixmap())
         self.setSceneRect(QRectF())
         self.zoom_factor = 1.0
+        self._mask_visible = False
         self.setTransform(QTransform())
         self._update_empty_state()
+
+    # ------------------------------------------------------------- mask layer
+    def set_mask(self, mask_qimage: QImage) -> None:
+        """Composite a detection mask onto the mask overlay layer.
+
+        The mask ``QImage`` is a grayscale or binary heatmap (H, W) from the
+        detection adapter. This method tints the non-zero regions with the
+        UI-SPEC mask overlay color ``rgba(255, 0, 0, 0.63)``
+        (``QColor(255, 0, 0, 160)`` — 160/255 ~= 0.63) and shows the mask_item
+        (UI-SPEC §Color mask overlay token).
+
+        QImage buffer discipline (RESEARCH Pitfall 2, PATTERNS.md §Shared
+        Pattern 5): ``mask_qimage.copy()`` defensively detaches any numpy
+        buffer the producer attached before reaching this method, and the
+        output tinted array is ``QImage.copy()``-detached before it becomes a
+        pixmap, so the pixel data outlives both source arrays.
+        """
+        # Defensive copy — detach any numpy/shared buffer (RESEARCH Pitfall 2).
+        mask_qimage = mask_qimage.copy()
+        w = mask_qimage.width()
+        h = mask_qimage.height()
+        if w == 0 or h == 0:
+            return
+
+        # Convert to ARGB32 so pixel layout is uniform BGRA in memory (Qt's
+        # native byte order on little-endian: bytes are B, G, R, A).
+        src = mask_qimage.convertToFormat(QImage.Format.Format_ARGB32)
+        # constBits() returns a memoryview in PySide6; materialize to bytes so
+        # numpy can consume it (RESEARCH Pitfall 2 — buffer must outlive the
+        # QImage, and .copy() above already detached the source).
+        arr = np.frombuffer(bytes(src.constBits()), dtype=np.uint8).reshape(h, w, 4)
+        # For a grayscale-converted ARGB32 source the R/G/B channels are equal;
+        # treat any pixel with a non-zero red channel as a mask pixel.
+        mask_pixels = arr[:, :, 2] > 0  # R channel (BGRA byte order)
+
+        # Build the tinted overlay array directly (fast on large pages).
+        # Qt ARGB32 on little-endian stores pixels in BGRA byte order, so the
+        # array indices are [B, G, R, A]. Red overlay = B=0, G=0, R=255, A=160.
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[mask_pixels] = [0, 0, 255, 160]  # BGRA: red @ alpha 160/255~=0.63
+        # Attach to a QImage and copy-detach so the array may be GC'd.
+        tinted = QImage(out.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+        self.mask_item.setPixmap(QPixmap.fromImage(tinted.copy()))
+        self.mask_item.setVisible(True)
+        self._mask_visible = True
+
+    def toggle_mask_overlay(self) -> None:
+        """Flip the mask overlay visibility (View -> Toggle Mask Overlay, M)."""
+        visible = not self.mask_item.isVisible()
+        self.mask_item.setVisible(visible)
+        self._mask_visible = visible
+
+    def has_mask(self) -> bool:
+        """Return True iff the mask layer has a non-null pixmap."""
+        return not self.mask_item.pixmap().isNull()
+
+    def clear_mask(self) -> None:
+        """Clear the mask overlay to transparent (Edit -> Clear Mask, plan 04)."""
+        if self.image_item.pixmap().isNull():
+            self.mask_item.setPixmap(QPixmap())
+        else:
+            mask = QImage(self.image_item.pixmap().size(), QImage.Format.Format_ARGB32)
+            mask.fill(Qt.GlobalColor.transparent)
+            self.mask_item.setPixmap(QPixmap.fromImage(mask))
+        self._mask_visible = False
 
     # -------------------------------------------------------------- validation
     def validate_image_size(self, width: int, height: int) -> bool:

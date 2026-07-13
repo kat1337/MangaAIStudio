@@ -6,7 +6,10 @@ builds a central ``EditorCanvas``, and wires the menu bar / actions. Plan 01
 shipped the File -> Open Image (Ctrl+O) + View -> Fit to Window (Ctrl+0)
 skeleton. Plan 02 adds the full menu bar (File/Edit/View/Tools/Help), the
 single top toolbar, the Pages + Tools docks, the 3-field status bar, the
-FileTable sidebar, the Open Folder workflow, and drag-drop routing.
+FileTable sidebar, the Open Folder workflow, and drag-drop routing. Plan 03
+adds the Tools -> Detect Text (D) async detection workflow: the
+``Worker(QRunnable)`` dispatch, replace-mask confirmation, the ``#7a1f1f``
+error chip, and the mask-overlay toggle (M).
 
 Security:
     - ``open_image`` (plan 01) uses ``QFileDialog.getOpenFileName`` (T-01-01
@@ -15,14 +18,21 @@ Security:
       ``validate_image_path`` (T-01-02 resolve + suffix allowlist) before it
       reaches ``set_image_from_path``, which runs ``validate_image_size``
       (T-01-03 large-image cap).
+    - Detection runs on a QThreadPool worker (T-01-07); the worker touches only
+      numpy/Python and emits signals — all Qt mutation happens in main-thread
+      signal handlers. Model access goes through the adapter only (no torch /
+      TextDetector import here — RESEARCH §Don't Hand-Roll).
+    - WorkerError tracebacks go to loguru, NOT the QMessageBox (T-01-08
+      traceback-leak mitigation): the dialog shows only user-friendly copy.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from loguru import logger
 from natsort import natsorted
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -30,13 +40,16 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QToolBar,
 )
 
+from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
+from manga_ai_studio.gui.worker_thread import Worker
 
 # Maximum number of entries kept in the Recent Files submenu (UI-SPEC surface 1).
 MAX_RECENT_FILES = 8
@@ -63,6 +76,11 @@ class MainWindow(QMainWindow):
         # Track loaded pages + the index of the currently-shown page.
         self.image_files: list[ImageFile] = []
 
+        # Async-op state: True while a detection/inpaint worker is running.
+        # Actions that start an async op are disabled while this is set so the
+        # user cannot start a second model op concurrently (UI-SPEC surface 9).
+        self._op_running = False
+
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
         self._build_menus()
@@ -75,6 +93,8 @@ class MainWindow(QMainWindow):
         self.file_table.folder_dropped.connect(self._on_folder_dropped)
         # Route canvas zoom changes to the status bar center field.
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
+        # Wire the plan-03 actions (Detect Text, Toggle Mask Overlay).
+        self._wire_detection_actions()
 
         # Note: drag-drop is handled by the FileTable sidebar (surface 3/4). The
         # FileTable emits files_dropped/folder_dropped, which this window routes
@@ -197,9 +217,11 @@ class MainWindow(QMainWindow):
         self.action_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
         self.action_zoom_out.triggered.connect(self.canvas.zoom_out)
 
-        # Toggle Mask Overlay (M) — wired in plan 03/04.
+        # Toggle Mask Overlay (M) — wired in plan 03 (mask overlay toggle).
         self.action_toggle_mask_overlay = QAction("Toggle Mask Overlay", self)
         self.action_toggle_mask_overlay.setShortcut(QKeySequence("M"))
+        self.action_toggle_mask_overlay.triggered.connect(self.canvas.toggle_mask_overlay)
+        # Enabled iff a mask exists (updated in _refresh_action_states).
         self.action_toggle_mask_overlay.setEnabled(False)
 
         # Show Original (P) — wired in plan 05.
@@ -227,9 +249,11 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_toggle_tools)
 
     def _build_tools_menu(self) -> None:
-        # Detect Text (D) — disabled until plan 03.
+        # Detect Text (D) — wired in plan 03 (async CTD detection).
         self.action_detect_text = QAction("Detect Text", self)
         self.action_detect_text.setShortcut(QKeySequence("D"))
+        self.action_detect_text.triggered.connect(self.detect_text)
+        # Enabled iff a page is open and no async op is running.
         self.action_detect_text.setEnabled(False)
 
         # Inpaint (C) — disabled until plan 05.
@@ -295,11 +319,13 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_zoom_out)
         self.toolbar.addAction(self.action_zoom_in)
         self.toolbar.addSeparator()
+        self.toolbar.addAction(self.action_detect_text)
+        self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_toggle_mask_overlay)
 
     # ------------------------------------------------------------- status bar
     def _build_status_bar(self) -> None:
-        """3-field status bar (UI-SPEC surface 1): left/center/right."""
+        """3-field status bar (UI-SPEC surface 1): left/center/right + error chip."""
         self.status_bar_left = QLabel("")
         self.status_bar_center = QLabel("")
         self.status_bar_right = QLabel("")
@@ -316,22 +342,55 @@ class MainWindow(QMainWindow):
         ):
             widget.setStyleSheet("color: #e8e8ea; padding: 0 8px;")
 
+        # Persistent error chip (UI-SPEC §Color error banner, surface 9).
+        # Shown on model-load failure; hidden until then. Style mirrors
+        # PanelCleaner's OOM banner (mainwindow_driver.py:2417) lightened to
+        # the UI-SPEC #7a1f1f token.
+        self.error_chip = QLabel("")
+        self.error_chip.setStyleSheet(
+            "background-color: #7a1f1f; color: #ffffff; padding: 2px 8px;"
+            " border-radius: 2px;"
+        )
+        self.error_chip.hide()
+
+        # Thin 3px determinate progress bar (UI-SPEC surface 5/9).
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(3)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.hide()
+
         bar = self.statusBar()
         bar.addWidget(self.status_bar_left, 2)
         bar.addWidget(self.status_bar_center, 3)
+        bar.addWidget(self.progress_bar)
+        bar.addWidget(self.error_chip)
         bar.addPermanentWidget(self.status_bar_right, 1)
 
     def _refresh_status_bar(self) -> None:
-        """Recompute the right field's 'Page {n} / {total}' text."""
+        """Recompute the right field's 'Page {n} / {total}' text + action states."""
         total = len(self.image_files)
         current = self._current_page_index()
         if total == 0:
             self.status_bar_right.setText("")
             self.status_bar_left.setText("No page open")
+            self._refresh_action_states()
             return
         # 1-indexed; current may be None when nothing is selected yet.
         n = (current + 1) if current is not None else 0
         self.status_bar_right.setText(f"Page {n} / {total}" if n else f"Page 0 / {total}")
+        self._refresh_action_states()
+
+    def _refresh_action_states(self) -> None:
+        """Enable/disable actions that depend on page/async-op/mask state.
+
+        - Detect Text (D): enabled iff a page is open AND no async op running.
+        - Toggle Mask Overlay (M): enabled iff a mask exists on the canvas.
+        """
+        page_open = self._current_page_index() is not None
+        self.action_detect_text.setEnabled(page_open and not self._op_running)
+        self.action_toggle_mask_overlay.setEnabled(self.canvas.has_mask())
 
     def _current_page_index(self) -> int | None:
         """Return the 0-indexed position of the path shown in the canvas."""
@@ -512,3 +571,198 @@ class MainWindow(QMainWindow):
     def _on_zoom_changed(self, factor: float) -> None:
         """Update the status bar center field with the current zoom %."""
         self.status_bar_center.setText(f"{factor * 100:.0f}%")
+
+    # ----------------------------------------------------- detection (plan 03)
+    def _wire_detection_actions(self) -> None:
+        """Connect plan-03 actions that need late-bound state.
+
+        The Detect Text (D) and Toggle Mask Overlay (M) actions are created in
+        the menu builders; their ``triggered`` signals are connected there. This
+        method refreshes the enable/disable state now that the canvas exists.
+        """
+        self._refresh_action_states()
+
+    def _detection_backend(self) -> str:
+        """Return the configured detection backend (D-02), default 'torch'."""
+        try:
+            profile = self.profile_manager.config.current_profile
+            # PanelCleaner's TextDetectorConfig has no backend field; the
+            # backend is an application-level concern. Default to torch (D-02).
+            return getattr(profile, "detection_backend", "torch")
+        except AttributeError:
+            return "torch"
+
+    def detect_text(self) -> None:
+        """Run CTD text detection on the current page (Tools -> Detect Text, D).
+
+        Async via ``Worker(QRunnable)`` on the global QThreadPool (RESEARCH
+        Pitfall 3, T-01-07): the worker calls the adapter off the GUI thread;
+        all Qt mutation happens in the main-thread signal handlers. Phase 1
+        uses the D-09b in-process fallback (QThreadPool); the D-07/D-08
+        subprocess split is deferred until a dependency conflict forces it.
+
+        If a mask already exists, the "Replace the current mask" confirmation
+        (UI-SPEC §Copywriting) is shown first.
+        """
+        if self._op_running:
+            return
+        path = self.file_table.current_path()
+        if path is None:
+            return
+
+        # Replace-mask confirmation (UI-SPEC §Copywriting destructive re-detect).
+        if self.canvas.has_mask() and not self._confirm_replace_mask():
+            return
+
+        # Resolve the adapter via the factory (D-02). torch is imported lazily
+        # inside TorchCTDModel.load, so this import does not pull torch here.
+        model = backend_factory("detection", self._detection_backend())
+
+        # Build + dispatch the worker (PATTERNS.md §Shared Pattern 2).
+        worker = Worker(self._run_detection_task, path, model)
+        worker.signals.progress.connect(self._on_detection_progress)
+        worker.signals.result.connect(self._on_detection_finished)
+        worker.signals.error.connect(self._on_detection_error)
+        worker.signals.finished.connect(self._on_detection_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Detecting text\u2026 0%")
+        QThreadPool.globalInstance().start(worker)
+
+    def _run_detection_task(
+        self,
+        image_path: Path,
+        model,
+        progress_callback=None,
+        abort_flag=None,
+    ) -> dict:
+        """Worker task: load image, run detection, return mask + blocks.
+
+        Runs on a QThreadPool thread — touches only numpy/Python and the
+        adapter (T-01-07). Never touches Qt here. The adapter's ``detect``
+        returns ``(mask_refined, blk_list)`` (the 3-tuple unpack lives inside
+        ``TorchCTDModel.detect``).
+
+        ``progress_callback``/``abort_flag`` are auto-injected by ``Worker``
+        (worker_thread.py:97-124).
+        """
+        import cv2  # lazy import — keeps the main thread import-light
+
+        if progress_callback is not None:
+            progress_callback.emit((10, "Loading image\u2026"))
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise FileNotFoundError(f"Could not read image: {image_path}")
+
+        if progress_callback is not None:
+            progress_callback.emit((30, "Loading model\u2026"))
+        # model_path resolution: use the profile's configured path if set,
+        # otherwise let the model_downloader fetch the default (plan 03 relies
+        # on the PanelCleaner default path via model_downloader).
+        model_path = self._resolve_detection_model_path()
+        model.load(model_path, device="auto")
+
+        if progress_callback is not None:
+            progress_callback.emit((50, "Detecting text\u2026"))
+        mask_refined, blk_list = model.detect(image)
+
+        if progress_callback is not None:
+            progress_callback.emit((90, "Compositing mask\u2026"))
+        return {"mask": mask_refined, "blocks": blk_list}
+
+    def _resolve_detection_model_path(self) -> Path:
+        """Return the CTD model path from config, or the PanelCleaner default."""
+        try:
+            from panelcleaner.model_downloader import download_torch_model
+
+            profile = self.profile_manager.config.current_profile
+            configured = profile.text_detector.model_path
+            if configured:
+                return Path(configured)
+            # Default: fetch via model_downloader (sha256-verified, T-01-04).
+            return Path(download_torch_model())
+        except Exception:
+            # Let TorchCTDModel.load surface the FileNotFoundError (T-01-04)
+            # if the model cannot be resolved.
+            return Path("comictextdetector.pt")
+
+    def _on_detection_progress(self, payload) -> None:
+        """Update the status bar + progress bar (UI-SPEC surface 5/9)."""
+        if isinstance(payload, tuple) and len(payload) == 2:
+            percent, message = payload
+        else:
+            return
+        self.progress_bar.setValue(int(percent))
+        self.status_bar_left.setText(f"Detecting text\u2026 {int(percent)}%")
+
+    def _on_detection_finished(self, result) -> None:
+        """Composite the detected mask onto the canvas (main thread only).
+
+        Converts the numpy heatmap (H, W) to a QImage, applies ``.copy()``
+        buffer discipline (RESEARCH Pitfall 2), and hands it to
+        ``EditorCanvas.set_mask`` which tints it with the rgba(255,0,0,0.63)
+        overlay (UI-SPEC §Color).
+        """
+        import numpy as np
+
+        mask = result["mask"]
+        if mask is None:
+            self.status_bar_left.setText("Detection complete (no mask)")
+            return
+        # numpy (H,W) uint8 -> QImage grayscale, copy-detached (Pitfall 2).
+        h, w = mask.shape[:2]
+        qimage = QImage(mask.data, w, h, w, QImage.Format.Format_Grayscale8)
+        self.canvas.set_mask(qimage.copy())
+        self.status_bar_left.setText("Detection complete")
+        self._refresh_action_states()
+
+    def _on_detection_error(self, worker_error) -> None:
+        """Show the model-load error dialog + persistent #7a1f1f error chip.
+
+        The full traceback goes to loguru (T-01-08); the QMessageBox shows only
+        user-friendly copy (UI-SPEC §Copywriting model-load error).
+        """
+        logger.error(f"Detection failed: {worker_error}")
+        self.error_chip.setText("Detection model error")
+        self.error_chip.show()
+        QMessageBox.critical(
+            self,
+            "Couldn't load the detection model.",
+            "Check that the model files exist in the `models/` folder and see"
+            " the log for details.",
+        )
+        self.status_bar_left.setText("Detection failed")
+
+    def _on_detection_cleanup(self, _args) -> None:
+        """Reset the async-op flag + progress UI after the worker finishes."""
+        self._op_running = False
+        self.progress_bar.hide()
+        self._refresh_action_states()
+
+    def _confirm_replace_mask(self) -> bool:
+        """Show the replace-mask confirmation (UI-SPEC §Copywriting).
+
+        Returns True only on Replace; False on Cancel. Caller guards: this is
+        only invoked when ``canvas.has_mask()`` is True.
+
+        Uses custom buttons so the UI-SPEC copy (``[Cancel] [Replace Mask]``)
+        renders exactly — Qt's standard button set has no "Replace" member.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Detect Text")
+        box.setText(
+            "Replace the current mask with a new detection? Your manual edits"
+            " will be lost \u2014 undo is available via mask undo (Alt+Z)."
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        replace_btn = box.addButton("Replace Mask", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(replace_btn)
+        box.exec()
+        return box.clickedButton() is replace_btn
