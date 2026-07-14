@@ -14,7 +14,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **CLEAN-03**: User can paint a mask freehand with a brush tool (adjustable brush size)
 - [x] **CLEAN-04**: User can paint a mask with rectangle and lasso fill tools
 - [x] **CLEAN-05**: User can erase parts of the mask (eraser toggle)
-- [ ] **CLEAN-06**: User can run LaMa inpainting on the mask to remove text and restore the underlying artwork
+- [x] **CLEAN-06**: User can run LaMa inpainting on the mask to remove text and restore the underlying artwork
 
 ### Text/OCR
 
@@ -84,7 +84,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLEAN-03 | Phase 1 | Complete |
 | CLEAN-04 | Phase 1 | Complete |
 | CLEAN-05 | Phase 1 | Complete |
-| CLEAN-06 | Phase 1 | Pending |
+| CLEAN-06 | Phase 1 | Complete |
 | TEXT-01 | Phase 3 | Pending |
 | TEXT-02 | Phase 4 | Pending |
 | TEXT-03 | Phase 3 | Pending |

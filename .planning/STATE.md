@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
 status: executing
-stopped_at: Completed 01-04-PLAN.md (Mask Editing Slice); 2 tasks, 69 tests green
-last_updated: "2026-07-13T18:16:53.849Z"
-last_activity: 2026-07-13
-last_activity_desc: Plan 01-04 (Mask Editing Slice) complete
+stopped_at: Completed 01-05-PLAN.md (LaMa Inpainting Slice); 2 tasks, 88 tests green
+last_updated: "2026-07-12T12:30:00.000Z"
+last_activity: 2026-07-12
+last_activity_desc: Plan 01-05 (LaMa Inpainting Slice) complete
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 01 (cleaning-workspace) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
-Last activity: 2026-07-13 — Plan 01-04 (Mask Editing Slice) complete
+Last activity: 2026-07-12 — Plan 01-05 (LaMa Inpainting Slice) complete
 
-Progress: [███████░░░] 67%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [███████░░░] 67%
 | Phase 01 P02 | 12 min | 2 tasks | 7 files |
 | Phase 01 P03 | 39 min | 2 tasks | 29 files |
 | Phase 01 P04 | 22 min | 2 tasks | 8 files |
+| Phase 01 P05 | ~35 min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,11 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-04: QActionGroup tool_changed wired via action.toggled(checked=True) not group.triggered — triggered misses programmatic setChecked (set_active_tool); toggled fires for both
 - [Phase ?]: 01-04: QGraphicsView.mapToScene takes QPoint not QPointF (PySide6); _scene_pos helper converts via toPoint(); test events use mapFromScene for viewport coords landing at the desired scene pixel
 - [Phase ?]: 01-04: Shift Brush<->Eraser modifier keyed off event.key()==Key_Shift not event.modifiers() — Qt delivers Shift KeyPress with modifiers()==NoModifier (pre-press state)
+- [Phase ?]: 01-05: vendored inpainting.py MINIMALLY (InpaintingModel class only; batch inpaint_page deferred to Phase 2 FLOW-03) — interactive inpainting needs only load + __call__
+- [Phase ?]: 01-05: compute_mask_bbox returns (x,y,w,h) not (x1,y1,x2,y2) — set_image_from_numpy unpacks bbox as (x,y,w,h) for region compositing
+- [Phase ?]: 01-05: added has_mask_content() distinct from has_mask() for the Inpaint gate — running LaMa on an empty/transparent mask is a wasted model load; has_mask() stays True for initialized transparent masks (plan 03/04 semantic preserved)
+- [Phase ?]: 01-05: every numpy<->QImage bridge enforces .copy() detachment (Pitfall 2; MangaCleaner_GPU main_window.py:245 is the buggy reference); test_inpaint_result_display_uses_copy is the regression guard
+- [Phase ?]: 01-05: inpaint is non-destructive (no confirmation dialog); reversibility lives in the image-undo stack via history.push_image_action (plan 06 hook, no-op in Phase 1)
 
 ### Pending Todos
 
@@ -107,8 +113,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-13T18:16:53.839Z
-Stopped at: Completed 01-04-PLAN.md (Mask Editing Slice); 2 tasks, 69 tests green
+Last session: 2026-07-12T12:30:00.000Z
+Stopped at: Completed 01-05-PLAN.md (LaMa Inpainting Slice); 2 tasks, 88 tests green
 Resume file: None
 
-> **Pause note (2026-07-13, updated):** Execution paused after Wave 4 (01-04) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–4 are complete and committed (69/69 tests green; CLEAN-01..05 + FLOW-01 done). Next: `/gsd-execute-phase 1` resumes from Wave 5 (01-05, LaMa inpainting slice — `TorchLamaModel(InpaintModel)` adapter wrapping vendored `panelcleaner.inpainting.InpaintingModel`/SimpleLama; async progress + before/after toggle). 2 incomplete plans remain (01-05, 01-06).
+> **Pause note (2026-07-12, updated):** Plan 01-05 (LaMa Inpainting Slice) complete. Waves 1–5 are committed (88/88 tests green; CLEAN-01..06 + FLOW-01 done). 1 incomplete plan remains: 01-06 (history/undo — the image-patch push call site in `_on_inpaint_finished` is already wired and no-ops until plan 06 instantiates `MainWindow.history`). Next: `/gsd-execute-phase 1` resumes from Wave 6 (01-06).
