@@ -208,6 +208,15 @@ class EditorCanvas(QGraphicsView):
         self._last_pt = QPointF()
         self._start_pt = QPointF()
         self._lasso_path = QPainterPath()
+
+        # Inpaint preview state (plan 05, UI-SPEC surface 7). _original_image_numpy
+        # holds the pre-inpaint image (for the before/after toggle);
+        # _inpainted_qimage is the displayed (inpainted) image; _showing_original
+        # tracks which side of the toggle is currently displayed. All three reset
+        # on set_image/clear (a new page clears the inpaint history).
+        self._original_image_numpy: np.ndarray | None = None
+        self._inpainted_qimage: QImage | None = None
+        self._showing_original = False
         # Cursor follows the pointer even without a held button.
         self.setMouseTracking(True)
         self._update_cursor_visuals()
@@ -229,6 +238,11 @@ class EditorCanvas(QGraphicsView):
         self.mask_item.setPixmap(QPixmap.fromImage(mask))
         self.mask_item.setVisible(True)
         self._mask_visible = True
+
+        # A new page clears the inpaint preview history (plan 05 UI-SPEC surface 7).
+        self._original_image_numpy = None
+        self._inpainted_qimage = None
+        self._showing_original = False
 
         self._update_empty_state()
 
@@ -265,6 +279,9 @@ class EditorCanvas(QGraphicsView):
         self.zoom_factor = 1.0
         self._mask_visible = False
         self._mask = None
+        self._original_image_numpy = None
+        self._inpainted_qimage = None
+        self._showing_original = False
         self.setTransform(QTransform())
         self._update_empty_state()
 
@@ -328,6 +345,25 @@ class EditorCanvas(QGraphicsView):
         """Return True iff the editable mask has content (a non-null QImage)."""
         return self._mask is not None and not self._mask.isNull()
 
+    def has_mask_content(self) -> bool:
+        """Return True iff the mask has any painted (non-transparent) pixels.
+
+        Distinct from :meth:`has_mask` (which is True whenever a mask QImage
+        exists, including the fresh transparent initialization after
+        ``set_image``). Used by plan 05's Inpaint gate: running LaMa on an
+        empty mask is a wasted model load, so the Inpaint action requires
+        actual painted content.
+        """
+        if self._mask is None or self._mask.isNull():
+            return False
+        # Cheap content check: convert to RGBA8888 and scan the alpha channel
+        # for any non-zero pixel. A fully-transparent mask has no content.
+        src = self._mask.convertToFormat(QImage.Format.Format_RGBA8888)
+        arr = np.frombuffer(
+            bytes(src.constBits()), dtype=np.uint8
+        ).reshape(src.height(), src.width(), 4)
+        return bool((arr[:, :, 3] > 0).any())
+
     def clear_mask(self) -> None:
         """Clear the editable mask to transparent (Edit -> Clear Mask, plan 04).
 
@@ -357,6 +393,116 @@ class EditorCanvas(QGraphicsView):
         if self._mask is None or self._mask.isNull():
             return
         self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
+
+    # -------------------------------------------------- inpaint numpy bridge
+    def get_image_numpy(self) -> np.ndarray | None:
+        """Return the displayed image as an ``(H, W, 3)`` uint8 RGB numpy array.
+
+        Consumed by plan 05's inpaint dispatch: the worker thread receives this
+        array (NOT a QImage/QPixmap) and hands it to ``TorchLamaModel.inpaint``
+        (RESEARCH Pitfall 3 — never pass Qt objects into a worker thread).
+
+        Returns None when no image is loaded. Buffer lifetime (RESEARCH Pitfall
+        2, PATTERNS.md §Shared Pattern 5): the trailing ``.copy()`` detaches the
+        array from the QImage buffer before the local ``qimg`` is garbage-
+        collected. ``test_inpaint_result_display_uses_copy`` is the regression
+        guard (mutating the returned array must not change the displayed image).
+        """
+        qpix = self.image_item.pixmap()
+        if qpix.isNull():
+            return None
+        qimg = qpix.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        ptr = qimg.bits()
+        if ptr is None:
+            return None
+        # PySide6's bits() returns a memoryview; materialize to bytes so numpy
+        # can consume it (same workaround as set_mask).
+        arr = np.frombuffer(bytes(ptr), dtype=np.uint8).reshape(
+            qimg.height(), qimg.width(), 3
+        )
+        # MANDATORY .copy() — detach from the QImage buffer before qimg GCs.
+        return arr.copy()
+
+    def set_image_from_numpy(
+        self, rgb: np.ndarray, bbox: tuple[int, int, int, int] | None = None
+    ) -> QImage:
+        """Replace the image layer with ``rgb`` (or composite the ``bbox`` region).
+
+        Used by plan 05's inpaint result display. Input validation (T-01-13):
+        ``rgb`` must be a ``(H, W, 3)`` uint8 array — a malformed worker result
+        raises ValueError instead of constructing a corrupt QImage.
+
+        When ``bbox`` (x, y, w, h) is provided, only that region is composited
+        into the existing image so non-masked pixels are untouched (avoids
+        full-image replacement artifacts); otherwise the whole image is replaced.
+        The original image numpy is captured BEFORE overwriting so the
+        before/after preview toggle works.
+
+        Buffer lifetime (RESEARCH Pitfall 2, PATTERNS.md §Shared Pattern 5): the
+        QImage built from the numpy buffer is ``.copy()``-detached BEFORE
+        storage in image_item. This EXPLICITLY fixes the MangaCleaner_GPU
+        ``main_window.py:245`` bug (which built ``QImage(rgba.data, ...)`` without
+        ``.copy()`` and caused intermittent segfaults). The Pitfall-2 regression
+        guard ``test_inpaint_result_display_uses_copy`` locks this.
+        """
+        if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
+            raise ValueError(
+                f"expected (H,W,3) uint8 RGB array, got shape={rgb.shape} dtype={rgb.dtype}"
+            )
+
+        # Capture the pre-inpaint image for the before/after toggle (once per
+        # inpaint op; a second inpaint extends, not resets, the original).
+        if self._original_image_numpy is None:
+            self._original_image_numpy = self.get_image_numpy()
+
+        full_rgb = rgb
+        if bbox is not None and self._original_image_numpy is not None:
+            # Composite only the bbox region into the existing image numpy.
+            x, y, w, h = bbox
+            base = self._original_image_numpy
+            if base is not None and base.shape[:2] == (rgb.shape[0], rgb.shape[1]):
+                base = base.copy()
+                base[y : y + h, x : x + w] = rgb[y : y + h, x : x + w]
+                full_rgb = base
+
+        h, w = full_rgb.shape[:2]
+        qimg = QImage(full_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        # CRITICAL: .copy() detaches the QImage from the numpy buffer before
+        # storage. Without this the QImage points at a buffer that GCs and
+        # causes intermittent segfaults (RESEARCH Pitfall 2; MangaCleaner_GPU
+        # main_window.py:245 omits this — the buggy reference we do NOT copy).
+        qimg = qimg.copy()
+        self.image_item.setPixmap(QPixmap.fromImage(qimg))
+        if (w, h) != (self.sceneRect().width(), self.sceneRect().height()):
+            self.setSceneRect(QRectF(0, 0, w, h))
+        self._inpainted_qimage = qimg
+        # If currently showing the original preview, the new result replaces the
+        # stored inpainted image but the display stays on original until toggled.
+        return qimg
+
+    def show_original(self, show: bool) -> None:
+        """Toggle between the original (pre-inpaint) and the inpainted image.
+
+        UI-SPEC surface 7 before/after compare: ``show=True`` displays the
+        original, ``show=False`` restores the inpainted result. No-op when the
+        corresponding side is unavailable (no inpaint result yet).
+        """
+        self._showing_original = show
+        if show and self._original_image_numpy is not None:
+            arr = self._original_image_numpy
+            h, w = arr.shape[:2]
+            qimg = QImage(arr.data, w, h, w * 3, QImage.Format.Format_RGB888)
+            # .copy() before display (RESEARCH Pitfall 2 — the original numpy is
+            # held on self, but copy-detach keeps the QImage robust to the array
+            # being replaced by a subsequent inpaint op).
+            qimg = qimg.copy()
+            self.image_item.setPixmap(QPixmap.fromImage(qimg))
+        elif not show and self._inpainted_qimage is not None:
+            self.image_item.setPixmap(QPixmap.fromImage(self._inpainted_qimage))
+
+    def has_inpaint_result(self) -> bool:
+        """Return True iff an inpaint result is stored (drives the preview enable)."""
+        return self._inpainted_qimage is not None
 
     # ------------------------------------------------------------- tool state
     def set_tool(self, tool: ToolMode) -> None:

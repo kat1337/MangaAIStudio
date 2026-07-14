@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from loguru import logger
 from natsort import natsorted
 from PySide6.QtCore import Qt, QThreadPool
@@ -48,7 +49,7 @@ from PySide6.QtWidgets import (
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
 from manga_ai_studio.core.image_file import ImageFile
-from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode
+from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode, mask_to_numpy_binary
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.tools_panel import ToolsPanel
@@ -83,6 +84,11 @@ class MainWindow(QMainWindow):
         # Actions that start an async op are disabled while this is set so the
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
+
+        # Inpaint history hook (plan 06 will wire a real History instance; Phase
+        # 1 keeps this as None so _on_inpaint_finished no-ops the history push).
+        # Referenced explicitly by the plan's <action> for Task 2.
+        self.history = None
 
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
@@ -227,9 +233,12 @@ class MainWindow(QMainWindow):
         # Enabled iff a mask exists (updated in _refresh_action_states).
         self.action_toggle_mask_overlay.setEnabled(False)
 
-        # Show Original (P) — wired in plan 05.
+        # Show Original (P) — wired in plan 05 (sticky before/after preview,
+        # UI-SPEC surface 7). Checkable: toggling calls canvas.show_original.
         self.action_show_original = QAction("Show Original", self)
         self.action_show_original.setShortcut(QKeySequence("P"))
+        self.action_show_original.setCheckable(True)
+        self.action_show_original.toggled.connect(self._on_show_original_toggled)
         self.action_show_original.setEnabled(False)
 
         # Toggle Sidebar / Tools (the docks).
@@ -259,9 +268,12 @@ class MainWindow(QMainWindow):
         # Enabled iff a page is open and no async op is running.
         self.action_detect_text.setEnabled(False)
 
-        # Inpaint (C) — disabled until plan 05.
+        # Inpaint (C) — wired in plan 05 (async LaMa inpainting).
         self.action_inpaint = QAction("Inpaint", self)
         self.action_inpaint.setShortcut(QKeySequence("C"))
+        self.action_inpaint.triggered.connect(self.inpaint)
+        # Enabled iff a page is open AND a mask exists AND no async op is running
+        # (UI-SPEC surface 7; _refresh_action_states gates this).
         self.action_inpaint.setEnabled(False)
 
         # Tool selection (plan 04 mask tools — wired to ToolsPanel).
@@ -334,6 +346,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_zoom_in)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_detect_text)
+        self.toolbar.addAction(self.action_inpaint)
         self.toolbar.addSeparator()
         # Tool-buttons section (plan 04): checkable QToolButtons sharing the
         # ToolsPanel's QActionGroup so the toolbar and dock stay in sync
@@ -345,6 +358,15 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_toggle_mask_overlay)
+        # Preview (hold) button (plan 05, UI-SPEC surface 7): press and hold to
+        # show the original pre-inpaint image; release to return to the result.
+        # Disabled until an inpaint result exists.
+        self.btn_preview_hold = QToolButton(self.toolbar)
+        self.btn_preview_hold.setText("Preview (hold)")
+        self.btn_preview_hold.setEnabled(False)
+        self.btn_preview_hold.pressed.connect(lambda: self.canvas.show_original(True))
+        self.btn_preview_hold.released.connect(lambda: self.canvas.show_original(False))
+        self.toolbar.addWidget(self.btn_preview_hold)
 
     # ------------------------------------------------------------- status bar
     def _build_status_bar(self) -> None:
@@ -409,16 +431,30 @@ class MainWindow(QMainWindow):
         """Enable/disable actions that depend on page/async-op/mask state.
 
         - Detect Text (D): enabled iff a page is open AND no async op running.
+        - Inpaint (C): enabled iff a page is open AND a mask exists AND no async
+          op is running (UI-SPEC surface 7).
         - Toggle Mask Overlay (M): enabled iff a mask exists on the canvas.
+        - Show Original (P) + Preview (hold): enabled iff an inpaint result is
+          stored (UI-SPEC surface 7 before/after compare).
         - Mask tools (V/B/R/L/E): enabled iff a page is open (Move always
           enabled as a no-op-safe default).
         - Clear Mask: enabled iff a mask exists.
         """
         page_open = self._current_page_index() is not None
         has_mask = self.canvas.has_mask()
+        # Inpaint requires actual mask CONTENT (not just an initialized
+        # transparent mask) — running LaMa on an empty mask is a wasted model
+        # load (UI-SPEC surface 7; plan 05 Task 2 behavior).
+        has_mask_content = self.canvas.has_mask_content()
         self.action_detect_text.setEnabled(page_open and not self._op_running)
+        self.action_inpaint.setEnabled(
+            page_open and has_mask_content and not self._op_running
+        )
         self.action_toggle_mask_overlay.setEnabled(has_mask)
         self.action_clear_mask.setEnabled(has_mask)
+        has_inpaint = self.canvas.has_inpaint_result()
+        self.action_show_original.setEnabled(has_inpaint)
+        self.btn_preview_hold.setEnabled(has_inpaint)
         # The painting tools are usable only with a page open (they paint on
         # the mask layer, which is sized to the image). Move stays usable.
         self.action_tool_move.setEnabled(True)
@@ -635,6 +671,11 @@ class MainWindow(QMainWindow):
         self.tools_panel.brush_size_changed.connect(self.canvas.set_brush_size)
         # Default brush size so the canvas and panel agree on startup.
         self.canvas.set_brush_size(DEFAULT_BRUSH_SIZE)
+
+        # Re-evaluate action states whenever the mask changes (plan 05: the
+        # Inpaint (C) action gates on has_mask(), so it must refresh after each
+        # brush/rect/lasso/erase stroke commits — UI-SPEC surface 7).
+        self.canvas.mask_modified.connect(self._refresh_action_states)
 
         # Keyboard shortcuts (UI-SPEC §Keyboard surface 6). Installed on the
         # main window so they fire regardless of focus (as long as a child
@@ -905,3 +946,218 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(replace_btn)
         box.exec()
         return box.clickedButton() is replace_btn
+
+    # --------------------------------------------------------- inpaint (plan 05)
+    def _inpainting_backend(self) -> str:
+        """Return the configured inpainting backend (D-02), default 'torch'.
+
+        Same shape as :meth:`_detection_backend`: the backend is an
+        application-level concern; the profile carries an optional
+        ``inpainting_backend`` attribute. Default torch -> TorchLamaModel
+        (factory.py inpainting/torch branch).
+        """
+        try:
+            profile = self.profile_manager.config.current_profile
+            return getattr(profile, "inpainting_backend", "torch")
+        except AttributeError:
+            return "torch"
+
+    def _resolve_inpainting_model_path(self) -> Path:
+        """Return the LaMa model path from config or the PanelCleaner default.
+
+        Defers to ``panelcleaner.model_downloader.get_inpainting_model_path``
+        (the same resolver InpaintingModel.__init__ uses). If resolution fails,
+        return the conventional ``big-lama.pt`` name and let
+        ``TorchLamaModel.load`` surface the FileNotFoundError (T-01-04b:
+        ``model_path.is_file()`` runs BEFORE SimpleLama is imported).
+        """
+        try:
+            from panelcleaner.model_downloader import get_inpainting_model_path
+
+            profile = self.profile_manager.config.current_profile
+            return Path(get_inpainting_model_path(profile))
+        except Exception:
+            return Path("big-lama.pt")
+
+    def inpaint(self) -> None:
+        """Run LaMa inpainting on the current page + mask (Tools -> Inpaint, C).
+
+        Async via ``Worker(QRunnable)`` (RESEARCH Pitfall 3, T-01-07): the GUI
+        thread extracts the page RGB + the binary mask BEFORE dispatch (so the
+        worker only touches numpy), then the worker calls the LaMa adapter off
+        the GUI thread. All Qt mutation happens in the main-thread signal
+        handlers. Phase 1 uses the D-09b in-process fallback (QThreadPool).
+
+        Non-destructive: unlike :meth:`detect_text` there is no confirmation
+        dialog (UI-SPEC §Copywriting — inpainting is reversible via image undo
+        and never destroys the original).
+        """
+        if self._op_running:
+            return
+        path = self.file_table.current_path()
+        if path is None:
+            return
+        if not self.canvas.has_mask():
+            return
+
+        # Extract the page + mask on the GUI thread (numpy arrays own their
+        # buffers — safe to hand to the worker). Both bridge methods enforce
+        # .copy() detachment (Pitfall 2, PATTERNS.md §Shared Pattern 5).
+        image_rgb = self.canvas.get_image_numpy()
+        mask_binary = mask_to_numpy_binary(self.canvas.get_mask())
+        if image_rgb is None:
+            return
+
+        model_path = self._resolve_inpainting_model_path()
+        model = backend_factory("inpainting", self._inpainting_backend())
+
+        worker = Worker(self._run_inpaint_task, image_rgb, mask_binary, model_path, model)
+        worker.signals.progress.connect(self._on_inpaint_progress)
+        worker.signals.result.connect(self._on_inpaint_finished)
+        worker.signals.error.connect(self._on_inpaint_error)
+        worker.signals.finished.connect(self._on_inpaint_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Inpainting\u2026 0%")
+        QThreadPool.globalInstance().start(worker)
+
+    def _run_inpaint_task(
+        self,
+        image_rgb: np.ndarray,
+        mask_binary: np.ndarray,
+        model_path: Path,
+        model,
+        progress_callback=None,
+        abort_flag=None,
+    ) -> dict:
+        """Worker task: load LaMa, run inpaint, return result + bbox.
+
+        Runs on a QThreadPool thread — touches only numpy/Python and the
+        adapter (T-01-07). Never touches Qt here. The adapter's ``inpaint``
+        returns an ``(H, W, 3)`` uint8 RGB array (the size-reclamp crop is
+        handled inside ``TorchLamaModel.inpaint``).
+        """
+        if progress_callback is not None:
+            progress_callback.emit((20, "Loading model\u2026"))
+        model.load(model_path)
+
+        if progress_callback is not None:
+            progress_callback.emit((50, "Inpainting\u2026"))
+        result_rgb = model.inpaint(image_rgb, mask_binary)
+
+        if progress_callback is not None:
+            progress_callback.emit((90, "Compositing result\u2026"))
+        bbox = compute_mask_bbox(mask_binary)
+        return {"image": result_rgb, "bbox": bbox}
+
+    def _on_inpaint_progress(self, payload) -> None:
+        """Update the status bar + progress bar (UI-SPEC surface 5/9)."""
+        if isinstance(payload, tuple) and len(payload) == 2:
+            percent, _message = payload
+        else:
+            return
+        self.progress_bar.setValue(int(percent))
+        self.status_bar_left.setText(f"Inpainting\u2026 {int(percent)}%")
+
+    def _on_inpaint_finished(self, result) -> None:
+        """Display the inpainted result (main thread only).
+
+        Hands the result RGB + the mask bbox to
+        ``EditorCanvas.set_image_from_numpy``, which captures the pre-inpaint
+        numpy (for the Preview toggle) and composites only the bbox region so
+        unchanged artwork is preserved pixel-exact. QImage ``.copy()`` buffer
+        discipline (RESEARCH Pitfall 2, PATTERNS.md §Shared Pattern 5) is
+        enforced inside the canvas bridge.
+
+        History hook: if ``self.history`` is wired (plan 06), push the bbox
+        patch so image-undo (Ctrl+Z) reverts just the inpainted region. Phase 1
+        no-ops this (``self.history is None``).
+        """
+        result_rgb = result["image"]
+        bbox = result["bbox"]
+        if result_rgb is None:
+            self.status_bar_left.setText("Inpainting complete (no result)")
+            return
+
+        original_patch_numpy = None
+        if self.history is not None and bbox is not None:
+            x1, y1 = int(bbox[0]), int(bbox[1])
+            try:
+                original_patch_numpy = self.canvas.get_image_numpy()
+            except Exception:
+                original_patch_numpy = None
+
+        self.canvas.set_image_from_numpy(result_rgb, bbox=bbox)
+
+        if self.history is not None and bbox is not None and original_patch_numpy is not None:
+            try:
+                self.history.push_image_action(x1, y1, original_patch_numpy)
+            except Exception:
+                pass
+
+        self.status_bar_left.setText("Inpainting complete")
+        self._refresh_action_states()
+
+    def _on_inpaint_error(self, worker_error) -> None:
+        """Show the model-load error dialog + persistent #7a1f1f error chip.
+
+        Mirrors :meth:`_on_detection_error`: the full traceback goes to loguru
+        (T-01-08); the QMessageBox shows only user-friendly copy (UI-SPEC
+        §Copywriting model-load error).
+        """
+        logger.error(f"Inpainting failed: {worker_error}")
+        self._show_error_chip("Inpainting model error")
+        QMessageBox.critical(
+            self,
+            "Couldn't load the inpainting model.",
+            "Check that the model files exist in the `models/` folder and see"
+            " the log for details.",
+        )
+        self.status_bar_left.setText("Inpainting failed")
+
+    def _on_inpaint_cleanup(self, _args) -> None:
+        """Reset the async-op flag + progress UI after the worker finishes."""
+        self._op_running = False
+        self.progress_bar.hide()
+        self._refresh_action_states()
+
+    def _on_show_original_toggled(self, show: bool) -> None:
+        """View -> Show Original (P): toggle the before/after preview.
+
+        ``show=True`` displays the pre-inpaint image (captured by
+        ``EditorCanvas.set_image_from_numpy``); ``show=False`` returns to the
+        inpainted result. Disabled (via :meth:`_refresh_action_states`) until
+        an inpaint result exists.
+        """
+        self.canvas.show_original(show)
+
+    def _show_error_chip(self, text: str) -> None:
+        """Show the persistent #7a1f1f error chip with ``text`` (UI-SPEC §Color)."""
+        self.error_chip.setText(text)
+        self.error_chip.show()
+
+
+def compute_mask_bbox(mask_binary: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Return ``(x, y, w, h)`` of the painted region, or None if empty.
+
+    Used by :meth:`MainWindow._run_inpaint_task` to pass the inpaint bbox to
+    ``EditorCanvas.set_image_from_numpy`` (which unpacks ``(x, y, w, h)`` and
+    composites only that region so unchanged artwork stays pixel-exact).
+    ``np.where`` over the ``(H, W)`` binary mask finds the first/last painted
+    row/column; width/height are derived as (last - first + 1). Pure numpy —
+    safe to call on the worker thread (T-01-07).
+    """
+    if mask_binary is None or mask_binary.size == 0:
+        return None
+    ys, xs = np.where(mask_binary > 0)
+    if ys.size == 0:
+        return None
+    x1, x2 = int(xs[0]), int(xs[-1])
+    y1, y2 = int(ys[0]), int(ys[-1])
+    return x1, y1, x2 - x1 + 1, y2 - y1 + 1
