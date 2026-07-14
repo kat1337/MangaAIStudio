@@ -104,10 +104,18 @@ def test_factory_ocr_not_implemented() -> None:
 
 
 @pytest.mark.unit
-def test_factory_inpainting_torch_not_implemented() -> None:
-    """Inpainting torch adapter lands in plan 05."""
-    with pytest.raises(NotImplementedError, match="plan 05"):
-        backend_factory("inpainting", "torch")
+def test_factory_inpainting_torch_returns_lama_model() -> None:
+    """backend_factory('inpainting', 'torch') returns a TorchLamaModel (plan 05).
+
+    Updated from the plan-03 stub (which raised NotImplementedError) — plan 05
+    implements TorchLamaModel. The factory must now resolve the torch backend
+    to a real adapter instance.
+    """
+    from manga_ai_studio.adapters.torch_impl import TorchLamaModel
+
+    model = backend_factory("inpainting", "torch")
+    assert isinstance(model, TorchLamaModel)
+    assert model.get_info()["backend"] == "torch"
 
 
 @pytest.mark.unit

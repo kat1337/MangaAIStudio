@@ -52,7 +52,12 @@ def backend_factory(kind: str, backend: str) -> DetectionModel | OCRModel | Inpa
 
     if kind == "inpainting":
         if backend == "torch":
-            raise NotImplementedError("Inpainting torch adapter lands in plan 05")
+            # Lazy import: simple_lama_inpainting / torch are only needed when
+            # an inpaint model is actually constructed, not when the factory is
+            # imported (D-07). Plan 05 implements TorchLamaModel.
+            from manga_ai_studio.adapters.torch_impl import TorchLamaModel
+
+            return TorchLamaModel()
         if backend == "onnx":
             from manga_ai_studio.adapters.onnx_impl import OnnxInpaintModel
 
