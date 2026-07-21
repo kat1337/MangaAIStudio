@@ -389,10 +389,80 @@ class EditorCanvas(QGraphicsView):
         Called after every brush/rect/lasso/erase mutation (RESEARCH Pitfall 4
         — mutate the existing QImage in place, then refresh the pixmap; no new
         QImage is allocated per mouse-move).
+
+        Pure display refresh: does NOT emit ``mask_modified`` (the
+        plan-04 stroke-commit emission lives in ``_end_paint`` / ``clear_mask``,
+        and the plan-06 undo-application path must NOT re-push onto the
+        history stack — see :meth:`apply_undo_mask`).
         """
         if self._mask is None or self._mask.isNull():
             return
         self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
+
+    # ------------------------------------------------------- undo application
+    def apply_undo_mask(self, mask_qimage: QImage) -> None:
+        """Restore a mask snapshot from the history (plan 06, UI-SPEC surface 8).
+
+        Replaces the editable ``self._mask`` with ``mask_qimage.copy()`` (the
+        ``.copy()`` detaches from the history's internal copy so subsequent
+        strokes do not mutate the history entry) and refreshes the display
+        WITHOUT emitting ``mask_modified`` — undo must NOT re-push onto the
+        stack (``test_undo_does_not_repush`` is the regression guard;
+        UI-SPEC surface 8 prohibition).
+        """
+        if mask_qimage is None or mask_qimage.isNull():
+            return
+        # Detach from the history's internal list so a stroke mutation of
+        # self._mask cannot corrupt the history entry.
+        self._mask = mask_qimage.copy()
+        self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
+        self.mask_item.setVisible(True)
+        self._mask_visible = True
+
+    def apply_undo_image(self, x: int, y: int, patch_np: np.ndarray) -> None:
+        """Composite a numpy patch into the displayed image (plan 06 undo).
+
+        Used by image-undo/redo (Ctrl+Z/Ctrl+Shift+Z): the popped ``(x, y,
+        patch)`` from :class:`HistoryManager` is written into the current
+        image's ``[y:y+h, x:x+w]`` region. Bounds-checked (T-01-15): a patch
+        that extends beyond the current image is clipped to the image rect;
+        an empty/zero-size patch is a no-op.
+
+        Buffer lifetime (RESEARCH Pitfall 2): the patch is written into the
+        ``set_image_from_numpy``-built QImage, which is ``.copy()``-detached
+        before storage (Pitfall-2 guard ``test_inpaint_result_display_uses_copy``
+        locks this on the display path).
+
+        Does NOT emit ``mask_modified`` (image undo is unrelated to the mask
+        signal — UI-SPEC surface 8).
+        """
+        if patch_np is None:
+            return
+        current = self.get_image_numpy()
+        if current is None:
+            return
+        h_img, w_img = current.shape[:2]
+        ph, pw = patch_np.shape[:2]
+        if ph == 0 or pw == 0:
+            return
+        # Bounds check (T-01-15): clip the patch + destination rect to the
+        # current image so a stale history entry after a crop cannot corrupt
+        # the image array (a Phase 5 concern; defensive now).
+        x0 = max(0, int(x))
+        y0 = max(0, int(y))
+        x1 = min(w_img, x0 + pw)
+        y1 = min(h_img, y0 + ph)
+        if x1 <= x0 or y1 <= y0:
+            return  # fully out of bounds — no-op
+        # Source sub-rect matching the clipped destination.
+        sx0 = x0 - int(x)
+        sy0 = y0 - int(y)
+        sub = patch_np[sy0 : sy0 + (y1 - y0), sx0 : sx0 + (x1 - x0)]
+        current[y0:y1, x0:x1] = sub
+        # set_image_from_numpy replaces the whole image; pass no bbox so the
+        # full updated numpy is stored (the .copy() discipline is inside that
+        # method).
+        self.set_image_from_numpy(current)
 
     # -------------------------------------------------- inpaint numpy bridge
     def get_image_numpy(self) -> np.ndarray | None:

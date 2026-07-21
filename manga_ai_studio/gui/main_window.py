@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
+from manga_ai_studio.core.history_manager import HistoryManager
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode, mask_to_numpy_binary
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
@@ -85,10 +86,9 @@ class MainWindow(QMainWindow):
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
 
-        # Inpaint history hook (plan 06 will wire a real History instance; Phase
-        # 1 keeps this as None so _on_inpaint_finished no-ops the history push).
-        # Referenced explicitly by the plan's <action> for Task 2.
-        self.history = None
+        # Inpaint history hook (plan 06 wires the real HistoryManager here;
+        # _on_inpaint_finished activates the push_image_action call site).
+        self.history = HistoryManager(limit=20)
 
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
         self._wire_detection_actions()
         # Wire the plan-04 actions (ToolsPanel, tool shortcuts, Clear Mask).
         self._wire_tool_actions()
+        # Wire the plan-06 actions (HistoryManager push hook + the four
+        # undo/redo handlers + shortcuts + button-state refresh).
+        self._wire_history_actions()
 
         # Note: drag-drop is handled by the FileTable sidebar (surface 3/4). The
         # FileTable emits files_dropped/folder_dropped, which this window routes
@@ -181,7 +184,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_quit)
 
     def _build_edit_menu(self) -> None:
-        # Plan 06 undo/redo placeholders — disabled until history lands.
+        # Plan 06 undo/redo actions — disabled until their stack has content
+        # (refreshed in _update_undo_redo_actions). Shortcuts are also installed
+        # as QShortcut in _wire_history_actions so they fire regardless of focus
+        # (MangaCleaner_GPU main_window.py:168-171 pattern, reimplemented).
         self.action_undo_image = QAction("Undo Image", self)
         self.action_undo_image.setShortcut(QKeySequence("Ctrl+Z"))
         self.action_undo_image.setEnabled(False)
@@ -356,6 +362,21 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_rectangle))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_lasso))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
+        # Undo/redo two-pairs-with-divider section (plan 06, UI-SPEC surface 8):
+        # [Undo Image][Redo Image] ‖ [Undo Mask][Redo Mask]. Each action carries
+        # its shortcut in the tooltip. The two addSeparator() calls flank the
+        # section; the inner addSeparator() divides the image pair from the mask
+        # pair (the contract's "two pairs separated by a divider").
+        self.toolbar.addSeparator()
+        self.action_undo_image.setToolTip("Undo Image (Ctrl+Z)")
+        self.action_redo_image.setToolTip("Redo Image (Ctrl+Shift+Z)")
+        self.action_undo_mask.setToolTip("Undo Mask (Alt+Z)")
+        self.action_redo_mask.setToolTip("Redo Mask (Alt+Shift+Z)")
+        self.toolbar.addAction(self.action_undo_image)
+        self.toolbar.addAction(self.action_redo_image)
+        self.toolbar.addSeparator()  # the divider between the two pairs
+        self.toolbar.addAction(self.action_undo_mask)
+        self.toolbar.addAction(self.action_redo_mask)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_toggle_mask_overlay)
         # Preview (hold) button (plan 05, UI-SPEC surface 7): press and hold to
@@ -539,6 +560,11 @@ class MainWindow(QMainWindow):
 
     def on_page_selected(self, path: Path) -> None:
         """Load ``path`` into the canvas and sync window title + status bar."""
+        # Reset the history (plan 06, UI-SPEC surface 8): a fresh HistoryManager
+        # per page keeps undo from crossing page boundaries
+        # (test_page_change_resets_history). MangaCleaner_GPU main_window.py:347
+        # pattern (reimplemented).
+        self.reset_history()
         if not self.canvas.set_image_from_path(path):
             # UI-SPEC §Copywriting "file unreadable" dialog.
             QMessageBox.warning(
@@ -694,6 +720,160 @@ class MainWindow(QMainWindow):
         # Clear Mask (plan 04) — wired to the canvas.
         self.action_clear_mask.triggered.connect(self._on_clear_mask)
         self._refresh_action_states()
+
+    # ------------------------------------------------------ history (plan 06)
+    def _wire_history_actions(self) -> None:
+        """Connect the HistoryManager + the four undo/redo actions + shortcuts.
+
+        Reimplemented patterned after MangaCleaner_GPU ``main_window.py:110``
+        (mask_changed -> push_mask_state), ``168-171`` (QShortcut Ctrl+Z /
+        Ctrl+Shift+Z / Alt+Z / Alt+Shift+Z), and ``204-228`` (the four
+        on_undo_image/on_redo_image/on_undo_mask/on_redo_mask handlers). D-12
+        reference-only.
+
+        The mask push hook: ``canvas.mask_modified`` (plan 04, once per
+        completed stroke) triggers ``_on_mask_modified`` which pushes a
+        ``.copy()`` of the current mask onto the mask undo stack. This is the
+        ONLY mask push path; undo application (``canvas.apply_undo_mask``)
+        bypasses ``mask_modified`` entirely so undo does not re-push
+        (``test_undo_does_not_repush`` regression guard; UI-SPEC surface 8
+        prohibition).
+        """
+        # Mask push hook: plan-04 mask_modified -> push a .copy() of the mask.
+        self.canvas.mask_modified.connect(self._on_mask_modified)
+
+        # Edit-menu actions -> the four handlers.
+        self.action_undo_image.triggered.connect(self.on_undo_image)
+        self.action_redo_image.triggered.connect(self.on_redo_image)
+        self.action_undo_mask.triggered.connect(self.on_undo_mask)
+        self.action_redo_mask.triggered.connect(self.on_redo_mask)
+
+        # Application-wide QShortcuts (MangaCleaner_GPU main_window.py:168-171
+        # pattern, reimplemented). The Edit-menu action shortcuts may be
+        # shadowed by the canvas's keyPressEvent when the canvas has focus; the
+        # QShortcut on the MainWindow is the robust path.
+        for keys, slot in (
+            (QKeySequence("Ctrl+Z"), self.on_undo_image),
+            (QKeySequence("Ctrl+Shift+Z"), self.on_redo_image),
+            (QKeySequence("Alt+Z"), self.on_undo_mask),
+            (QKeySequence("Alt+Shift+Z"), self.on_redo_mask),
+        ):
+            sc = QShortcut(keys, self)
+            sc.activated.connect(slot)
+
+        self._update_undo_redo_actions()
+
+    def reset_history(self) -> None:
+        """Replace the HistoryManager with a fresh instance.
+
+        Called on page change (``on_page_selected``) so undo never crosses
+        page boundaries (UI-SPEC surface 8; MangaCleaner_GPU
+        main_window.py:347 pattern — ``self.history = HistoryManager(...)`` on
+        file open). Also refreshes the undo/redo button enable state.
+        """
+        self.history = HistoryManager(limit=20)
+        self._update_undo_redo_actions()
+
+    def _on_mask_modified(self) -> None:
+        """Mask push hook: a stroke committed -> snapshot the current mask.
+
+        ``push_mask_state`` ``.copy()``-detaches internally (Pitfall 2), so
+        passing the live ``canvas.get_mask()`` here is safe. The hook is the
+        ONLY mask push path; ``on_undo_mask`` applies snapshots via
+        ``canvas.apply_undo_mask`` (no re-emission).
+        """
+        if self.history is None or not self.canvas.has_mask():
+            return
+        self.history.push_mask_state(self.canvas.get_mask())
+        self._update_undo_redo_actions()
+
+    def on_undo_mask(self) -> None:
+        """Alt+Z — pop the previous mask snapshot and apply it.
+
+        ``pop_mask_undo`` stashes the current mask into the redo branch and
+        returns a ``.copy()``-detached snapshot; ``canvas.apply_undo_mask``
+        replaces the editable mask WITHOUT emitting ``mask_modified`` (no
+        re-push). Reimplemented patterned after MangaCleaner_GPU
+        ``main_window.py:215-219``.
+        """
+        if self.history is None:
+            return
+        current = self.canvas.get_mask()
+        if current is None:
+            return
+        prev = self.history.pop_mask_undo(current)
+        if prev is not None:
+            self.canvas.apply_undo_mask(prev)
+        self._update_undo_redo_actions()
+
+    def on_redo_mask(self) -> None:
+        """Alt+Shift+Z — replay a previously-undone mask snapshot."""
+        if self.history is None:
+            return
+        current = self.canvas.get_mask()
+        if current is None:
+            return
+        nxt = self.history.pop_mask_redo(current)
+        if nxt is not None:
+            self.canvas.apply_undo_mask(nxt)
+        self._update_undo_redo_actions()
+
+    def on_undo_image(self) -> None:
+        """Ctrl+Z — pop the previous image patch and composite it into the canvas.
+
+        ``pop_image_undo`` swaps the current image's region into the redo branch
+        and returns a ``.copy()``-detached ``(x, y, patch)``; the patch is the
+        pre-inpaint content for that region. ``canvas.apply_undo_image`` writes
+        it back into the displayed image. Reimplemented patterned after
+        MangaCleaner_GPU ``main_window.py:204-208``.
+        """
+        if self.history is None:
+            return
+        current_img = self.canvas.get_image_numpy()
+        if current_img is None:
+            return
+        result = self.history.pop_image_undo(current_img)
+        if result is not None:
+            x, y, patch = result
+            self.canvas.apply_undo_image(x, y, patch)
+        self._update_undo_redo_actions()
+
+    def on_redo_image(self) -> None:
+        """Ctrl+Shift+Z — re-apply a previously-undone image patch."""
+        if self.history is None:
+            return
+        current_img = self.canvas.get_image_numpy()
+        if current_img is None:
+            return
+        result = self.history.pop_image_redo(current_img)
+        if result is not None:
+            x, y, patch = result
+            self.canvas.apply_undo_image(x, y, patch)
+        self._update_undo_redo_actions()
+
+    def _update_undo_redo_actions(self) -> None:
+        """Enable/disable the four undo/redo actions by stack emptiness.
+
+        Each action is enabled iff (a) a page is open AND (b) the matching
+        ``can_*`` flag is True. Called after every push/pop and on page change
+        (UI-SPEC surface 8: each button disabled when its stack is empty).
+        """
+        if not hasattr(self, "action_undo_image"):
+            return  # not yet built (early init)
+        has_page = self._current_page_index() is not None
+        history_ready = self.history is not None
+        self.action_undo_mask.setEnabled(
+            has_page and history_ready and self.history.can_undo_mask()
+        )
+        self.action_redo_mask.setEnabled(
+            has_page and history_ready and self.history.can_redo_mask()
+        )
+        self.action_undo_image.setEnabled(
+            has_page and history_ready and self.history.can_undo_image()
+        )
+        self.action_redo_image.setEnabled(
+            has_page and history_ready and self.history.can_redo_image()
+        )
 
     def _make_tool_toolbar_button(self, action: QAction) -> QToolButton:
         """Build a checkable toolbar tool-button bound to ``action``.

@@ -10,10 +10,13 @@ caller's QImage. Marked ``@pytest.mark.unit`` (no torch, no display beyond the
 offscreen Qt init).
 
 Plan 06 Task 2 ADDS the GUI wiring tests (test_mask_modified_pushes_to_history,
-test_undo_mask_applies_snapshot, etc.) to this same file.
+test_undo_mask_applies_snapshot, etc.) to this same file — they instantiate a
+real MainWindow and exercise the canvas/main_window history wiring.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -21,12 +24,15 @@ pytest.importorskip("PySide6")
 
 import numpy as np  # noqa: E402
 from PySide6.QtCore import QPointF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
 
+from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.history_manager import HistoryManager  # noqa: E402
 from manga_ai_studio.core.mask_editor import (  # noqa: E402
     paint_mask_stroke,
 )
+from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
+from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 
 
 def _transparent_mask(size: int = 64) -> QImage:
@@ -337,3 +343,278 @@ def test_can_undo_flags() -> None:
     history.pop_image_undo(current)
     assert not history.can_undo_image()
     assert history.can_redo_image()
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — GUI wiring (MainWindow + EditorCanvas + HistoryManager)
+# ---------------------------------------------------------------------------
+
+
+def _make_window(qtbot, tmp_path) -> MainWindow:
+    """Build a MainWindow wired to a ProfileManager in tmp_path."""
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    return window
+
+
+def _open_page(window: MainWindow, tmp_path: Path, size: int = 32) -> Path:
+    """Open a solid-white page so the canvas has an image + initialized mask."""
+    img_path = tmp_path / "page.png"
+    img = QImage(size, size, QImage.Format.Format_RGB32)
+    img.fill(QColor(255, 255, 255))
+    img.save(str(img_path))
+    window._open_single_image(img_path)
+    return img_path
+
+
+def _paint_brush_dot(canvas: EditorCanvas, x: int, y: int, size: int = 8) -> None:
+    """Paint a brush dot at scene (x, y) directly via paint_mask_stroke.
+
+    Bypasses the mouse-event path (which would also fire — we want a direct,
+    deterministic mutation followed by an explicit mask_modified emission so
+    the MainWindow._on_mask_modified hook fires).
+    """
+    mask = canvas.get_mask()
+    assert mask is not None
+    p = QPointF(x, y)
+    paint_mask_stroke(mask, p, p, size, eraser=False)
+    canvas.update_mask_display()
+    canvas.mask_modified.emit()
+
+
+@pytest.mark.gui
+def test_mask_modified_pushes_to_history(qtbot, tmp_path) -> None:
+    """A completed brush stroke pushes a snapshot onto the mask undo stack."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+    assert not window.history.can_undo_mask()
+
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+    assert window.history.can_undo_mask()
+
+    _paint_brush_dot(window.canvas, 20, 20, size=8)
+    _paint_brush_dot(window.canvas, 5, 5, size=8)
+    # After 3 strokes the undo stack holds 3 snapshots.
+    assert window.history.can_undo_mask()
+
+
+@pytest.mark.gui
+def test_undo_mask_applies_snapshot(qtbot, tmp_path) -> None:
+    """Alt+Z applies the prior mask snapshot; a 3rd undo is a no-op."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+
+    # Paint 2 distinct strokes; capture the mask state after each.
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+    state_after_1 = window.canvas.get_mask().copy()
+    _paint_brush_dot(window.canvas, 20, 20, size=8)
+
+    # Undo once: the mask should now match state_after_1 (the 2nd stroke gone).
+    window.on_undo_mask()
+    cur = window.canvas.get_mask()
+    assert cur is not None
+    assert cur.pixelColor(20, 20).alpha() == state_after_1.pixelColor(20, 20).alpha()
+
+    # Undo again: should be transparent (the pre-stroke state).
+    window.on_undo_mask()
+    cur = window.canvas.get_mask()
+    assert cur is not None
+    assert cur.pixelColor(10, 10).alpha() == 0
+
+    # 3rd undo: no-op (stack empty + button disabled).
+    window.on_undo_mask()
+    assert not window.history.can_undo_mask()
+
+
+@pytest.mark.gui
+def test_redo_mask_replays(qtbot, tmp_path) -> None:
+    """After 2 undos, Alt+Shift+Z replays strokes; a 3rd redo is a no-op."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+    _paint_brush_dot(window.canvas, 20, 20, size=8)
+
+    window.on_undo_mask()
+    window.on_undo_mask()
+    assert window.history.can_redo_mask()
+
+    # Redo: 1st replay returns the 1st-pushed state's mask (transparent),
+    # 2nd replay returns the 1st-stroke mask, 3rd is a no-op.
+    window.on_redo_mask()
+    assert window.history.can_redo_mask()
+    window.on_redo_mask()
+    assert not window.history.can_redo_mask()
+
+    # 3rd redo is a no-op.
+    window.on_redo_mask()
+    assert not window.history.can_redo_mask()
+
+
+@pytest.mark.gui
+def test_undo_image_applies_patch(qtbot, tmp_path) -> None:
+    """Ctrl+Z restores the pre-inpaint image region."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=16)
+
+    # Simulate an inpaint: capture the pre-edit patch, then push it.
+    pre_patch = window.canvas.get_image_numpy()[2:6, 2:6].copy()
+    window.history.push_image_action(2, 2, pre_patch)
+    assert window.history.can_undo_image()
+
+    # Modify the canvas image's region (simulating the inpaint).
+    current = window.canvas.get_image_numpy()
+    current[2:6, 2:6] = 50
+    window.canvas.set_image_from_numpy(current)
+
+    # Undo: the region should be restored to pre_patch (white = 255).
+    window.on_undo_image()
+    restored = window.canvas.get_image_numpy()
+    assert np.array_equal(restored[2:6, 2:6], pre_patch)
+    assert not window.history.can_undo_image()
+
+
+@pytest.mark.gui
+def test_redo_image_replays(qtbot, tmp_path) -> None:
+    """After an image undo, Ctrl+Shift+Z re-applies the inpainted patch."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=16)
+
+    pre_patch = window.canvas.get_image_numpy()[2:6, 2:6].copy()
+    window.history.push_image_action(2, 2, pre_patch)
+
+    current = window.canvas.get_image_numpy()
+    current[2:6, 2:6] = 50
+    window.canvas.set_image_from_numpy(current)
+
+    window.on_undo_image()
+    assert window.history.can_redo_image()
+
+    # Redo: the region should return to value 50 (the post-edit state).
+    window.on_redo_image()
+    after_redo = window.canvas.get_image_numpy()
+    assert np.all(after_redo[2:6, 2:6] == 50)
+    assert not window.history.can_redo_image()
+
+
+@pytest.mark.gui
+def test_new_edit_clears_redo(qtbot, tmp_path) -> None:
+    """A new mask edit after an undo clears the redo branch."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+    _paint_brush_dot(window.canvas, 20, 20, size=8)
+
+    window.on_undo_mask()
+    assert window.history.can_redo_mask()
+
+    # Paint a new stroke — the redo branch must clear.
+    _paint_brush_dot(window.canvas, 5, 5, size=8)
+    assert not window.history.can_redo_mask()
+
+
+@pytest.mark.gui
+def test_toolbar_two_pairs_with_divider(qtbot, tmp_path) -> None:
+    """The toolbar shows [Undo Image][Redo Image] ‖ [Undo Mask][Redo Mask]."""
+    window = _make_window(qtbot, tmp_path)
+    # Collect the toolbar's actions in order.
+    actions = window.toolbar.actions()
+
+    # Find indices of the four undo/redo actions.
+    idx_undo_img = actions.index(window.action_undo_image)
+    idx_redo_img = actions.index(window.action_redo_image)
+    idx_undo_mask = actions.index(window.action_undo_mask)
+    idx_redo_mask = actions.index(window.action_redo_mask)
+
+    # Image pair comes before mask pair.
+    assert idx_undo_img < idx_redo_img < idx_undo_mask < idx_redo_mask
+
+    # The separator (a QAction with isSeparator() True) between the two pairs
+    # lives between redo_image and undo_mask. Walk the actions list and verify
+    # there is at least one separator strictly between idx_redo_img and
+    # idx_undo_mask.
+    between = actions[idx_redo_img + 1 : idx_undo_mask]
+    assert any(a.isSeparator() for a in between), (
+        "no separator between the image pair and the mask pair"
+    )
+
+
+@pytest.mark.gui
+def test_buttons_disabled_when_stack_empty(qtbot, tmp_path) -> None:
+    """With empty stacks all four undo/redo actions are disabled."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=16)
+
+    assert not window.action_undo_mask.isEnabled()
+    assert not window.action_redo_mask.isEnabled()
+    assert not window.action_undo_image.isEnabled()
+    assert not window.action_redo_image.isEnabled()
+
+    # Paint a stroke -> Undo Mask enables.
+    _paint_brush_dot(window.canvas, 8, 8, size=6)
+    assert window.action_undo_mask.isEnabled()
+    assert not window.action_redo_mask.isEnabled()
+
+    # Undo -> Redo Mask enables, Undo Mask disables.
+    window.on_undo_mask()
+    assert not window.action_undo_mask.isEnabled()
+    assert window.action_redo_mask.isEnabled()
+
+
+@pytest.mark.gui
+def test_page_change_resets_history(qtbot, tmp_path) -> None:
+    """Selecting a different page resets the HistoryManager."""
+    window = _make_window(qtbot, tmp_path)
+    # Open two pages.
+    p1 = tmp_path / "page1.png"
+    p2 = tmp_path / "page2.png"
+    for p, fill in ((p1, QColor(255, 255, 255)), (p2, QColor(200, 200, 200))):
+        img = QImage(32, 32, QImage.Format.Format_RGB32)
+        img.fill(fill)
+        img.save(str(p))
+    window._set_pages([p1, p2])
+
+    # Paint on page 1.
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+    assert window.history.can_undo_mask()
+
+    # Switch to page 2 — history resets.
+    window.on_page_selected(p2)
+    assert not window.history.can_undo_mask()
+    assert not window.history.can_redo_mask()
+
+
+@pytest.mark.gui
+def test_shortcuts_wired(qtbot, tmp_path) -> None:
+    """Ctrl+Z / Ctrl+Shift+Z / Alt+Z / Alt+Shift+Z QShortcuts exist."""
+    from PySide6.QtGui import QShortcut
+
+    window = _make_window(qtbot, tmp_path)
+    # Collect all QShortcut children of the MainWindow.
+    shortcuts = window.findChildren(QShortcut)
+    key_strings = {s.key().toString() for s in shortcuts}
+    assert "Ctrl+Z" in key_strings
+    assert "Ctrl+Shift+Z" in key_strings
+    assert "Alt+Z" in key_strings
+    assert "Alt+Shift+Z" in key_strings
+
+
+@pytest.mark.gui
+def test_undo_does_not_repush(qtbot, tmp_path) -> None:
+    """apply_undo_mask does NOT emit mask_modified (no infinite loop)."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+    _paint_brush_dot(window.canvas, 10, 10, size=8)
+
+    # The undo stack should have exactly 1 entry now.
+    assert window.history.can_undo_mask()
+
+    # Apply undo; assert mask_modified is NOT emitted.
+    with qtbot.assertNotEmitted(window.canvas.mask_modified):
+        window.on_undo_mask()
+
+    # The undo stack should now be EMPTY (the undo popped the entry; the
+    # current was stashed into redo; no re-push happened).
+    assert not window.history.can_undo_mask()
+    assert window.history.can_redo_mask()
+
