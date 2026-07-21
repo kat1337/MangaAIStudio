@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Workflow
 
 - [x] **FLOW-01**: User can import a folder of images and navigate between pages via a file-list sidebar (following the PanelCleaner/Poricom sidebar layout approach)
-- [ ] **FLOW-02**: User can undo/redo image (inpainting) and mask (painting) operations via separate stacks, each with redo
+- [x] **FLOW-02**: User can undo/redo image (inpainting) and mask (painting) operations via separate stacks, each with redo
 - [ ] **FLOW-03**: User can batch-process a chapter folder through the cleaning pipeline (detect → clean → save) with a progress indicator
 
 ## v2 Requirements
@@ -95,7 +95,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PROJ-03 | Phase 5 | Pending |
 | PROJ-04 | Phase 5 | Pending |
 | FLOW-01 | Phase 1 | Complete |
-| FLOW-02 | Phase 1 | Pending |
+| FLOW-02 | Phase 1 | Complete |
 | FLOW-03 | Phase 2 | Pending |
 
 **Coverage:**

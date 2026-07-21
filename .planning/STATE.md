@@ -4,16 +4,17 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
-status: executing
-stopped_at: Completed 01-05-PLAN.md (LaMa Inpainting Slice); 2 tasks, 88 tests green
-last_updated: "2026-07-12T12:30:00.000Z"
+status: verifying
+stopped_at: Completed 01-06-PLAN.md (Undo/Redo Slice); 2 tasks, 110 tests green; phase ready for verification
+last_updated: "2026-07-21T17:08:50.358Z"
 last_activity: 2026-07-12
 last_activity_desc: Plan 01-05 (LaMa Inpainting Slice) complete
 progress:
-  total_phases: 1
-  completed_phases: 0
+  total_phases: 5
+  completed_phases: 1
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
+  percent: 20
 ---
 
 # Project State
@@ -29,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 Phase: 01 (cleaning-workspace) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-12 — Plan 01-05 (LaMa Inpainting Slice) complete
 
 Progress: [████████░░] 83%
@@ -63,6 +64,7 @@ Progress: [████████░░] 83%
 | Phase 01 P03 | 39 min | 2 tasks | 29 files |
 | Phase 01 P04 | 22 min | 2 tasks | 8 files |
 | Phase 01 P05 | ~35 min | 2 tasks | 12 files |
+| Phase 01 P06 | 12 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -88,6 +90,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-05: added has_mask_content() distinct from has_mask() for the Inpaint gate — running LaMa on an empty/transparent mask is a wasted model load; has_mask() stays True for initialized transparent masks (plan 03/04 semantic preserved)
 - [Phase ?]: 01-05: every numpy<->QImage bridge enforces .copy() detachment (Pitfall 2; MangaCleaner_GPU main_window.py:245 is the buggy reference); test_inpaint_result_display_uses_copy is the regression guard
 - [Phase ?]: 01-05: inpaint is non-destructive (no confirmation dialog); reversibility lives in the image-undo stack via history.push_image_action (plan 06 hook, no-op in Phase 1)
+- [Phase ?]: 01-06: two logical stacks (MASK + IMAGE) not four — the 4 internal lists are the implementation of UI-SPEC surface 8's 2-stack contract; preserve the MangaCleaner_GPU shape, not a 4-stack interpretation
+- [Phase ?]: 01-06: undo bypasses mask_modified — apply_undo_mask refreshes the pixmap directly without emitting the push signal, so undo never re-pushes onto the stack (test_undo_does_not_repush regression guard)
+- [Phase ?]: 01-06: full QImage/mask snapshots per entry in Phase 1 (RESEARCH Open Question 3); default limit=20 caps total snapshot memory (T-01-16)
+- [Phase ?]: 01-06: image undo swaps the CURRENT image's region into redo on pop (MangaCleaner_GPU history.py:593-595 pattern) — a redo reverses the undo with the captured post-edit region
 
 ### Pending Todos
 
@@ -113,8 +119,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-12T12:30:00.000Z
-Stopped at: Completed 01-05-PLAN.md (LaMa Inpainting Slice); 2 tasks, 88 tests green
+Last session: 2026-07-21T17:08:38.634Z
+Stopped at: Completed 01-06-PLAN.md (Undo/Redo Slice); 2 tasks, 110 tests green; phase ready for verification
 Resume file: None
 
 > **Pause note (2026-07-14, updated):** Execution paused after Wave 5 (01-05) by user request to pace the 5h quota budget — one wave at a time. This is intentional, not a failure. Waves 1–5 are complete and committed (88/88 tests green; CLEAN-01..06 + FLOW-01 done — all 6 cleaning requirements complete). Next: `/gsd-execute-phase 1` resumes from Wave 6 (01-06, undo/redo slice — FLOW-02, the last requirement; two independent MASK/IMAGE stacks with full QImage snapshots per entry). The image-patch push call site in `_on_inpaint_finished` is already wired and no-ops until plan 06 instantiates `MainWindow.history`. 1 incomplete plan remains (01-06). After 01-06, phase verification + completion run automatically.
