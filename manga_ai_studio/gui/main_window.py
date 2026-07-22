@@ -1294,9 +1294,14 @@ class MainWindow(QMainWindow):
         discipline (RESEARCH Pitfall 2, PATTERNS.md §Shared Pattern 5) is
         enforced inside the canvas bridge.
 
-        History hook: if ``self.history`` is wired (plan 06), push the bbox
-        patch so image-undo (Ctrl+Z) reverts just the inpainted region. Phase 1
-        no-ops this (``self.history is None``).
+        History hook: if ``self.history`` is wired (plan 06), pushes the
+        bbox-shaped pre-inpaint patch (sliced from the pre-inpaint image
+        BEFORE ``set_image_from_numpy`` overwrites it) so image-undo (Ctrl+Z)
+        reverts just the inpainted region (CR-03 gap closure). The patch shape
+        is exactly ``(bbox_h, bbox_w, _)`` — what ``pop_image_undo`` +
+        ``apply_undo_image`` expect; pushing the FULL image (the CR-03 bug)
+        caused ``apply_undo_image`` to write a mis-shaped region and silently
+        corrupt the page on Ctrl+Z.
         """
         result_rgb = result["image"]
         bbox = result["bbox"]
@@ -1306,19 +1311,36 @@ class MainWindow(QMainWindow):
 
         original_patch_numpy = None
         if self.history is not None and bbox is not None:
-            x1, y1 = int(bbox[0]), int(bbox[1])
+            # Unpack the full bbox (compute_mask_bbox returns (x, y, w, h)).
+            # The CR-03 bug read only x1, y1 and ignored w, h, then pushed the
+            # FULL image as the patch — pop_image_undo read its shape[:2] as
+            # the patch dims and apply_undo_image wrote a mis-shaped region.
+            x1, y1, bw, bh = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
             try:
-                original_patch_numpy = self.canvas.get_image_numpy()
-            except Exception:
-                original_patch_numpy = None
+                pre_inpaint = self.canvas.get_image_numpy()
+            except (AttributeError, RuntimeError):
+                # Canvas-not-ready failure modes only. Do NOT use a bare
+                # except Exception here — programming errors must propagate
+                # (T-01-17 shared root cause).
+                pre_inpaint = None
+            if pre_inpaint is not None:
+                # CR-03 fix: push the bbox region (not the full image) so
+                # pop_image_undo + apply_undo_image write a correctly-shaped
+                # region on Ctrl+Z. The .copy() is MANDATORY (pre_inpaint is
+                # a view into the canvas buffer; the slice must be detached
+                # before crossing into the HistoryManager — RESEARCH Pitfall 2,
+                # same discipline as every other numpy<->history bridge).
+                original_patch_numpy = pre_inpaint[y1 : y1 + bh, x1 : x1 + bw].copy()
 
         self.canvas.set_image_from_numpy(result_rgb, bbox=bbox)
 
         if self.history is not None and bbox is not None and original_patch_numpy is not None:
-            try:
-                self.history.push_image_action(x1, y1, original_patch_numpy)
-            except Exception:
-                pass
+            # No bare except Exception: pass here (WR-05 closed at this site).
+            # history.push_image_action only fails on programming errors
+            # (TypeError/AttributeError from a future API change), which MUST
+            # propagate so the bug surfaces in dev/test instead of silently
+            # corrupting the undo state.
+            self.history.push_image_action(x1, y1, original_patch_numpy)
 
         self.status_bar_left.setText("Inpainting complete")
         self._refresh_action_states()

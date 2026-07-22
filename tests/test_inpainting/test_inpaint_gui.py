@@ -28,6 +28,7 @@ from PySide6.QtCore import QThreadPool  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
+from manga_ai_studio.core.history_manager import HistoryManager  # noqa: E402
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow, compute_mask_bbox  # noqa: E402
 from manga_ai_studio.gui.worker_thread import Worker, WorkerError  # noqa: E402
@@ -444,23 +445,27 @@ class _NoStartPool:
 
 @pytest.mark.gui
 def test_inpaint_pushes_image_history(qtbot, tmp_path, monkeypatch) -> None:
-    """_on_inpaint_finished pushes the inpainted patch onto the history stack.
+    """_on_inpaint_finished pushes the BBOX patch onto the history stack.
+
+    CR-03 gap closure: the previous test stubbed history with a ``_StubHistory``
+    that only recorded (x, y, isinstance(patch, np.ndarray)) and could NOT
+    catch the shape bug (the buggy code pushed the FULL image). This widened
+    version uses a REAL ``HistoryManager`` (no stub on the buggy site) and
+    asserts the popped patch is bbox-shaped — exactly what
+    ``pop_image_undo`` + ``apply_undo_image`` expect.
 
     Behavior 10: when self.history is wired, push_image_action is called with
-    (x, y, patch_numpy). Phase 1 wires the call site; plan 06 implements the
-    real HistoryManager.
+    (x, y, bbox_patch) where bbox_patch.shape[:2] == (bbox_h, bbox_w). The
+    CR-03 bug would push a patch of shape (16, 16, _) for a (4, 4, 4, 4) bbox;
+    this assertion catches it.
     """
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path)
     _paint_mask_on_canvas(window.canvas)
 
-    pushes = []
-
-    class _StubHistory:
-        def push_image_action(self, x, y, patch):
-            pushes.append((x, y, patch))
-
-    window.history = _StubHistory()
+    # REAL HistoryManager — no stub. This is the widening requirement: the
+    # previous _StubHistory only asserted x/y/isinstance, missing the shape bug.
+    window.history = HistoryManager(limit=20)
 
     # Build a known inpaint result + bbox that lands inside the page.
     image_rgb = window.canvas.get_image_numpy()
@@ -469,10 +474,103 @@ def test_inpaint_pushes_image_history(qtbot, tmp_path, monkeypatch) -> None:
 
     window._on_inpaint_finished({"image": result_rgb, "bbox": bbox})
 
-    assert len(pushes) == 1, "history.push_image_action was not called"
-    x, y, patch = pushes[0]
-    assert x == 4 and y == 4
+    # Pop the undo entry — proves push_image_action was called and lets us
+    # assert the pushed patch shape.
+    current = window.canvas.get_image_numpy()
+    popped = window.history.pop_image_undo(current)
+    assert popped is not None, "history.push_image_action was not called"
+    x, y, patch = popped
+    assert (x, y) == (4, 4)
     assert isinstance(patch, np.ndarray)
+    # CR-03 SHAPE GUARD — the load-bearing assertion that was MISSING.
+    # The CR-03 bug (full image pushed) would yield patch.shape[:2] == (16, 16).
+    assert patch.shape[:2] == (4, 4), (
+        f"patch must be bbox-shaped (4, 4, _) — pop_image_undo reads "
+        f"patch.shape[:2] as the dims and apply_undo_image writes "
+        f"current[y:y+h, x:x+w]. Full-image patch corrupts the region. "
+        f"Got {patch.shape}"
+    )
+
+
+@pytest.mark.gui
+def test_inpaint_undo_roundtrip_preserves_surrounding_region(qtbot, tmp_path) -> None:
+    """Ctrl+Z after inpaint writes ONLY the bbox region — surrounding art unchanged.
+
+    CR-03 round-trip guard: builds a 16x16 page with distinct pixel values,
+    runs _on_inpaint_finished with a 4x4 bbox, then simulates Ctrl+Z by
+    popping the undo entry and applying it. Pixels OUTSIDE the bbox (top-left
+    (0,0) and bottom-right (15,15)) must be UNCHANGED — proving apply_undo_image
+    wrote only the 4x4 bbox region. The CR-03 bug (full-image patch) would
+    overwrite up to a 12x12 region sourced from the wrong slice, corrupting
+    these pixels.
+    """
+    window = _make_window(qtbot, tmp_path)
+    # Build a 16x16 page where every pixel is distinct, so any corruption is
+    # immediately detectable via np.array_equal on corner pixels.
+    page = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+    window.canvas.set_image_from_numpy(page)
+    # Snapshot the corner pixels BEFORE the inpaint — they are outside the
+    # (4, 4, 4, 4) bbox and must survive the Ctrl+Z round-trip.
+    tl_before = page[0, 0].copy()
+    br_before = page[15, 15].copy()
+
+    window.history = HistoryManager(limit=20)
+
+    # Result is a distinct known pattern; bbox (4, 4, 4, 4) is the inpainted
+    # region. _on_inpaint_finished slices the pre-inpaint bbox before
+    # set_image_from_numpy overwrites the canvas with the result.
+    result_rgb = np.full(page.shape, 200, dtype=np.uint8)
+    bbox = (4, 4, 4, 4)
+    window._on_inpaint_finished({"image": result_rgb, "bbox": bbox})
+
+    # Simulate Ctrl+Z: pop the undo entry and apply it.
+    current = window.canvas.get_image_numpy()
+    popped = window.history.pop_image_undo(current)
+    assert popped is not None
+    ux, uy, upatch = popped
+    window.canvas.apply_undo_image(ux, uy, upatch)
+
+    after = window.canvas.get_image_numpy()
+    # Surrounding region MUST be unchanged (the CR-03 bug would corrupt it).
+    assert np.array_equal(after[0, 0], tl_before), (
+        f"top-left pixel (outside bbox) was corrupted by Ctrl+Z: "
+        f"before={tl_before}, after={after[0, 0]}"
+    )
+    assert np.array_equal(after[15, 15], br_before), (
+        f"bottom-right pixel (outside bbox) was corrupted by Ctrl+Z: "
+        f"before={br_before}, after={after[15, 15]}"
+    )
+
+
+@pytest.mark.unit
+def test_inpaint_finished_push_uses_bbox_slice(qtbot, tmp_path) -> None:
+    """The pushed patch is exactly (bbox_h, bbox_w, 3) for an RGB page.
+
+    Explicit shape guard (complements test_inpaint_pushes_image_history):
+    asserts the HistoryManager-recorded patch matches the bbox slice on an
+    RGB page. The CR-03 bug would yield the full page shape (16, 16, 3).
+    """
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=16)  # 16x16 RGB page
+    _paint_mask_on_canvas(window.canvas)
+
+    window.history = HistoryManager(limit=20)
+
+    image_rgb = window.canvas.get_image_numpy()
+    assert image_rgb.shape == (16, 16, 3)
+    result_rgb = np.full(image_rgb.shape, 99, dtype=np.uint8)
+    bbox = (4, 4, 4, 4)
+
+    window._on_inpaint_finished({"image": result_rgb, "bbox": bbox})
+
+    current = window.canvas.get_image_numpy()
+    popped = window.history.pop_image_undo(current)
+    assert popped is not None
+    _x, _y, patch = popped
+    assert patch.shape == (4, 4, 3), (
+        f"pushed patch must be bbox-shaped (4, 4, 3) for an RGB page; "
+        f"got {patch.shape} (CR-03 bug would be (16, 16, 3))"
+    )
 
 
 # ---------------------------------------------------------------------------
