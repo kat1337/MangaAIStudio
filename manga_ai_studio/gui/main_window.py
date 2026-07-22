@@ -1170,19 +1170,33 @@ class MainWindow(QMainWindow):
     def _resolve_inpainting_model_path(self) -> Path:
         """Return the LaMa model path from config or the PanelCleaner default.
 
-        Defers to ``panelcleaner.model_downloader.get_inpainting_model_path``
-        (the same resolver InpaintingModel.__init__ uses). If resolution fails,
-        return the conventional ``big-lama.pt`` name and let
-        ``TorchLamaModel.load`` surface the FileNotFoundError (T-01-04b:
-        ``model_path.is_file()`` runs BEFORE SimpleLama is imported).
-        """
-        try:
-            from panelcleaner.model_downloader import get_inpainting_model_path
+        Delegates to ``get_inpainting_model_path(config)`` where ``config`` is
+        the ``Config`` instance (Config has ``get_model_cache_dir``; Profile
+        does NOT — CR-02 gap closure). The vendored function
+        (model_downloader.py:143-149) returns
+        ``config.get_model_cache_dir() / "anime-manga-big-lama.pt"`` — the
+        correct Config type and the correct vendored default filename (NOT the
+        deprecated ``big-lama.pt``).
 
-            profile = self.profile_manager.config.current_profile
-            return Path(get_inpainting_model_path(profile))
-        except Exception:
-            return Path("big-lama.pt")
+        On filesystem failure (``FileNotFoundError`` / ``OSError``), returns
+        the same vendored default under the cache dir. Programming errors
+        (``AttributeError``, ``TypeError``, ``ValueError``) PROPAGATE so
+        signature drift and wrong-arg bugs surface in dev/test
+        (regression-guarded by
+        ``test_resolve_inpainting_model_path_programming_errors_propagate``).
+        """
+        config = self.profile_manager.config
+        from panelcleaner.model_downloader import get_inpainting_model_path
+
+        try:
+            return Path(get_inpainting_model_path(config))
+        except (FileNotFoundError, OSError) as exc:
+            # Legitimate filesystem failure modes (T-01-08). Log so the
+            # failure is observable; the fallback path still points under the
+            # cache dir so a manual install to
+            # cache_dir/anime-manga-big-lama.pt works.
+            logger.warning(f"Inpainting model resolution failed: {exc}")
+            return config.get_model_cache_dir() / "anime-manga-big-lama.pt"
 
     def inpaint(self) -> None:
         """Run LaMa inpainting on the current page + mask (Tools -> Inpaint, C).
