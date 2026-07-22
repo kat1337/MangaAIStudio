@@ -385,3 +385,102 @@ def test_detection_error_shows_chip(qtbot, tmp_path, monkeypatch) -> None:
     # The chip is shown (not hidden) and carries the #7a1f1f error style.
     assert not window.error_chip.isHidden()
     assert "#7a1f1f" in window.error_chip.styleSheet()
+
+
+# ---------------------------------------------------------------------------
+# Plan 01-07 Task 1 — Gap-closure regression tests (CR-01 / CLEAN-02)
+#
+# The original detection tests stubbed TextDetector but never exercised the
+# model-path resolver, so CR-01 (`download_torch_model()` called with no args,
+# TypeError swallowed by bare `except Exception:`) shipped green. These tests
+# call the REAL `download_torch_model` (no monkeypatch on it) so future arity
+# drift surfaces in CI.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_detection_model_path_calls_download_with_cache_dir(qtbot, tmp_path) -> None:
+    """CR-01: the resolver delegates to ``download_torch_model(cache_dir)``.
+
+    The returned path's parent MUST equal ``config.get_model_cache_dir()``.
+    This holds on BOTH branches: (a) download succeeds -> the vendored function
+    writes into cache_dir and returns a path under it; (b) download returns
+    None (network offline in CI) -> the narrowed except falls back to
+    ``cache_dir / comictextdetector.pt``. Either way the parent is the cache
+    dir, proving the call signature is ``download_torch_model(cache_dir)`` and
+    not the CR-01 zero-arg form.
+
+    No-stub guard: this test does NOT monkeypatch ``download_torch_model`` —
+    the REAL vendored function is exercised.
+    """
+    window = _make_window(qtbot, tmp_path)
+    cache_dir = window.profile_manager.config.get_model_cache_dir()
+
+    resolved = window._resolve_detection_model_path()
+
+    assert resolved.parent == cache_dir, (
+        f"resolver must return a path under cache_dir {cache_dir}, got {resolved.parent}"
+    )
+
+
+@pytest.mark.unit
+def test_resolve_detection_model_path_filename_matches_vendored_default(qtbot, tmp_path) -> None:
+    """CR-01: the resolver returns the vendored default filename.
+
+    The vendored constant is ``TORCH_MODEL_NAME = "comictextdetector.pt"``
+    (panelcleaner/model_downloader.py:16). The CR-01 bug hardcoded a different
+    fallback in the except branch; this test locks the correct name.
+    """
+    window = _make_window(qtbot, tmp_path)
+
+    resolved = window._resolve_detection_model_path()
+
+    assert resolved.name == "comictextdetector.pt", (
+        f"resolver filename must match vendored TORCH_MODEL_NAME, got {resolved.name!r}"
+    )
+
+
+@pytest.mark.unit
+def test_resolve_detection_model_path_no_bare_except(qtbot, tmp_path) -> None:
+    """CR-01 anti-pattern guard: no bare ``except Exception:`` in the resolver.
+
+    The shared root cause of all three gap-closure bugs was a bare
+    ``except Exception:`` swallowing programming errors (TypeError,
+    AttributeError). The resolver's except must be narrowed to
+    ``(FileNotFoundError, OSError)`` so signature drift propagates. This is a
+    source-level guard against re-introducing the anti-pattern.
+    """
+    import inspect
+
+    from manga_ai_studio.gui.main_window import MainWindow
+
+    source = inspect.getsource(MainWindow._resolve_detection_model_path)
+    assert "except Exception" not in source, (
+        "_resolve_detection_model_path must not have a bare `except Exception:` "
+        "(CR-01 root cause). Narrow to (FileNotFoundError, OSError)."
+    )
+    assert "except (FileNotFoundError, OSError)" in source
+
+
+@pytest.mark.unit
+def test_resolve_detection_model_path_programming_errors_propagate(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """CR-01 propagation guard: TypeError from signature drift MUST propagate.
+
+    Simulates a future signature change in ``download_torch_model`` by patching
+    it to raise ``TypeError``. The narrowed except (FileNotFoundError, OSError)
+    must NOT catch it — programming errors propagate to dev/test so the bug
+    surfaces immediately instead of silently degrading in production.
+    """
+    window = _make_window(qtbot, tmp_path)
+
+    def _raise_typeerror(_cache_dir):
+        raise TypeError("simulated signature drift")
+
+    monkeypatch.setattr(
+        "panelcleaner.model_downloader.download_torch_model", _raise_typeerror
+    )
+
+    with pytest.raises(TypeError, match="simulated signature drift"):
+        window._resolve_detection_model_path()

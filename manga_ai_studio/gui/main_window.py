@@ -1037,20 +1037,45 @@ class MainWindow(QMainWindow):
         return {"mask": mask_refined, "blocks": blk_list}
 
     def _resolve_detection_model_path(self) -> Path:
-        """Return the CTD model path from config, or the PanelCleaner default."""
-        try:
-            from panelcleaner.model_downloader import download_torch_model
+        """Return the CTD model path from config, or the PanelCleaner default.
 
-            profile = self.profile_manager.config.current_profile
-            configured = profile.text_detector.model_path
-            if configured:
-                return Path(configured)
-            # Default: fetch via model_downloader (sha256-verified, T-01-04).
-            return Path(download_torch_model())
-        except Exception:
-            # Let TorchCTDModel.load surface the FileNotFoundError (T-01-04)
-            # if the model cannot be resolved.
-            return Path("comictextdetector.pt")
+        Delegates to ``download_torch_model(cache_dir)`` where
+        ``cache_dir = config.get_model_cache_dir()`` (model_downloader.py:112;
+        the Config instance owns the cache dir, NOT the Profile). On
+        filesystem/network failure (``FileNotFoundError`` / ``OSError``),
+        returns ``cache_dir / comictextdetector.pt`` so ``TorchCTDModel.load``
+        surfaces a meaningful ``FileNotFoundError`` (T-01-04) pointing at a
+        real, findable path. Programming errors (``TypeError``,
+        ``AttributeError``, ``ValueError``) PROPAGATE so signature drift and
+        wrong-arg bugs surface in dev/test instead of silently degrading in
+        production (CR-01 gap closure, regression-guarded by
+        ``test_resolve_detection_model_path_programming_errors_propagate``).
+        """
+        config = self.profile_manager.config
+        profile = config.current_profile
+        configured = profile.text_detector.model_path
+        if configured:
+            return Path(configured)
+        cache_dir = config.get_model_cache_dir()
+        from panelcleaner.model_downloader import download_torch_model
+
+        # download_torch_model(cache_dir) -> Path | None (None on download
+        # failure, e.g. network offline). Handle both: a real path on success,
+        # or fall back to the vendored default filename under the cache dir.
+        try:
+            resolved = download_torch_model(cache_dir)
+        except (FileNotFoundError, OSError) as exc:
+            # Legitimate filesystem/network failure modes during a model
+            # download (T-01-08). Log so the failure is observable in logs
+            # rather than silent; the fallback path still lets a manual
+            # install to cache_dir/comictextdetector.pt succeed.
+            logger.warning(f"Detection model resolution failed: {exc}")
+            resolved = None
+        if resolved is not None:
+            return Path(resolved)
+        # Vendored default (model_downloader.py:16 TORCH_MODEL_NAME) under the
+        # cache dir so TorchCTDModel.load surfaces a meaningful path.
+        return cache_dir / "comictextdetector.pt"
 
     def _on_detection_progress(self, payload) -> None:
         """Update the status bar + progress bar (UI-SPEC surface 5/9)."""
