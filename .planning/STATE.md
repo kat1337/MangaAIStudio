@@ -5,16 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: cleaning-workspace
 status: verifying
-stopped_at: Completed 01-06-PLAN.md (Undo/Redo Slice); 2 tasks, 110 tests green; phase ready for verification
-last_updated: "2026-07-21T17:08:50.358Z"
+stopped_at: "Completed 01-07-PLAN.md (Gap Closure CR-01/02/03); 3 tasks, 120 tests green (was 110); 3 BLOCKER gaps closed, re-verification targets truths #2/#4/#6"
+last_updated: "2026-07-22T16:39:49.856Z"
 last_activity: 2026-07-12
 last_activity_desc: Plan 01-05 (LaMa Inpainting Slice) complete
 progress:
-  total_phases: 5
+  total_phases: 1
   completed_phases: 1
-  total_plans: 6
-  completed_plans: 6
-  percent: 20
+  total_plans: 7
+  completed_plans: 7
 ---
 
 # Project State
@@ -65,6 +64,7 @@ Progress: [████████░░] 83%
 | Phase 01 P04 | 22 min | 2 tasks | 8 files |
 | Phase 01 P05 | ~35 min | 2 tasks | 12 files |
 | Phase 01 P06 | 12 min | 2 tasks | 4 files |
+| Phase 01 P07 | 13 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -94,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-06: undo bypasses mask_modified — apply_undo_mask refreshes the pixmap directly without emitting the push signal, so undo never re-pushes onto the stack (test_undo_does_not_repush regression guard)
 - [Phase ?]: 01-06: full QImage/mask snapshots per entry in Phase 1 (RESEARCH Open Question 3); default limit=20 caps total snapshot memory (T-01-16)
 - [Phase ?]: 01-06: image undo swaps the CURRENT image's region into redo on pop (MangaCleaner_GPU history.py:593-595 pattern) — a redo reverses the undo with the captured post-edit region
+- [Phase 01]: CR-03 fix: _on_inpaint_finished now slices pre_inpaint[y:y+h, x:x+w].copy() (Pitfall-2 discipline) before pushing to history; the pushed patch is bbox-shaped (not the full image); bare except Exception: pass removed (WR-05 closed). Test widened to use REAL HistoryManager + assert patch.shape[:2] == (bbox_h, bbox_w).
+- [Phase 01]: Gap-closure discipline (plan 01-07): regression tests MUST exercise the REAL vendored function on the buggy site (no monkeypatch) so arity/arg-type/shape bugs surface in CI; only the propagation-guard test patches, and only to assert the error propagates. Both resolver excepts narrowed to (FileNotFoundError, OSError); TypeError/AttributeError propagate (T-01-17).
 
 ### Pending Todos
 
@@ -119,8 +121,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-21T17:08:38.634Z
-Stopped at: Completed 01-06-PLAN.md (Undo/Redo Slice); 2 tasks, 110 tests green; phase ready for verification
+Last session: 2026-07-22T16:39:49.844Z
+Stopped at: Completed 01-07-PLAN.md (Gap Closure CR-01/02/03); 3 tasks, 120 tests green (was 110); 3 BLOCKER gaps closed, re-verification targets truths #2/#4/#6
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
