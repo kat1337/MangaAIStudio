@@ -1372,6 +1372,20 @@ class MainWindow(QMainWindow):
 
         self.canvas.set_image_from_numpy(result_rgb, bbox=bbox)
 
+        # CR-16 (UAT): the mask has been consumed by the inpaint. Clear it so
+        # the red overlay does not sit on top of the now-inpainted region
+        # (which would both look wrong and cause a subsequent inpaint to
+        # re-process the already-cleaned area). Clear the mask internals
+        # directly (fill + update_mask_display) rather than calling
+        # clear_mask(), which emits mask_modified — that would push a
+        # spurious mask-undo entry. The user's action was "inpaint", not
+        # "paint a mask", so the mask-undo stack must not gain an entry for
+        # the consumption.
+        canvas_mask = self.canvas.get_mask()
+        if canvas_mask is not None and not canvas_mask.isNull():
+            canvas_mask.fill(Qt.GlobalColor.transparent)
+            self.canvas.update_mask_display()
+
         if self.history is not None and bbox is not None and original_patch_numpy is not None:
             # No bare except Exception: pass here (WR-05 closed at this site).
             # history.push_image_action only fails on programming errors

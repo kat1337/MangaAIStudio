@@ -574,6 +574,54 @@ def test_inpaint_finished_push_uses_bbox_slice(qtbot, tmp_path) -> None:
     )
 
 
+@pytest.mark.unit
+def test_inpaint_clears_consumed_mask_without_pushing_mask_undo(
+    qtbot, tmp_path
+) -> None:
+    """CR-16: _on_inpaint_finished clears the mask so it does not sit on top
+    of the inpainted result, and does NOT push a spurious mask-undo entry.
+
+    Before CR-16 the red mask overlay stayed after inpaint, visually covering
+    the cleaned region and causing a subsequent inpaint to re-process the same
+    area. The fix clears the mask with mask_modified blocked (the user's action
+    was "inpaint", not "paint a mask", so the mask-undo stack must not gain an
+    entry for the consumption).
+    """
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=16)
+    _paint_mask_on_canvas(window.canvas)
+    assert window.canvas.has_mask(), "precondition: mask must be present"
+
+    window.history = HistoryManager(limit=20)
+    # Seed a baseline mask-undo count by recording one prior mask state.
+    window.history.push_mask_state(window.canvas.get_mask())
+    mask_undo_before = len(window.history._mask_undo) if hasattr(window.history, "_mask_undo") else None
+
+    image_rgb = window.canvas.get_image_numpy()
+    result_rgb = np.full(image_rgb.shape, 99, dtype=np.uint8)
+    bbox = (4, 4, 4, 4)
+    window._on_inpaint_finished({"image": result_rgb, "bbox": bbox})
+
+    # The mask must be cleared (consumed).
+    assert not window.canvas.has_mask_content(), (
+        "mask overlay must be cleared after inpaint (CR-16) so it does not "
+        "sit on top of the cleaned region"
+    )
+    # The image-undo stack gains exactly one entry (the inpaint), but the
+    # mask-undo stack must NOT gain an entry for the clear.
+    assert window.history.can_undo_image(), (
+        "image-undo entry for the inpaint must be present"
+    )
+    if mask_undo_before is not None:
+        # mask-undo depth unchanged (clear did not push).
+        mask_undo_after = len(window.history._mask_undo)
+        assert mask_undo_after == mask_undo_before, (
+            f"clearing the consumed mask pushed a mask-undo entry "
+            f"({mask_undo_before} -> {mask_undo_after}); the mask-undo stack "
+            f"must not gain an entry for inpaint-mask consumption (CR-16)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Bonus: compute_mask_bbox unit contract (pure numpy, no Qt)
 # ---------------------------------------------------------------------------
