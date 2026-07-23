@@ -1013,10 +1013,23 @@ class MainWindow(QMainWindow):
         (worker_thread.py:97-124).
         """
         import cv2  # lazy import — keeps the main thread import-light
+        import numpy as np
 
         if progress_callback is not None:
             progress_callback.emit((10, "Loading image\u2026"))
-        image = cv2.imread(str(image_path))
+        # Use np.fromfile + cv2.imdecode (NOT cv2.imread): cv2.imread fails on
+        # (a) formats whose codec the path-based decoder can't find (e.g. .webp
+        # in many OpenCV builds — surfaces as a `findDecoder` warning + None
+        # return), and (b) non-ASCII path characters on Windows. Reading the
+        # file as raw bytes via numpy and decoding via imdecode handles both.
+        # This mirrors the vendored CTD helper at
+        # panelcleaner/comic_text_detector/utils/io_utils.py:imread (CR-17).
+        try:
+            image = cv2.imdecode(
+                np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+        except (OSError, ValueError) as exc:
+            raise FileNotFoundError(f"Could not read image: {image_path}") from exc
         if image is None:
             raise FileNotFoundError(f"Could not read image: {image_path}")
 

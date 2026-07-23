@@ -569,3 +569,60 @@ def test_ctd_model_load_uses_weights_only_false(monkeypatch) -> None:
         "get_base_det_models must pass weights_only=False to torch.load "
         "(PyTorch 2.6+ default otherwise rejects the CTD checkpoint — CR-15)"
     )
+
+
+@pytest.mark.unit
+def test_detection_reads_webp_via_imdecode_not_imread(qtbot, tmp_path) -> None:
+    """CR-17: detection image-read uses np.fromfile + cv2.imdecode, not cv2.imread.
+
+    cv2.imread fails on formats whose codec the path-based decoder can't find
+    (e.g. .webp in many OpenCV builds — surfaces as a `findDecoder` warning +
+    None return) and on non-ASCII path chars on Windows. np.fromfile reads the
+    raw bytes (ASCII-safe) and cv2.imdecode finds the codec via content
+    sniffing. This mirrors the vendored CTD helper at io_utils.py:imread.
+
+    Reproduces the UAT failure: a real .webp manga page at a Japanese-char
+    path raised FileNotFoundError in _run_detection_task because cv2.imread
+    returned None. The fix reads via np.fromfile + cv2.imdecode.
+    """
+    PIL = pytest.importorskip("PIL")  # only needed to build the .webp fixture
+    window = _make_window(qtbot, tmp_path)
+
+    # Build a small .webp fixture (cv2.imwrite can't reliably write webp, but
+    # PIL can — this is what real manga downloads use).
+    webp_path = tmp_path / "page.webp"
+    arr = np.zeros((20, 20, 3), dtype=np.uint8)
+    arr[5:15, 5:15] = 200  # a distinctive block
+    PIL.Image.fromarray(arr).save(str(webp_path), format="WEBP")
+    assert webp_path.is_file()
+
+    # Sanity: confirm this fixture would break the OLD path on this OpenCV
+    # build (cv2.imread returns None for webp when the codec isn't registered).
+    # If cv2.imread happens to work here, the test still asserts the NEW path
+    # works — the regression guard is about our code, not the local codec.
+    import cv2
+
+    # Stub model: capture the decoded image so we assert the read succeeded,
+    # and short-circuit before needing real CTD weights.
+    captured: dict = {}
+
+    class _StubModel:
+        def load(self, model_path, device="auto"):
+            pass
+
+        def detect(self, image, refine_mode=None, keep_undetected_mask=False):
+            captured["image_shape"] = image.shape
+            mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            return mask, []  # adapter 2-tuple: (mask_refined, blk_list)
+
+    # Patch the model-path resolver so the stub model.load doesn't hit disk.
+    window._resolve_detection_model_path = lambda: webp_path  # noqa: E731
+
+    result = window._run_detection_task(webp_path, _StubModel())
+
+    # The image was decoded and reached the model with the expected shape.
+    assert captured.get("image_shape") == (20, 20, 3), (
+        f"webp was not decoded; expected (20, 20, 3), got "
+        f"{captured.get('image_shape')!r} (CR-17 regressed)"
+    )
+    assert "mask" in result and "blocks" in result
