@@ -528,3 +528,44 @@ def test_resolve_detection_model_path_skips_download_when_cached(
     assert resolved == expected, (
         f"resolver must return the cached path {expected}, got {resolved}"
     )
+
+
+@pytest.mark.unit
+def test_ctd_model_load_uses_weights_only_false(monkeypatch) -> None:
+    """CR-15: the CTD model load path passes weights_only=False to torch.load.
+
+    PyTorch 2.6+ changed torch.load's default ``weights_only`` from False to
+    True. The vendored CTD checkpoint pickles non-weight objects (YOLOv5 Model
+    instances, DBHead state), so the new default raises
+    ``_pickle.UnpicklingError: Unsupported operand 102`` at
+    ``basemodel.py:get_base_det_models``. The CTD model is a trusted vendored
+    upstream asset, so ``weights_only=False`` (the pre-2.6 default) is the
+    documented, acceptable remediation.
+
+    This test does NOT require the 80MB model download — it monkeypatches
+    ``torch.load`` and inspects the call kwargs.
+    """
+    import torch  # local; only present in the torch env (gated by importorskip)
+
+    captured: dict = {}
+
+    def _spy_torch_load(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        # Return a minimal valid-shaped dict so load_yolov5_ckpt / UnetHead
+        # don't blow up before we assert; we only care about the torch.load
+        # call contract here. Raise to short-circuit further processing.
+        raise RuntimeError("CR-15 test: torch.load intercepted, stopping chain")
+
+    monkeypatch.setattr(torch, "load", _spy_torch_load)
+
+    # Directly invoke the vendored function our adapter delegates to.
+    from panelcleaner.comic_text_detector.basemodel import get_base_det_models
+
+    with pytest.raises(RuntimeError, match="CR-15 test"):
+        get_base_det_models("ignored-by-spy.pt")
+
+    assert captured.get("kwargs", {}).get("weights_only") is False, (
+        "get_base_det_models must pass weights_only=False to torch.load "
+        "(PyTorch 2.6+ default otherwise rejects the CTD checkpoint — CR-15)"
+    )

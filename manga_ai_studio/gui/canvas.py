@@ -533,20 +533,26 @@ class EditorCanvas(QGraphicsView):
                 f"expected (H,W,3) uint8 RGB array, got shape={rgb.shape} dtype={rgb.dtype}"
             )
 
-        # Capture the pre-inpaint image for the before/after toggle (once per
-        # inpaint op; a second inpaint extends, not resets, the original).
+        # _original_image_numpy holds the PRE-FIRST-inpaint image for the
+        # before/after preview toggle (captured once per page, reset on
+        # set_image/clear). It is NOT used as the composite base — compositing
+        # onto it would revert earlier inpaints on a second inpaint (CR-13).
         if self._original_image_numpy is None:
             self._original_image_numpy = self.get_image_numpy()
 
         full_rgb = rgb
-        if bbox is not None and self._original_image_numpy is not None:
-            # Composite only the bbox region into the existing image numpy.
-            x, y, w, h = bbox
-            base = self._original_image_numpy
-            if base is not None and base.shape[:2] == (rgb.shape[0], rgb.shape[1]):
-                base = base.copy()
-                base[y : y + h, x : x + w] = rgb[y : y + h, x : x + w]
-                full_rgb = base
+        if bbox is not None:
+            # Composite only the bbox region into the CURRENT displayed image
+            # (which already reflects prior inpaints), so a second inpaint
+            # extends the result instead of reverting region A to its
+            # pre-first-inpaint state (CR-13). Read fresh from the live pixmap
+            # each call — never the stale _original_image_numpy cache.
+            current = self.get_image_numpy()
+            if current is not None and current.shape[:2] == (rgb.shape[0], rgb.shape[1]):
+                x, y, w, h = bbox
+                current = current.copy()
+                current[y : y + h, x : x + w] = rgb[y : y + h, x : x + w]
+                full_rgb = current
 
         h, w = full_rgb.shape[:2]
         qimg = QImage(full_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)

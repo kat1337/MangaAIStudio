@@ -211,7 +211,13 @@ class TextDetector(nn.Module):
 
 
 def get_base_det_models(model_path, device="cpu", half=False, act="leaky"):
-    textdetector_dict = torch.load(model_path, map_location=device)
+    # PyTorch 2.6+ defaults weights_only=True, which rejects the CTD checkpoint
+    # (pickled with non-weight objects: YOLOv5 Model instances, DBHead state).
+    # The CTD model is a trusted, vendored upstream asset
+    # (drmower/cozy-comic-text-detector), so weights_only=False (the pre-2.6
+    # default) is acceptable here. Detection bug fix (D-12 vendored-file
+    # bug-fix exemption).
+    textdetector_dict = torch.load(model_path, map_location=device, weights_only=False)
     blk_det = load_yolov5_ckpt(textdetector_dict["blk_det"], map_location=device)
     text_seg = UnetHead(act=act)
     text_seg.load_state_dict(textdetector_dict["text_seg"])

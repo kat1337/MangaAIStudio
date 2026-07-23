@@ -600,6 +600,45 @@ def test_shortcuts_wired(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
+def test_no_ambiguous_shortcut_overload(qtbot, tmp_path) -> None:
+    """CR-14: undo/redo QActions must NOT carry their own setShortcut.
+
+    The 4 key sequences are registered once each as QShortcut in
+    _wire_history_actions (the focus-robust path). If the QActions also carry
+    setShortcut, Qt emits ``QAction::event: Ambiguous shortcut overload`` on
+    every keypress. Assert each QAction's shortcut is empty AND that each
+    sequence appears on exactly one QShortcut (no duplicates).
+    """
+    window = _make_window(qtbot, tmp_path)
+
+    # None of the 4 undo/redo QActions should carry a shortcut binding.
+    for action in (
+        window.action_undo_image,
+        window.action_redo_image,
+        window.action_undo_mask,
+        window.action_redo_mask,
+    ):
+        assert action.shortcut().toString() == "", (
+            f"{action.text()} carries a duplicate setShortcut; this triggers "
+            "Qt's Ambiguous shortcut overload warning (CR-14)"
+        )
+
+    # Each sequence appears on exactly one QShortcut (no duplicates).
+    from collections import Counter
+
+    from PySide6.QtGui import QShortcut
+
+    seqs = [
+        s.key().toString()
+        for s in window.findChildren(QShortcut)
+        if s.key().toString() in ("Ctrl+Z", "Ctrl+Shift+Z", "Alt+Z", "Alt+Shift+Z")
+    ]
+    counts = Counter(seqs)
+    dupes = {k: v for k, v in counts.items() if v > 1}
+    assert not dupes, f"duplicate QShortcut registrations cause ambiguity: {dupes}"
+
+
+@pytest.mark.gui
 def test_undo_does_not_repush(qtbot, tmp_path) -> None:
     """apply_undo_mask does NOT emit mask_modified (no infinite loop)."""
     window = _make_window(qtbot, tmp_path)

@@ -188,20 +188,20 @@ class MainWindow(QMainWindow):
         # (refreshed in _update_undo_redo_actions). Shortcuts are also installed
         # as QShortcut in _wire_history_actions so they fire regardless of focus
         # (MangaCleaner_GPU main_window.py:168-171 pattern, reimplemented).
+        # NOTE: setShortcut is intentionally NOT called here — the focus-robust
+        # QShortcut registrations in _wire_history_actions are the single
+        # source for these key sequences. A duplicate setShortcut here would
+        # trigger Qt's "Ambiguous shortcut overload" warning (CR-14).
         self.action_undo_image = QAction("Undo Image", self)
-        self.action_undo_image.setShortcut(QKeySequence("Ctrl+Z"))
         self.action_undo_image.setEnabled(False)
 
         self.action_redo_image = QAction("Redo Image", self)
-        self.action_redo_image.setShortcut(QKeySequence("Ctrl+Shift+Z"))
         self.action_redo_image.setEnabled(False)
 
         self.action_undo_mask = QAction("Undo Mask", self)
-        self.action_undo_mask.setShortcut(QKeySequence("Alt+Z"))
         self.action_undo_mask.setEnabled(False)
 
         self.action_redo_mask = QAction("Redo Mask", self)
-        self.action_redo_mask.setShortcut(QKeySequence("Alt+Shift+Z"))
         self.action_redo_mask.setEnabled(False)
 
         self.action_clear_mask = QAction("Clear Mask\u2026", self)
@@ -1428,15 +1428,21 @@ def compute_mask_bbox(mask_binary: np.ndarray) -> tuple[int, int, int, int] | No
     Used by :meth:`MainWindow._run_inpaint_task` to pass the inpaint bbox to
     ``EditorCanvas.set_image_from_numpy`` (which unpacks ``(x, y, w, h)`` and
     composites only that region so unchanged artwork stays pixel-exact).
-    ``np.where`` over the ``(H, W)`` binary mask finds the first/last painted
-    row/column; width/height are derived as (last - first + 1). Pure numpy —
-    safe to call on the worker thread (T-01-07).
+    ``np.where`` over the ``(H, W)`` binary mask finds the painted region's
+    extent; width/height are derived as (max - min + 1). Pure numpy — safe to
+    call on the worker thread (T-01-07).
+
+    CR-12 (UAT gap closure): ``np.where`` returns indices in ROW-MAJOR order
+    (sorted by row, then col within each row), so ``xs[0]``/``xs[-1]`` are the
+    columns of the first/last nonzero PIXEL, not the global min/max column. For
+    any non-rectangular mask (e.g. an L-shaped stroke), that yielded a tiny
+    wrongly-positioned bbox. Use ``min()``/``max()`` over the index arrays.
     """
     if mask_binary is None or mask_binary.size == 0:
         return None
     ys, xs = np.where(mask_binary > 0)
     if ys.size == 0:
         return None
-    x1, x2 = int(xs[0]), int(xs[-1])
-    y1, y2 = int(ys[0]), int(ys[-1])
+    x1, x2 = int(xs.min()), int(xs.max())
+    y1, y2 = int(ys.min()), int(ys.max())
     return x1, y1, x2 - x1 + 1, y2 - y1 + 1

@@ -26,6 +26,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QThreadPool  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.history_manager import HistoryManager  # noqa: E402
@@ -592,3 +593,88 @@ def test_compute_mask_bbox_returns_xywh() -> None:
     assert compute_mask_bbox(None) is None
     empty = np.zeros((0, 0), dtype=np.uint8)
     assert compute_mask_bbox(empty) is None
+
+
+@pytest.mark.unit
+def test_compute_mask_bbox_non_rectangular_uses_true_min_max() -> None:
+    """CR-12: bbox of an L-shaped (non-rectangular) mask tightly encloses ALL pixels.
+
+    The pre-CR-12 implementation used ``xs[0]``/``xs[-1]`` from ``np.where``,
+    which return indices in ROW-MAJOR order — so for a mask whose horizontal
+    extent varies by row, xs[0]/xs[-1] are columns of the first/last nonzero
+    PIXEL, not the global min/max column. An L-shaped mask exposed this: a
+    vertical strip at col 10 across all rows + a horizontal strip at the
+    bottom row across cols 50-90 yielded a 1px-wide bbox at col 10 instead of
+    the true 10..90 span. The fix uses min()/max() over the index arrays.
+    """
+    mask = np.zeros((30, 100), dtype=np.uint8)
+    # Vertical strip: col 10, every row (rows 0..29).
+    mask[:, 10] = 255
+    # Horizontal strip: row 25, cols 50..90.
+    mask[25, 50:91] = 255
+
+    bbox = compute_mask_bbox(mask)
+    # True bbox: x from col 10 to col 90 (width 81), y from row 0 to row 29
+    # (height 30, since the vertical strip spans all rows). The buggy code
+    # returned (10, 0, 1, 30) — correct height but 1px-wide column.
+    assert bbox == (10, 0, 81, 30), (
+        f"L-shaped bbox must span the full painted extent; got {bbox}"
+    )
+
+    # Every nonzero pixel must lie within the returned bbox, and the bbox
+    # must be tight (each edge touched by at least one painted pixel).
+    x, y, w, h = bbox
+    ys, xs = np.where(mask > 0)
+    assert xs.min() == x and xs.max() == x + w - 1
+    assert ys.min() == y and ys.max() == y + h - 1
+
+
+@pytest.mark.unit
+def test_inpaint_second_pass_preserves_first_result(qtbot, tmp_path) -> None:
+    """CR-13: a second inpaint composites onto the CURRENT image, not the
+    pre-first-inpaint base.
+
+    Before CR-13, ``set_image_from_numpy`` composited the bbox region onto
+    ``_original_image_numpy`` (captured once, before the FIRST inpaint). A
+    second inpaint of a disjoint region reverted the first region to its
+    original (un-inpainted) state. The fix composites onto the live pixmap
+    read via ``get_image_numpy()`` so prior inpaints survive.
+    """
+    window = _make_window(qtbot, tmp_path)
+    canvas = window.canvas
+    # Load a solid-color base image (distinctive value so we can detect reversion).
+    base_img = QImage(20, 20, QImage.Format.Format_RGB32)
+    base_img.fill(QColor(10, 20, 30))
+    canvas.set_image(QPixmap.fromImage(base_img))
+    QApplication.processEvents()
+
+    # Simulate inpaint of region A (bbox 2,2,4,4): replace that region with a
+    # distinctive "inpainted" color.
+    inpaint_a = canvas.get_image_numpy().copy()
+    inpaint_a[2:6, 2:6] = np.array([200, 100, 50], dtype=np.uint8)
+    canvas.set_image_from_numpy(inpaint_a, bbox=(2, 2, 4, 4))
+    QApplication.processEvents()
+    after_a = canvas.get_image_numpy()
+    # Region A now reflects the inpaint.
+    assert tuple(after_a[3, 3]) == (200, 100, 50), "region A not inpainted on pass 1"
+
+    # Simulate a second inpaint of disjoint region B (bbox 10,10,4,4) onto the
+    # CURRENT (already-A-inpainted) image.
+    current = canvas.get_image_numpy().copy()
+    current[10:14, 10:14] = np.array([90, 190, 20], dtype=np.uint8)
+    canvas.set_image_from_numpy(current, bbox=(10, 10, 4, 4))
+    QApplication.processEvents()
+    after_b = canvas.get_image_numpy()
+
+    # Region B reflects the second inpaint.
+    assert tuple(after_b[11, 11]) == (90, 190, 20), "region B not inpainted on pass 2"
+    # CR-13: region A MUST still reflect the FIRST inpaint (not reverted to base).
+    assert tuple(after_b[3, 3]) == (200, 100, 50), (
+        "region A was reverted to base on second inpaint (CR-13 regressed)"
+    )
+
+    # The before/after preview original is still the pre-any-inpaint base.
+    assert canvas._original_image_numpy is not None
+    assert tuple(canvas._original_image_numpy[3, 3]) == (10, 20, 30), (
+        "preview original should remain the pre-first-inpaint base"
+    )
