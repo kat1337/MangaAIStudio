@@ -485,11 +485,24 @@ class EditorCanvas(QGraphicsView):
         ptr = qimg.bits()
         if ptr is None:
             return None
-        # PySide6's bits() returns a memoryview; materialize to bytes so numpy
-        # can consume it (same workaround as set_mask).
-        arr = np.frombuffer(bytes(ptr), dtype=np.uint8).reshape(
-            qimg.height(), qimg.width(), 3
-        )
+        h, w = qimg.height(), qimg.width()
+        bytes_per_line = qimg.bytesPerLine()
+        # Qt pads each scanline to 4-byte alignment, so bytes_per_line can be
+        # strictly greater than w*3 (e.g. a 1497px-wide RGB888 image is 4491
+        # bytes/row but Qt allocates 4492). Reshaping the raw buffer directly
+        # as (H, W, 3) fails for any width where w*3 is not a multiple of 4
+        # (CR-08, surfaced by a real 2081x1497 manga page). PySide6's bits()
+        # returns a memoryview; materialize to bytes, then take exactly w*3
+        # bytes per row and skip the padding tail.
+        raw = bytes(ptr)
+        if bytes_per_line == w * 3:
+            # Fast path: no padding (width*3 already 4-aligned).
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
+        else:
+            # Strided path: slice the unpadded row content and let numpy copy
+            # it into a contiguous (H, W, 3) array.
+            strided = np.frombuffer(raw, dtype=np.uint8, count=h * bytes_per_line)
+            arr = strided.reshape(h, bytes_per_line)[:, : w * 3].reshape(h, w, 3)
         # MANDATORY .copy() — detach from the QImage buffer before qimg GCs.
         return arr.copy()
 
@@ -877,7 +890,15 @@ class EditorCanvas(QGraphicsView):
 
     # ----------------------------------------------------------- keyboard
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        """Track Space for pan; Shift toggles Brush<->Eraser (UI-SPEC surface 6)."""
+        """Track Space for pan; Shift toggles Brush<->Eraser (UI-SPEC surface 6).
+
+        Keys we do not explicitly handle are passed to ``event.ignore()`` (NOT
+        ``super().keyPressEvent()``) so the event propagates up to the
+        MainWindow and its application-wide ``QShortcut`` bindings (Ctrl+Z /
+        Ctrl+Shift+Z / Alt+Z / Alt+Shift+Z undo/redo) can fire. The QGraphicsView
+        base class accepts unhandled keys, which was shadowing those shortcuts
+        when the canvas had focus (CR-09).
+        """
         if event.key() == Qt.Key.Key_Space and not self._space_held:
             self._space_held = True
             if not self._panning:
@@ -896,7 +917,13 @@ class EditorCanvas(QGraphicsView):
         ):
             self.is_eraser_modifier = True
             self._update_cursor_visuals()
-        super().keyPressEvent(event)
+            # Fall through: still ignore() so modifier-combo shortcuts
+            # (Ctrl+Shift+Z) are not shadowed when the canvas has focus.
+        # Ignore (do NOT accept) so parent widgets / QShortcuts see the event.
+        # Calling super().keyPressEvent(event) here lets QGraphicsView accept
+        # the key, which swallows Ctrl+Z/Ctrl+Shift+Z before the MainWindow's
+        # undo/redo QShortcuts can fire (CR-09).
+        event.ignore()
 
     def keyReleaseEvent(self, event) -> None:  # noqa: N802
         """Clear the Space-pan flag; Shift release restores Brush from Eraser."""

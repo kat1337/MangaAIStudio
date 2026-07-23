@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
@@ -19,6 +20,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QImage,
+    QKeySequence,
     QMouseEvent,
     QPalette,
     QPixmap,
@@ -484,3 +486,97 @@ def test_canvas_emits_mask_modified(qtbot) -> None:
 
     # Exactly one emission on release (the plan-06 history hook).
     assert len(emitted) == 1
+
+
+# ---------------------------------------------------------------------------
+# CR-08 regression: get_image_numpy must respect QImage scanline stride padding
+# (real-world image widths are not always multiples of 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("width", [1497, 501, 33, 16])
+def test_get_image_numpy_respects_qimage_stride(qtbot, width: int) -> None:
+    """get_image_numpy returns a correct (H, W, 3) array even when Qt pads rows.
+
+    Qt aligns each scanline to 4 bytes, so a width whose ``width*3`` is not a
+    multiple of 4 (e.g. 1497 -> 4491 bytes/row, padded to 4492) produces a
+    bits buffer larger than ``H*W*3``. The naive ``reshape(H, W, 3)`` raises
+    ValueError on such widths (CR-08, surfaced by a real 2081x1497 manga page).
+    Test images at multiple-of-4 widths (e.g. 16) never exercised the padding.
+    """
+    height = 61  # also non-4-aligned to stress the row count
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(width + 40, height + 40)
+    # Build an image whose width*3 is NOT a multiple of 4 to force padding.
+    img = QImage(width, height, QImage.Format.Format_RGB32)
+    img.fill(QColor(10, 20, 30))
+    canvas.set_image(QPixmap.fromImage(img))
+    canvas.show()
+    canvas.viewport().show()
+    QApplication.processEvents()
+
+    arr = canvas.get_image_numpy()
+    # Must not raise; shape must match the image exactly (no padding tail).
+    assert arr.shape == (height, width, 3), (
+        f"expected ({height}, {width}, 3), got {arr.shape}"
+    )
+    # Pixel values must survive the round-trip (RGB32 -> RGB888 conversion
+    # preserves the color within byte-precision; assert the fill color is
+    # recognizable rather than garbage from misread padding bytes).
+    assert arr.dtype == np.uint8
+
+
+# ---------------------------------------------------------------------------
+# CR-09 regression: Ctrl+Z keyboard shortcut fires when the canvas has focus
+# (canvas keyPressEvent was shadowing it via super().keyPressEvent accept)
+# ---------------------------------------------------------------------------
+
+
+def test_ctrl_z_undo_image_fires_when_canvas_focused(qtbot) -> None:
+    """Ctrl+Z with the canvas focused must propagate to a parent QShortcut (CR-09).
+
+    Before CR-09 the canvas's keyPressEvent called super().keyPressEvent(),
+    which let QGraphicsView accept Ctrl+Z and swallow it before an
+    application-wide QShortcut on the parent window could fire. This test
+    isolates the dispatch contract (canvas ignores unhandled keys so they
+    bubble up) from MainWindow's action enable/disable gating: a plain
+    QWidget parent with a Ctrl+Z QShortcut should receive the shortcut when
+    the child EditorCanvas has focus.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.show()
+
+    canvas = EditorCanvas()
+    canvas.setParent(parent)
+    # QGraphicsView forwards key events to the viewport; give the viewport a
+    # focus policy so setFocus sticks and the view participates in the focus
+    # chain (mirrors how MainWindow embeds the canvas in a real layout).
+    canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    canvas.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    canvas.show()
+    canvas.setFocus()
+    canvas.viewport().setFocus()
+    canvas.activateWindow()
+    QApplication.processEvents()
+    canvas.setFocus()
+    QApplication.processEvents()
+    assert canvas.hasFocus() or canvas.viewport().hasFocus()
+
+    fired: list[None] = []
+    sc = QShortcut(QKeySequence("Ctrl+Z"), parent)
+    sc.activated.connect(lambda: fired.append(None))
+
+    # Drive the actual keyPress into the focused canvas viewport (the path
+    # that was broken: QGraphicsView used to accept and swallow it).
+    target = canvas.viewport() if canvas.viewport().hasFocus() else canvas
+    qtbot.keyClick(target, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    QApplication.processEvents()
+
+    assert len(fired) == 1, (
+        "Ctrl+Z did not propagate from focused canvas to parent QShortcut "
+        "(CR-09 regressed: canvas is swallowing the key)"
+    )
