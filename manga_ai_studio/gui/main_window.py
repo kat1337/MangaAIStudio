@@ -1168,35 +1168,58 @@ class MainWindow(QMainWindow):
             return "torch"
 
     def _resolve_inpainting_model_path(self) -> Path:
-        """Return the LaMa model path from config or the PanelCleaner default.
+        """Return the LaMa model path, downloading it on first use if missing.
 
-        Delegates to ``get_inpainting_model_path(config)`` where ``config`` is
-        the ``Config`` instance (Config has ``get_model_cache_dir``; Profile
-        does NOT — CR-02 gap closure). The vendored function
-        (model_downloader.py:143-149) returns
-        ``config.get_model_cache_dir() / "anime-manga-big-lama.pt"`` — the
-        correct Config type and the correct vendored default filename (NOT the
-        deprecated ``big-lama.pt``).
+        Mirrors :meth:`_resolve_detection_model_path`: the vendored
+        ``download_inpainting_model(cache_dir)`` actually fetches the ~200MB
+        weights into ``config.get_model_cache_dir()`` and returns the path,
+        while ``get_inpainting_model_path(config)`` only returns a path
+        string (no download). Using the download function is required for
+        the first-run UX to work (CR-10 UAT gap closure: CR-02 made the path
+        correct but never triggered the download, so first-run inpaint raised
+        ``FileNotFoundError`` at ``SimpleLama`` construction time).
 
-        On filesystem failure (``FileNotFoundError`` / ``OSError``), returns
-        the same vendored default under the cache dir. Programming errors
+        On filesystem/network failure (``FileNotFoundError`` / ``OSError``),
+        returns the vendored default path under the cache dir so
+        ``SimpleLama`` surfaces a meaningful ``FileNotFoundError`` pointing at
+        a real, findable path (T-01-04). Programming errors
         (``AttributeError``, ``TypeError``, ``ValueError``) PROPAGATE so
         signature drift and wrong-arg bugs surface in dev/test
         (regression-guarded by
         ``test_resolve_inpainting_model_path_programming_errors_propagate``).
         """
         config = self.profile_manager.config
-        from panelcleaner.model_downloader import get_inpainting_model_path
+        cache_dir = config.get_model_cache_dir()
+        from panelcleaner.model_downloader import (
+            get_inpainting_model_path,
+            download_inpainting_model,
+        )
 
+        # If the model is already present (prior download, manual install, or
+        # a copy from an upstream pcleaner install), return the existing path
+        # immediately — no re-download. This honors an existing 200MB file
+        # without forcing a redundant fetch.
+        expected = Path(get_inpainting_model_path(config))
+        if expected.is_file():
+            return expected
+
+        # download_inpainting_model(cache_dir) -> Path | None (None on download
+        # failure, e.g. network offline). Handle both: a real path on success,
+        # or fall back to the vendored default filename under the cache dir.
         try:
-            return Path(get_inpainting_model_path(config))
+            resolved = download_inpainting_model(cache_dir)
         except (FileNotFoundError, OSError) as exc:
-            # Legitimate filesystem failure modes (T-01-08). Log so the
-            # failure is observable; the fallback path still points under the
-            # cache dir so a manual install to
-            # cache_dir/anime-manga-big-lama.pt works.
+            # Legitimate filesystem/network failure modes during a model
+            # download (T-01-08). Log so the failure is observable in logs
+            # rather than silent; the fallback path still lets a manual
+            # install to cache_dir/anime-manga-big-lama.pt succeed.
             logger.warning(f"Inpainting model resolution failed: {exc}")
-            return config.get_model_cache_dir() / "anime-manga-big-lama.pt"
+            resolved = None
+        if resolved is not None:
+            return Path(resolved)
+        # Vendored default (model_downloader.py INPAINTING model filename)
+        # under the cache dir so SimpleLama surfaces a meaningful path.
+        return expected
 
     def inpaint(self) -> None:
         """Run LaMa inpainting on the current page + mask (Tools -> Inpaint, C).
