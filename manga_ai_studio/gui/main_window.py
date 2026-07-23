@@ -1037,7 +1037,7 @@ class MainWindow(QMainWindow):
         return {"mask": mask_refined, "blocks": blk_list}
 
     def _resolve_detection_model_path(self) -> Path:
-        """Return the CTD model path from config, or the PanelCleaner default.
+        """Return the CTD model path, downloading it on first use only.
 
         Delegates to ``download_torch_model(cache_dir)`` where
         ``cache_dir = config.get_model_cache_dir()`` (model_downloader.py:112;
@@ -1050,6 +1050,13 @@ class MainWindow(QMainWindow):
         wrong-arg bugs surface in dev/test instead of silently degrading in
         production (CR-01 gap closure, regression-guarded by
         ``test_resolve_detection_model_path_programming_errors_propagate``).
+
+        CR-11 (UAT gap closure): the vendored ``download_torch_model``
+        unconditionally re-downloads — it never checks whether the file
+        already exists in the cache. Without an existence check here, every
+        detect call re-fetched the ~80MB CTD model even when it was already
+        cached. We check the cache path first and short-circuit when the
+        model is present (mirrors :meth:`_resolve_inpainting_model_path`).
         """
         config = self.profile_manager.config
         profile = config.current_profile
@@ -1058,6 +1065,14 @@ class MainWindow(QMainWindow):
             return Path(configured)
         cache_dir = config.get_model_cache_dir()
         from panelcleaner.model_downloader import download_torch_model
+
+        # If the model is already present (prior download, manual install, or
+        # a copy from an upstream pcleaner install), return the existing path
+        # immediately — no re-download. The vendored download_torch_model
+        # would otherwise fetch 80MB on every detect call (CR-11).
+        expected = cache_dir / "comictextdetector.pt"
+        if expected.is_file():
+            return expected
 
         # download_torch_model(cache_dir) -> Path | None (None on download
         # failure, e.g. network offline). Handle both: a real path on success,
@@ -1075,7 +1090,7 @@ class MainWindow(QMainWindow):
             return Path(resolved)
         # Vendored default (model_downloader.py:16 TORCH_MODEL_NAME) under the
         # cache dir so TorchCTDModel.load surfaces a meaningful path.
-        return cache_dir / "comictextdetector.pt"
+        return expected
 
     def _on_detection_progress(self, payload) -> None:
         """Update the status bar + progress bar (UI-SPEC surface 5/9)."""

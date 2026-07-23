@@ -472,8 +472,15 @@ def test_resolve_detection_model_path_programming_errors_propagate(
     it to raise ``TypeError``. The narrowed except (FileNotFoundError, OSError)
     must NOT catch it — programming errors propagate to dev/test so the bug
     surfaces immediately instead of silently degrading in production.
+
+    The config's cache_dir is pointed at an isolated ``tmp_path`` so the
+    existence check (CR-11) finds no cached model and proceeds to the
+    download call where the TypeError fires.
     """
     window = _make_window(qtbot, tmp_path)
+    # Isolate the cache so the CR-11 existence check does not short-circuit
+    # against a model left by a prior app run or sibling test.
+    window.profile_manager.config.cache_dir = tmp_path / "isolated-cache"
 
     def _raise_typeerror(_cache_dir):
         raise TypeError("simulated signature drift")
@@ -484,3 +491,40 @@ def test_resolve_detection_model_path_programming_errors_propagate(
 
     with pytest.raises(TypeError, match="simulated signature drift"):
         window._resolve_detection_model_path()
+
+
+@pytest.mark.unit
+def test_resolve_detection_model_path_skips_download_when_cached(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """CR-11: a cached model short-circuits the download.
+
+    The vendored ``download_torch_model`` unconditionally re-downloads (it
+    never checks whether the file exists), so without an existence check in
+    the resolver every detect call re-fetched ~80MB. When
+    ``cache_dir/comictextdetector.pt`` already exists, the resolver MUST
+    return it immediately and NOT call the download function at all.
+    """
+    window = _make_window(qtbot, tmp_path)
+    # Isolate the cache so the test does not touch the real AppData cache dir
+    # and is hermetic against sibling tests / prior app runs.
+    window.profile_manager.config.cache_dir = tmp_path / "isolated-cache"
+    cache_dir = window.profile_manager.config.get_model_cache_dir()
+    expected = cache_dir / "comictextdetector.pt"
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    expected.write_bytes(b"fake-cached-model")  # simulate a prior download
+
+    # If the resolver calls download_torch_model, this fails the test loudly.
+    def _fail_if_called(_cache_dir):
+        raise AssertionError(
+            "download_torch_model was called but the model is already cached (CR-11)"
+        )
+
+    monkeypatch.setattr(
+        "panelcleaner.model_downloader.download_torch_model", _fail_if_called
+    )
+
+    resolved = window._resolve_detection_model_path()
+    assert resolved == expected, (
+        f"resolver must return the cached path {expected}, got {resolved}"
+    )
