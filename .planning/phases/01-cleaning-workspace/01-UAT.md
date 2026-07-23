@@ -85,3 +85,8 @@ blocked: 1
     - "Reproduce in a pytest-qt test: focus the canvas, send QKeyEvent for Ctrl+Z, assert on_undo_image is called"
     - "Fix: either set QShortcut context to Qt.ApplicationShortcut, OR ensure canvas keyPressEvent calls event.ignore() for unhandled key combos so the shortcut propagates"
   debug_session: ""
+
+## Deferred (not Phase 1 gaps — refinements for a later stage)
+
+- **Detection mask dilation (CLEAN-02 polish):** the CTD heatmap boundary is conservative and leaves the edges of letters unmasked, so inpaint doesn't fully clean them. The user (UAT 2026-07-22) requested "add a few pixels extra to each letter it detects." Deferred to a later tuning stage alongside other detection-quality parameters (threshold, min-area, dilation radius). Not a Phase 1 correctness gap — detection works; the mask just needs a small morphological dilation post-processing step (cv2.dilate or a configurable radius in TorchCTDModel.postprocess). Track for Phase 2 or a dedicated polish phase.
+
