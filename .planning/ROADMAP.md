@@ -85,10 +85,17 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 02-01-PLAN.md — Image output writer: adapted save_optimized (PNG/JPG kwargs, DPI/mode) + D-03 empty-mask copy2 passthrough (PROJ-02, FLOW-03)
 - [ ] 02-02-PLAN.md — Per-page mask persistence (D-11): ImageFile.has_mask_content + on_page_selected save/restore seam + _last_page_index (FLOW-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 02-03-PLAN.md — Batch runner: batch_detect/batch_clean/batch_detect_and_clean on one Worker loop, abort-between-pages, load-once (FLOW-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 02-04-PLAN.md — MainWindow wiring: Export Page (Ctrl+E) + three batch actions + cancel + progress + nav-gate + manual smoke (PROJ-02, FLOW-03)
 
 **UI hint**: yes

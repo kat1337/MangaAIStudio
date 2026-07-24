@@ -1,11 +1,14 @@
 ---
 phase: 2
 slug: cleaning-output-batch
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: approved
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-07-23
+approved: 2026-07-23
 ---
+
+> **Wave 0 model (in-plan TDD).** This phase creates its test files via in-plan TDD: each plan's Task 1 is the RED test (the Wave 0 stub), and Task 2 is the GREEN implementation. Every implementation task has an automated verify that runs a test created by the preceding task in the same plan, and there are zero `<automated>MISSING</automated>` references. The "Wave 0 Requirements" checklist below maps to those Task-1 RED tests.
 
 # Phase 2 — Validation Strategy
 
@@ -65,13 +68,15 @@ created: 2026-07-23
 
 ## Wave 0 Requirements
 
-- [ ] `tests/test_core/test_image_io.py` — stubs for PROJ-02 (PNG/JPG kwargs, DPI/mode) + FLOW-03 D-03 (copy2 passthrough)
-- [ ] `tests/test_core/test_batch_runner.py` — stubs for FLOW-03 batch loop with fake adapters (FakeCTD/FakeLama recording calls), abort-between-pages, per-page failure, model-loaded-once, output-to-cleaned/
-- [ ] `tests/test_gui_batch.py` — stubs for PROJ-02 Export action + FLOW-03 GUI wiring (mask persistence, `_op_running` gate, progress signals) via pytest-qt
-- [ ] Fake-adapter fixtures — extend `FakeSimpleLama` pattern to `FakeDetectionModel`/`FakeInpaintModel` (same `detect`/`inpaint` signatures); shared fixture in `tests/conftest.py` or new `tests/test_core/conftest.py`
-- [ ] Framework install: none needed (pytest/pytest-qt/pytest-mock declared + present from Phase 1)
+> These map to each plan's Task 1 (RED test) under the in-plan TDD model — see the frontmatter note.
 
-*Existing infrastructure covers framework + fixtures; only new test files + fake adapters are Wave 0 work.*
+- [x] `tests/test_core/test_image_io.py` — stubs for PROJ-02 (PNG/JPG kwargs, DPI/mode) + FLOW-03 D-03 (copy2 passthrough) → **02-01-PLAN.md Task 1**
+- [x] `tests/test_core/test_batch_runner.py` — stubs for FLOW-03 batch loop with fake adapters (FakeCTD/FakeLama recording calls), abort-between-pages, per-page failure, model-loaded-once, output-to-cleaned/ → **02-03-PLAN.md Task 1**
+- [x] `tests/test_gui_batch.py` — stubs for PROJ-02 Export action + FLOW-03 GUI wiring (mask persistence, `_op_running` gate, progress signals) via pytest-qt → **02-02-PLAN.md Task 1** + **02-04-PLAN.md Task 1**
+- [x] Fake-adapter fixtures — extend `FakeSimpleLama` pattern to `FakeDetectionModel`/`FakeInpaintModel` (same `detect`/`inpaint` signatures); shared fixture in `tests/test_core/conftest.py` → **02-03-PLAN.md Task 1**
+- [x] Framework install: none needed (pytest/pytest-qt/pytest-mock declared + present from Phase 1)
+
+*Existing infrastructure covers framework + fixtures; test files + fake adapters are created via each plan's Task 1 (RED).*
 
 ---
 
@@ -86,11 +91,11 @@ created: 2026-07-23
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references (via in-plan TDD Task 1 per plan)
+- [x] No watch-mode flags
+- [x] Feedback latency < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-07-23 (post plan-checker `VERIFICATION PASSED`; companion-artifact bookkeeping reconciled)

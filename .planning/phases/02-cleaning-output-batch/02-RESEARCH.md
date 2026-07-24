@@ -578,27 +578,25 @@ def export_page(self):
 | A4 | A status-bar Cancel button (or a menu Cancel action) is an acceptable "Cancel affordance" within the "no new widgets" constraint (D-10) | Open Questions Q1 | D-10 forbids new *progress* widgets; a Cancel control is arguably a control, not a progress widget. Needs user/planner confirmation. `[ASSUMED]` |
 | A5 | Navigation stays enabled (read-only) during a batch (D-08 leaves this to researcher/planner) | Open Questions Q2 | If disabled, the user can't preview progress on other pages; if enabled, `on_page_selected`'s D-11 save-restore must be safe during a running batch (it touches `ImageFile.mask`, which the batch worker may also be writing — a potential race). Recommendation: disable page-switch during batch to avoid the race. `[ASSUMED]` |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Where does the Cancel control live, and is it "a new widget" (D-10)?**
-   - What we know: D-09 requires cancel via `SharableFlag`; D-10 says "no new widgets" for *progress*. A Cancel button is a control, not progress UI.
-   - What's unclear: Is a status-bar Cancel button acceptable, or must it be a menu action / keyboard shortcut (Esc) to honor D-10 strictly?
-   - Recommendation: A `Tools → Cancel Batch` menu action (disabled unless a batch is running) + an Esc `QShortcut` is the safest read of D-10 (no new visible widget, reuses menu/shortcut infrastructure). Flag for planner/user. `[ASSUMED A4]`
+> All four questions are resolved by concrete implementation in the Phase 2 plans (verified by gsd-plan-checker, `VERIFICATION PASSED`, zero blockers).
 
-2. **Is page navigation enabled during a batch (D-08 open question)?**
-   - What we know: D-08 sets `_op_running` (disables model actions) and says navigation/viewing "can stay enabled (read-only)" but defers to researcher/planner.
-   - What's unclear: The D-11 persistence seam writes `ImageFile.mask` on `on_page_selected`. If a batch worker is concurrently writing `ImageFile.mask` (per-page detect result), there's a write/write race on the same dict entry.
-   - Recommendation: Disable page-switch during a batch (set the FileTable non-interactive while `_op_running` is True for a batch). This avoids the race entirely and matches "blocks the editor." The canvas still shows the last-viewed page (read-only viewing preserved). `[ASSUMED A5]`
+1. **Where does the Cancel control live, and is it "a new widget" (D-10)?** `[RESOLVED A4]`
+   - Decision: A `Tools → Cancel Batch` menu action (disabled unless a batch is running) + an Esc `QShortcut`. No new visible progress widget — honors D-10. Reuses menu/shortcut infrastructure.
+   - Implemented in: **02-04-PLAN.md** (UI wiring — `action_cancel_batch` + Esc QShortcut, wired to the Worker's `abort_signal`).
 
-3. **Should Batch Clean re-detect if a page has no mask at all (vs. D-03 empty-mask passthrough)?**
-   - What we know: D-03 says an empty mask copies the original through. But a page with `mask is None` (never detected) is distinct from a page whose mask is empty after review.
-   - What's unclear: In Batch Clean alone (no detect), should a never-detected page be skipped+copied (D-03 literal) or treated as an error?
-   - Recommendation: Treat `mask is None` identically to an empty mask (copy original through) — D-03's intent is "no work to do → passthrough." Simpler and matches user expectation ("clean everything; pages with nothing to clean just copy"). Confirm at planning.
+2. **Is page navigation enabled during a batch (D-08 open question)?** `[RESOLVED A5]`
+   - Decision: **Disable page-switch during a batch** — `file_table.setEnabled(False)` while `_op_running` is True for a batch. Avoids the write/write race on `ImageFile.mask` entirely. The canvas still shows the last-viewed page (read-only viewing preserved), consistent with D-08 "blocks the editor."
+   - Implemented in: **02-04-PLAN.md** (the `file_table` is disabled before the batch worker is wired — closing the race window before it opens).
 
-4. **Memory ceiling for large folders (assumption A1)?**
-   - What we know: Each persisted mask QImage is ~W×H×4 bytes (ARGB32). A 1500×2200 page = ~13MB; 60 pages = ~780MB.
-   - What's unclear: Is there a folder size where this becomes a problem on a hobbyist's 8GB machine?
-   - Recommendation: v1 accepts the in-memory cost (typical chapters are 30-60 pages); document a "very large folders may use significant memory" note. Phase 5 `.mas` persistence is the long-term answer. No action this phase unless the user flags a target folder size.
+3. **Should Batch Clean re-detect if a page has no mask at all (vs. D-03 empty-mask passthrough)?** `[RESOLVED]`
+   - Decision: Treat `mask is None` (never detected) identically to an empty mask — copy the original through (D-03 intent: "no work to do → passthrough"). No re-detection in Batch Clean (D-02: existing masks used as-is).
+   - Implemented in: **02-03-PLAN.md** (the batch loop checks `has_mask_content`; a `None` mask and an empty mask both route to the passthrough copy).
+
+4. **Memory ceiling for large folders (assumption A1)?** `[RESOLVED — no action this phase]`
+   - Decision: v1 accepts the in-memory cost (typical chapters are 30-60 pages; ~780MB at 60 pages is within hobbyist 8GB machines). Phase 5 `.mas` disk persistence is the long-term answer. No action this phase.
+   - Noted: This is a v1 acceptance; revisit if a user reports a target folder size that exceeds comfortable memory.
 
 ## Environment Availability
 
