@@ -27,7 +27,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Project/Export
 
 - [ ] **PROJ-01**: User can save the full page state (image, masks, boxes, text, translation) as a `.mas` project file and reopen it to resume work
-- [ ] **PROJ-02**: User can export the cleaned (text-removed, inpainted) page as PNG or JPG
+- [x] **PROJ-02**: User can export the cleaned (text-removed, inpainted) page as PNG or JPG
 - [ ] **PROJ-03**: User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
 - [ ] **PROJ-04**: User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
 
@@ -35,7 +35,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **FLOW-01**: User can import a folder of images and navigate between pages via a file-list sidebar (following the PanelCleaner/Poricom sidebar layout approach)
 - [x] **FLOW-02**: User can undo/redo image (inpainting) and mask (painting) operations via separate stacks, each with redo
-- [ ] **FLOW-03**: User can batch-process a chapter folder through the cleaning pipeline (detect → clean → save) with a progress indicator
+- [x] **FLOW-03**: User can batch-process a chapter folder through the cleaning pipeline (detect → clean → save) with a progress indicator
 
 ## v2 Requirements
 
@@ -91,12 +91,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEXT-04 | Phase 4 | Pending |
 | TEXT-05 | Phase 4 | Pending |
 | PROJ-01 | Phase 5 | Pending |
-| PROJ-02 | Phase 2 | Pending |
+| PROJ-02 | Phase 2 | Complete |
 | PROJ-03 | Phase 5 | Pending |
 | PROJ-04 | Phase 5 | Pending |
 | FLOW-01 | Phase 1 | Complete |
 | FLOW-02 | Phase 1 | Complete |
-| FLOW-03 | Phase 2 | Pending |
+| FLOW-03 | Phase 2 | Complete |
 
 **Coverage:**
 

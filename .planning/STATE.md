@@ -2,19 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 2
-current_phase_name: Cleaning Output & Batch
+current_phase: 02
+current_phase_name: cleaning-output-batch
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-07-24T02:50:45.199Z"
-last_activity: 2026-07-23
-last_activity_desc: Phase 01 complete, transitioned to Phase 2
+stopped_at: Completed 02-01-PLAN.md (image output writer)
+last_updated: "2026-07-25T03:30:27.400Z"
+last_activity: 2026-07-25
+last_activity_desc: Phase 02 execution started
 progress:
-  total_phases: 5
+  total_phases: 2
   completed_phases: 1
-  total_plans: 7
-  completed_plans: 7
-  percent: 20
+  total_plans: 11
+  completed_plans: 8
 ---
 
 # Project State
@@ -24,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 01 — cleaning-workspace
+**Current focus:** Phase 02 — cleaning-output-batch
 
 ## Current Position
 
-Phase: 2 — Cleaning Output & Batch
-Plan: Not started
+Phase: 02 (cleaning-output-batch) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-07-23 — Phase 01 complete, transitioned to Phase 2
+Last activity: 2026-07-25 — Phase 02 execution started
 
 Progress: [████████░░] 83%
 
@@ -67,6 +66,7 @@ Progress: [████████░░] 83%
 | Phase 01 P05 | ~35 min | 2 tasks | 12 files |
 | Phase 01 P06 | 12 min | 2 tasks | 4 files |
 | Phase 01 P07 | 13 min | 3 tasks | 4 files |
+| Phase 02 P01 | 5 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -98,6 +98,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-06: image undo swaps the CURRENT image's region into redo on pop (MangaCleaner_GPU history.py:593-595 pattern) — a redo reverses the undo with the captured post-edit region
 - [Phase 01]: CR-03 fix: _on_inpaint_finished now slices pre_inpaint[y:y+h, x:x+w].copy() (Pitfall-2 discipline) before pushing to history; the pushed patch is bbox-shaped (not the full image); bare except Exception: pass removed (WR-05 closed). Test widened to use REAL HistoryManager + assert patch.shape[:2] == (bbox_h, bbox_w).
 - [Phase 01]: Gap-closure discipline (plan 01-07): regression tests MUST exercise the REAL vendored function on the buggy site (no monkeypatch) so arity/arg-type/shape bugs surface in CI; only the propagation-guard test patches, and only to assert the error propagates. Both resolver excepts narrowed to (FileNotFoundError, OSError); TypeError/AttributeError propagate (T-01-17).
+- [Phase ?]: PNG stores DPI as integer pixels-per-meter, so 300 DPI round-trips to 299.9994 — assert within 1 DPI in test_preserves_dpi_mode, not exact equality (02-01)
+- [Phase ?]: Use filecmp.cmp (not nonexistent shutil.cmp) for byte comparison in passthrough test (02-01)
+- [Phase ?]: core/image_io.py is pure stdlib+numpy+PIL (no Qt/torch) so it is thread-safe and unit-testable headless — adapted from PanelCleaner save_optimized under GPL v3 D-12 (02-01)
 
 ### Pending Todos
 
@@ -123,8 +126,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-24T01:45:55.878Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-cleaning-output-batch/02-CONTEXT.md
+Last session: 2026-07-25T03:30:27.388Z
+Stopped at: Completed 02-01-PLAN.md (image output writer)
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
