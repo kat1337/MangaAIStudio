@@ -419,3 +419,293 @@ def test_op_running_cleared_after_batch(qtbot, tmp_path, monkeypatch) -> None:
     assert window.action_detect_text.isEnabled() is True, (
         "Detect Text must re-enable after the batch finishes (Pitfall 7)"
     )
+
+
+# ===========================================================================
+# Plan 02-04 checkpoint-rework: regression tests for the 4 user-reported bugs.
+#
+# The plan's blocking human-verify checkpoint was tested and returned four
+# defects. Each test below reproduces the user-reported behavior with a
+# failing-test-first regression guard. All four are headless (fake adapters,
+# no torch); they drive the same MainWindow batch-dispatch path the user
+# clicked through.
+#
+#   Bug A — wrong status-bar label during Batch Detect ("Cleaning" shown).
+#   Bug B — cancel does not update the status-bar text (stuck "Inpainting N%").
+#   Bug C — post-batch canvas not refreshed after Batch Clean (no cleaned image
+#           shown, mask overlay not cleared).
+#   Bug D — batch ignores the user's in-canvas mask edits AND the current page
+#           appears unprocessed (D-02 "edits are sacred" + D-11 contract).
+# ===========================================================================
+
+
+def _status_text(window: MainWindow) -> str:
+    """Return the current left status-bar text (trimmed of the ellipsis etc)."""
+    return window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_batch_detect_status_label_says_detecting(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug A: Batch Detect progress status must say "Detecting", not "Cleaning".
+
+    Behavior: ``_on_batch_progress`` is mode-aware. During Batch Detect the
+    status bar must read like "Detecting N% - page" (NOT the hardcoded
+    "Cleaning N% - page"). Regression for the user report "when doing batch
+    detect the bottom bar says cleaning instead".
+    """
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+    assert len(window.image_files) == 2
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        # Emit a per-page progress payload the way _run_batch_task does, so
+        # _on_batch_progress writes its mode-specific status text.
+        if progress_callback is not None:
+            progress_callback.emit((0, pages[0].path.name))
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    # Spy on _on_batch_progress to capture the status text written DURING
+    # progress (the finished summary overwrites it later, so reading the
+    # final text would mask the bug). The progress signal is queued across
+    # the worker/GUI thread boundary, but qtbot.waitUntil pumps the event
+    # loop so the spy runs on the GUI thread.
+    progress_status_texts: list[str] = []
+    orig_progress = window._on_batch_progress
+
+    def _progress_spy(payload):
+        orig_progress(payload)
+        progress_status_texts.append(_status_text(window))
+
+    monkeypatch.setattr(window, "_on_batch_progress", _progress_spy)
+
+    window.batch_detect()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The progress status text written during Batch Detect must say
+    # "Detecting", not the hardcoded "Cleaning" label.
+    assert progress_status_texts, "no progress status captured (progress signal never fired)"
+    assert any("Detect" in t for t in progress_status_texts), (
+        "Batch Detect progress status must say 'Detecting', got: "
+        f"{progress_status_texts!r}"
+    )
+
+
+@pytest.mark.gui
+def test_cancel_batch_updates_status_bar(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug B: cancelling a batch must update the status-bar text.
+
+    Behavior: when the user cancels, the status bar must stop showing the
+    stale "Inpainting N%"/"Cleaning N%" text and indicate cancellation.
+    Regression for the user report "the inpainting x% text at the bottom
+    remains, should change to cancelled when cancelled".
+    """
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+
+    blocker = qtbot.waitSignal(window.batch_abort_requested, timeout=5000)
+
+    # A fake clean that BLOCKS until cancel flips the abort flag, so the
+    # "Inpainting N%" status is live when _cancel_batch runs.
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        if progress_callback is not None:
+            progress_callback.emit((42, pages[0].path.name))
+        # Spin until the abort flag flips (cancel pressed) then return a
+        # partial summary (mimicking the between-pages abort path).
+        if abort_flag is not None:
+            import time
+
+            for _ in range(200):
+                if abort_flag.get():
+                    break
+                time.sleep(0.01)
+        return {"ok": 0, "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
+
+    window.batch_clean()
+    # Wait for the progress emission so the "Cleaning 42%" text is set.
+    qtbot.waitUntil(lambda: "42" in _status_text(window), timeout=5000)
+
+    # Cancel while the batch is mid-run.
+    window._cancel_batch()
+    blocker.wait()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    status = _status_text(window)
+    assert "Cancel" in status, (
+        f"status bar must indicate cancellation, got: {status!r}"
+    )
+    # The stale progress percent must no longer be the headline status.
+    assert "42%" not in status, (
+        f"stale progress percent must not remain after cancel, got: {status!r}"
+    )
+
+
+@pytest.mark.gui
+def test_batch_clean_refreshes_current_page_canvas(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug C: Batch Clean must refresh the current page's canvas on completion.
+
+    Behavior: after a clean-containing batch finishes, the currently-displayed
+    page must reflect the cleaned output (its mask overlay cleared and its
+    image updated) — the same refresh a single-page Inpaint performs in
+    ``_on_inpaint_finished``. Regression for the user report "with batch
+    clean, it returns to the folder but does not clean the mask or load the
+    cleaned images into the app the same way a normal clean would".
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+    assert window._current_page_index() == 0, "precondition: page_a is current"
+
+    # Establish a mask on the canvas for page_a (mimics a detected mask the
+    # clean will consume). Persist it onto ImageFile.mask so the fake clean's
+    # has_mask_content gate passes.
+    _paint_mask_on_canvas(window.canvas)
+    assert window.canvas.has_mask() is True, "precondition: canvas mask present"
+
+    # A distinct cleaned fill value so we can tell the refreshed canvas from
+    # the original solid-white page.
+    cleaned_fill = 123
+
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        # Simulate the cleaning pipeline: write a known cleaned file into
+        # cleaned_dir for every page (the real loop writes via
+        # save_image_optimized). page_a's file uses cleaned_fill so the
+        # post-batch refresh is observable.
+        import numpy as np
+        from PIL import Image
+
+        cleaned_dir.mkdir(parents=True, exist_ok=True)
+        for page in pages:
+            out = cleaned_dir / page.path.name
+            arr = np.full((16, 16, 3), cleaned_fill, dtype=np.uint8)
+            Image.fromarray(arr, mode="RGB").save(out)
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
+
+    before_pixels = window.canvas.get_image_numpy()
+    assert before_pixels is not None, "precondition: canvas has an image"
+
+    window.batch_clean()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The canvas must now show the cleaned page: its mean pixel value must
+    # match cleaned_fill (the original was solid white = 255).
+    after_pixels = window.canvas.get_image_numpy()
+    assert after_pixels is not None, "canvas must still have an image after batch"
+    assert abs(float(after_pixels.mean()) - cleaned_fill) < 2, (
+        "Batch Clean must refresh the current page's canvas to the cleaned "
+        f"output (expected mean ~{cleaned_fill}, got {after_pixels.mean():.1f})"
+    )
+
+    # The consumed mask overlay must be cleared (mirrors _on_inpaint_finished
+    # CR-16): a red overlay must not sit on the now-cleaned page.
+    assert window.canvas.has_mask() is False or not window.canvas.has_mask_content(), (
+        "the consumed mask overlay must be cleared after Batch Clean refresh"
+    )
+
+
+@pytest.mark.gui
+def test_batch_clean_uses_current_canvas_mask_edits(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug D: Batch Clean must flush + use the user's current in-canvas mask.
+
+    Behavior (D-02 "edits are sacred" + D-11 contract): when the user edits
+    the mask on the canvas of the CURRENT page (e.g. erases part of it) and
+    then runs Batch Clean WITHOUT navigating away, the batch must use the
+    EDITED canvas mask — not the stale ``ImageFile.mask`` last persisted on
+    navigation. ``_dispatch_batch`` must flush the current page's canvas mask
+    into its ``ImageFile.mask`` before handing the pages to batch_clean.
+
+    Regression for the user report: "going to another page and erasing part
+    of the mask, then doing batch clean it will ignore the changes to the
+    mask".
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, page_b = _load_two_pages(window, tmp_path)
+
+    # 1. Paint a mask on page_a, navigate to page_b then back to page_a so the
+    #    D-11 seam persists page_a's mask onto ImageFile.mask (the "detected"
+    #    baseline the user is about to edit).
+    _paint_mask_on_canvas(window.canvas)
+    window.file_table.select_path(page_b)
+    window.on_page_selected(page_b)
+    window.file_table.select_path(page_a)
+    window.on_page_selected(page_a)
+    assert window.image_files[0].has_mask_content() is True, (
+        "precondition: page_a has a persisted mask"
+    )
+    persisted_mask_nonzero = int(
+        mask_to_numpy_binary(window.image_files[0].mask).sum()
+    )
+    assert persisted_mask_nonzero > 0, "precondition: persisted mask has content"
+
+    # 2. The user ERASES the entire mask on the canvas (the "edit"). The
+    #    canvas now reports no mask CONTENT, but ImageFile.mask still holds
+    #    the OLD detected mask because navigation (the only flush trigger)
+    #    did not fire. clear_mask() fills transparent in place — has_mask()
+    #    stays True (QImage still exists) but has_mask_content() goes False.
+    window.canvas.clear_mask()
+    assert window.canvas.has_mask_content() is False, (
+        "precondition: canvas mask content erased"
+    )
+    assert window.image_files[0].has_mask_content() is True, (
+        "precondition: ImageFile.mask still holds the stale detected mask "
+        "(the only flush trigger is on_page_selected, which never fired)"
+    )
+
+    # 3. A fake inpainter records the mask it receives for page_a. If the
+    #    flush-before-dispatch fix is present, the recorded mask is EMPTY
+    #    (mirrors the erased canvas) -> batch_clean's D-03 gate then
+    #    passthroughs the page and the inpainter is never called. If the fix
+    #    is absent, the stale persisted mask is read and the inpainter runs.
+    received_masks: list = []
+
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        # Call the REAL _run_batch_task so the D-03 gate + mask read execute
+        # against the ImageFile.mask state _dispatch_batch hands it. This
+        # makes the regression test exercise the actual read path.
+        from manga_ai_studio.core.batch_runner import _run_batch_task
+
+        class _RecordingInpainter:
+            def load(self, *a, **k):
+                pass
+
+            def inpaint(self, image_rgb, mask_binary):
+                received_masks.append(mask_binary)
+                import numpy as np
+
+                return np.full(image_rgb.shape, 7, dtype=np.uint8)
+
+        return _run_batch_task(
+            pages,
+            mode="clean",
+            det_model=None,
+            inp_model=_RecordingInpainter(),
+            cleaned_dir=cleaned_dir,
+            progress_callback=progress_callback,
+            abort_flag=abort_flag,
+        )
+
+    monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
+
+    # Do NOT navigate away — the user ran Batch Clean directly from page_a.
+    window.batch_clean()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The user's edit (erased mask) must be honored: page_a's ImageFile.mask
+    # was flushed from the canvas before dispatch, so its mask is now empty
+    # -> the D-03 gate passthroughs page_a -> the inpainter is NEVER called
+    # for page_a. (If the stale persisted mask were read, the inpainter would
+    # be called once and received_masks would be non-empty.)
+    assert received_masks == [], (
+        "Batch Clean must flush + honor the user's current canvas mask edit "
+        "(erased mask). The inpainter was called with the stale persisted "
+        f"mask: {received_masks!r}"
+    )
+    # And ImageFile.mask for page_a must now reflect the erased (empty) state.
+    assert window.image_files[0].has_mask_content() is False, (
+        "page_a's ImageFile.mask must be flushed to the erased canvas state "
+        "before batch dispatch (D-02 edits are sacred)"
+    )
