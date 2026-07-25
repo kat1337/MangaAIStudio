@@ -370,8 +370,8 @@ def test_batch_sets_op_running(qtbot, tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
 
-    # Dispatch the batch (the method does not exist yet — RED).
-    window._run_batch_detect()
+    # Dispatch the batch (the public menu handler delegates to _dispatch_batch).
+    window.batch_detect()
 
     # D-08 gate: _op_running is True and the model actions are disabled.
     assert window._op_running is True, "_op_running must be True while a batch runs"
@@ -408,7 +408,7 @@ def test_op_running_cleared_after_batch(qtbot, tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
 
-    window._run_batch_clean()
+    window.batch_clean()
 
     # Wait for the finished handler to clear _op_running (Pitfall 7).
     qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)

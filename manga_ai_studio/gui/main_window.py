@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 from natsort import natsorted
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -70,6 +70,12 @@ class MainWindow(QMainWindow):
     full menu bar per UI-SPEC surface 1.
     """
 
+    # D-09 cancel affordance (plan 04): emitting this signal flips the running
+    # batch Worker's ``SharableFlag`` via Worker.abort (worker_thread.py
+    # abort_signal auto-injection). Must be a class-level Signal — PySide6
+    # requires Signal to be defined on the class, not an instance.
+    batch_abort_requested = Signal()
+
     def __init__(self, profile_manager: ProfileManager, parent=None) -> None:
         super().__init__(parent)
         self.profile_manager = profile_manager
@@ -85,6 +91,13 @@ class MainWindow(QMainWindow):
         # Actions that start an async op are disabled while this is set so the
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
+
+        # D-08/D-09 (plan 04): True specifically while a BATCH worker runs.
+        # Distinct from ``_op_running`` so the Cancel Batch action can gate on
+        # it alone (Cancel is only meaningful during a batch, not during a
+        # single-page detect/inpaint). Cleared unconditionally in
+        # ``_on_batch_cleanup`` (Pitfall 7).
+        self._batch_active = False
 
         # D-11: the page index shown BEFORE the current select_path, used to
         # persist the OUTGOING page's mask at the on_page_selected boundary.
@@ -119,6 +132,8 @@ class MainWindow(QMainWindow):
         # Wire the plan-06 actions (HistoryManager push hook + the four
         # undo/redo handlers + shortcuts + button-state refresh).
         self._wire_history_actions()
+        # Wire the plan-04 batch actions (Esc -> Cancel Batch).
+        self._wire_batch_actions()
 
         # Note: drag-drop is handled by the FileTable sidebar (surface 3/4). The
         # FileTable emits files_dropped/folder_dropped, which this window routes
@@ -186,10 +201,40 @@ class MainWindow(QMainWindow):
         self.action_quit.setShortcut(QKeySequence("Ctrl+Q"))
         self.action_quit.triggered.connect(self.close)
 
+        # Export Page (Ctrl+E) — plan 04 (PROJ-02): writes the DISPLAYED canvas
+        # image (not a re-clean) to a user-chosen PNG/JPG path via
+        # QFileDialog.getSaveFileName. The T-01-01 OS-validated-path sibling of
+        # open_image's getOpenFileName (T-02-01 mitigation).
+        self.action_export_page = QAction("Export Page\u2026", self)
+        self.action_export_page.setShortcut(QKeySequence("Ctrl+E"))
+        self.action_export_page.triggered.connect(self.export_page)
+        self.action_export_page.setEnabled(False)
+
+        # Batch submenu (FLOW-03 / D-01): the three batch actions operate on the
+        # currently-open folder (D-06). All three dispatch the Plan 03 entry
+        # points on a single Worker(QRunnable). Disabled until a folder is open
+        # AND no async op is running (refreshed in _refresh_action_states).
+        self.batch_menu = self.menuBar().addMenu("Batch")
+        self.action_batch_detect = QAction("Batch Detect", self)
+        self.action_batch_detect.triggered.connect(self.batch_detect)
+        self.action_batch_detect.setEnabled(False)
+        self.action_batch_clean = QAction("Batch Clean", self)
+        self.action_batch_clean.triggered.connect(self.batch_clean)
+        self.action_batch_clean.setEnabled(False)
+        self.action_batch_detect_and_clean = QAction("Batch Detect + Clean", self)
+        self.action_batch_detect_and_clean.triggered.connect(self.batch_detect_and_clean)
+        self.action_batch_detect_and_clean.setEnabled(False)
+        self.batch_menu.addAction(self.action_batch_detect)
+        self.batch_menu.addAction(self.action_batch_clean)
+        self.batch_menu.addAction(self.action_batch_detect_and_clean)
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.action_open_image)
         file_menu.addAction(self.action_open_folder)
         file_menu.addMenu(self.recent_menu)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export_page)
+        file_menu.addMenu(self.batch_menu)
         file_menu.addSeparator()
         file_menu.addAction(self.action_quit)
 
@@ -324,6 +369,14 @@ class MainWindow(QMainWindow):
             lambda: self.set_active_tool(ToolMode.ERASER)
         )
 
+        # Cancel Batch (D-09) — plan 04: emits batch_abort_requested, which the
+        # running Worker.abort consumes (worker_thread.py abort_signal wiring).
+        # Disabled unless a batch is running (refreshed in _refresh_action_states).
+        # Esc is the keyboard affordance (wired in _wire_batch_actions).
+        self.action_cancel_batch = QAction("Cancel Batch", self)
+        self.action_cancel_batch.triggered.connect(self._cancel_batch)
+        self.action_cancel_batch.setEnabled(False)
+
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
         tools_menu.addAction(self.action_inpaint)
@@ -333,6 +386,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_rectangle)
         tools_menu.addAction(self.action_tool_lasso)
         tools_menu.addAction(self.action_tool_eraser)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_cancel_batch)
 
     def _build_help_menu(self) -> None:
         self.action_about = QAction("About", self)
@@ -496,6 +551,20 @@ class MainWindow(QMainWindow):
             self.action_tool_eraser,
         ):
             act.setEnabled(page_open)
+
+        # Plan 04 batch/export actions. Export Page needs a page open and no
+        # running async op. The three batch actions operate on the open folder
+        # (D-06) and require no running async op (D-08 — a batch blocks the
+        # editor). Cancel Batch is enabled ONLY while a batch is running
+        # (D-09); it is meaningless otherwise.
+        folder_open = bool(self.image_files)
+        self.action_export_page.setEnabled(page_open and not self._op_running)
+        self.action_batch_detect.setEnabled(folder_open and not self._op_running)
+        self.action_batch_clean.setEnabled(folder_open and not self._op_running)
+        self.action_batch_detect_and_clean.setEnabled(
+            folder_open and not self._op_running
+        )
+        self.action_cancel_batch.setEnabled(self._batch_active)
 
     def _current_page_index(self) -> int | None:
         """Return the 0-indexed position of the path shown in the canvas."""
@@ -1527,6 +1596,240 @@ class MainWindow(QMainWindow):
         an inpaint result exists.
         """
         self.canvas.show_original(show)
+
+    # ------------------------------------------------- batch + export (plan 04)
+    def _wire_batch_actions(self) -> None:
+        """Wire the Esc -> Cancel Batch shortcut (D-09 Open Question Q1 -> A4).
+
+        Esc is the conventional cancel affordance; it is safe because
+        ``_cancel_batch`` is guarded by ``if self._batch_active`` and so is a
+        no-op when no batch runs (T-02-09). Patterned after the QShortcut
+        registrations in ``_wire_tool_actions`` / ``_wire_history_actions``
+        (installed on the main window so it fires regardless of focus).
+        """
+        esc = QShortcut(QKeySequence("Esc"), self)
+        esc.activated.connect(self._cancel_batch)
+        self._refresh_action_states()
+
+    def export_page(self) -> None:
+        """File -> Export Page (Ctrl+E) — write the DISPLAYED canvas image.
+
+        PROJ-02 / Pitfall 5: export writes whatever the canvas currently
+        shows (a cleaned/inpainted result, an edited page, or the original),
+        NOT a re-clean or re-detect. No model is called — the displayed
+        pixels are read via ``canvas.get_image_numpy`` and written through
+        Plan 01's ``save_image_optimized``.
+
+        The save path comes from ``QFileDialog.getSaveFileName`` (the
+        T-01-01 OS-validated-path sibling of ``open_image``'s
+        ``getOpenFileName``; T-02-01 mitigation). The output format is chosen
+        by the path suffix; the original page is passed so its mode/DPI are
+        preserved (Plan 01 metadata-preservation contract).
+        """
+        if self._op_running:
+            return
+        current = self.file_table.current_path()
+        if current is None:
+            return
+        image_rgb = self.canvas.get_image_numpy()
+        if image_rgb is None:
+            return
+
+        # Build the filter from the source page's suffix so the default is
+        # format-preserving (PNG page -> PNG export by default). Mirror the
+        # open_image getOpenFileName filter family.
+        suffix = current.suffix.lower()
+        if suffix == ".png":
+            filt = "PNG (*.png)"
+        elif suffix in (".jpg", ".jpeg"):
+            filt = "JPEG (*.jpg *.jpeg)"
+        else:
+            filt = "PNG (*.png);;JPEG (*.jpg *.jpeg)"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Page", str(current.name), filt
+        )
+        if not path:
+            return
+        from manga_ai_studio.core.image_io import save_image_optimized
+
+        save_image_optimized(image_rgb, Path(path), original=current)
+
+    def batch_detect(self) -> None:
+        """File -> Batch -> Batch Detect: dispatch ``batch_detect`` (FLOW-03)."""
+        self._dispatch_batch("detect")
+
+    def batch_clean(self) -> None:
+        """File -> Batch -> Batch Clean: dispatch ``batch_clean`` (FLOW-03)."""
+        self._dispatch_batch("clean")
+
+    def batch_detect_and_clean(self) -> None:
+        """File -> Batch -> Batch Detect + Clean: one-shot dispatch (FLOW-03)."""
+        self._dispatch_batch("detect_and_clean")
+
+    def _dispatch_batch(self, mode: str) -> None:
+        """Dispatch a single batch Worker on the global QThreadPool (FLOW-03).
+
+        Shared by the three public handlers to avoid triplication. Resolves
+        the model paths + backends via the existing helpers (the CR-10/CR-11
+        cache short-circuits prevent re-downloading the ~80MB/200MB models),
+        derives the output dir (D-07: ``first.path.parent / "cleaned"``,
+        double-guarded by batch_runner's name assert), builds a Worker on the
+        Plan 03 entry point, connects the progress/result/error/aborted/
+        finished handlers, sets the D-08 op-running + navigation-disable
+        state, and starts the worker.
+
+        T-02-05 mitigation (Open Question Q2 -> A5): the FileTable is
+        ``setEnabled(False)`` at dispatch so ``on_page_selected`` cannot fire
+        during the run (preventing the concurrent write/write race on
+        ``ImageFile.mask``). The canvas stays visible (read-only viewing per
+        D-08). ``_on_batch_cleanup`` re-enables navigation unconditionally.
+
+        Pitfall 7: ``finished`` is ALWAYS connected to ``_on_batch_cleanup``
+        (Worker.run's ``finally`` always emits ``finished``) so cleanup
+        always runs even on abort/error. ``aborted`` also routes to the same
+        cleanup handler, which is idempotent.
+        """
+        if self._op_running:
+            return
+        if not self.image_files:
+            return
+
+        # Resolve model paths + backends. The cache short-circuits inside the
+        # _resolve_* helpers mean a 30-page batch does not re-download.
+        first = self.image_files[0]
+        cleaned_dir = first.path.parent / "cleaned"  # D-07
+        det_backend = self._detection_backend()
+        inp_backend = self._inpainting_backend()
+
+        # Pick the Plan 03 entry point + args by mode (D-05: three entry
+        # points; models load ONCE inside each wrapper — Pitfall 3).
+        from manga_ai_studio.core.batch_runner import (
+            batch_clean,
+            batch_detect,
+            batch_detect_and_clean,
+        )
+
+        if mode == "detect":
+            task_fn = batch_detect
+            det_path = self._resolve_detection_model_path()
+            args = (list(self.image_files), det_path, det_backend, cleaned_dir)
+        elif mode == "clean":
+            task_fn = batch_clean
+            inp_path = self._resolve_inpainting_model_path()
+            args = (list(self.image_files), inp_path, inp_backend, cleaned_dir)
+        elif mode == "detect_and_clean":
+            task_fn = batch_detect_and_clean
+            det_path = self._resolve_detection_model_path()
+            inp_path = self._resolve_inpainting_model_path()
+            args = (
+                list(self.image_files),
+                det_path,
+                inp_path,
+                det_backend,
+                inp_backend,
+                cleaned_dir,
+            )
+        else:  # pragma: no cover - defensive; the three handlers are the only callers
+            raise ValueError(f"unknown batch mode: {mode}")
+
+        # abort_signal auto-injects abort_flag + connects to Worker.abort
+        # (worker_thread.py:138-140). Emitting batch_abort_requested flips the
+        # flag the loop checks at each page boundary (D-09 / Pitfall 4).
+        worker = Worker(task_fn, *args, abort_signal=self.batch_abort_requested)
+        worker.signals.progress.connect(self._on_batch_progress)
+        worker.signals.result.connect(self._on_batch_finished)
+        worker.signals.error.connect(self._on_batch_error)
+        # ALWAYS connect finished to cleanup (Pitfall 7 — Worker.run's finally
+        # always emits finished, so cleanup always runs). aborted also routes
+        # to the idempotent cleanup so a cancel still clears the gate.
+        worker.signals.aborted.connect(self._on_batch_cleanup)
+        worker.signals.finished.connect(self._on_batch_cleanup)
+        worker.setAutoDelete(True)
+
+        # D-08: a batch blocks the editor. Disable navigation (T-02-05 race
+        # mitigation) and set the op-running flags. The canvas stays visible.
+        self._op_running = True
+        self._batch_active = True
+        self.file_table.setEnabled(False)
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Batch\u2026 0%")
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_batch_progress(self, payload) -> None:
+        """Update the status bar + progress bar per page (D-10).
+
+        Mirrors ``_on_detection_progress``/``_on_inpaint_progress``: the Plan
+        03 loop emits ``(percent, page_name)`` at the top of each page.
+        """
+        if isinstance(payload, tuple) and len(payload) == 2:
+            percent, name = payload
+        else:
+            return
+        self.progress_bar.setValue(int(percent))
+        self.status_bar_left.setText(f"Cleaning\u2026 {int(percent)}% \u2014 {name}")
+
+    def _on_batch_finished(self, summary) -> None:
+        """Show the batch summary in the status bar (D-04).
+
+        Reads the Plan 03 summary dict ``{"ok", "failed", "total"}`` and
+        renders the UI-SPEC copy: a clean run reads "Cleaned N/N pages"; a run
+        with failures reads "Cleaned N/M pages — K failed, see log".
+        """
+        ok = summary.get("ok", 0) if isinstance(summary, dict) else 0
+        total = summary.get("total", 0) if isinstance(summary, dict) else 0
+        failed = summary.get("failed", []) if isinstance(summary, dict) else []
+        if failed:
+            self.status_bar_left.setText(
+                f"Cleaned {ok}/{total} pages \u2014 {len(failed)} failed, see log"
+            )
+        else:
+            self.status_bar_left.setText(f"Cleaned {ok}/{total} pages")
+        self._refresh_action_states()
+
+    def _on_batch_error(self, worker_error) -> None:
+        """Log the batch failure + show the error chip (T-01-08 mirror).
+
+        Mirrors ``_on_detection_error``/``_on_inpaint_error``: the full
+        ``WorkerError`` (traceback included) goes to loguru; the status bar
+        shows user-friendly copy. ``_on_batch_cleanup`` (connected to
+        ``finished``, which always fires) handles re-enabling the editor.
+        """
+        logger.error(f"Batch failed: {worker_error}")
+        self._show_error_chip("Batch error")
+        self.status_bar_left.setText("Batch failed")
+
+    def _on_batch_cleanup(self, _args) -> None:
+        """Unconditionally clear the batch state + re-enable the editor.
+
+        Pitfall 7 (T-02-06): connected to BOTH ``aborted`` and ``finished``
+        (Worker.run's ``finally`` always emits ``finished``), so the editor is
+        never stuck disabled. Idempotent — setting the flags False twice and
+        re-enabling the file table twice are both harmless, so a run that
+        aborts (aborted -> cleanup) then emits finished (-> cleanup again) is
+        safe.
+        """
+        self._op_running = False
+        self._batch_active = False
+        self.file_table.setEnabled(True)  # T-02-05: re-enable navigation
+        self.progress_bar.hide()
+        self._refresh_action_states()
+
+    def _cancel_batch(self) -> None:
+        """Emit the batch abort signal (D-09).
+
+        Guarded by ``if self._batch_active`` so Esc is a no-op when no batch
+        runs (T-02-09). Emitting ``batch_abort_requested`` flips the running
+        Worker's ``SharableFlag`` (worker_thread.py abort_signal wiring); the
+        loop checks it at the next page boundary and raises ``Abort`` -> the
+        worker emits ``aborted`` -> ``_on_batch_cleanup`` clears the gate.
+        No page is half-written (Pitfall 4 / T-02-06).
+        """
+        if self._batch_active:
+            self.batch_abort_requested.emit()
 
     def _show_error_chip(self, text: str) -> None:
         """Show the persistent #7a1f1f error chip with ``text`` (UI-SPEC §Color)."""
