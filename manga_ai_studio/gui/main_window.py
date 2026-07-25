@@ -1901,15 +1901,24 @@ class MainWindow(QMainWindow):
         is the only place to write the post-cancel status. The cancel flag is
         cleared after rendering so the second idempotent cleanup call (from
         ``finished``) does not re-stamp the text.
+
+        Bug D1 (checkpoint rework): capture the batch mode BEFORE it is reset
+        below (``self._batch_mode = None``). ``_refresh_current_page_after_batch``
+        is mode-aware (detect-only batches must RESTORE the detected mask onto
+        the canvas; clean-containing batches must reload + clear it), so the
+        mode must still be readable when the refresh runs. The refresh call
+        stays before the reset by construction, but capturing the mode into a
+        local makes the ordering dependency explicit and safe.
         """
         cancelled = self._batch_cancelled
+        batch_mode = self._batch_mode
         # Bug C (checkpoint rework): for a clean-containing batch, refresh the
         # currently-displayed page so the user sees the cleaned result + a
         # cleared mask overlay without manually re-navigating — the same
         # refresh single-page Inpaint performs in ``_on_inpaint_finished``.
         # Skip on cancel/error so we never overwrite an error/cancel status.
         if not cancelled:
-            self._refresh_current_page_after_batch()
+            self._refresh_current_page_after_batch(batch_mode)
 
         self._op_running = False
         self._batch_active = False
@@ -1936,26 +1945,75 @@ class MainWindow(QMainWindow):
         """
         return "Cancelled"
 
-    def _refresh_current_page_after_batch(self) -> None:
-        """Refresh the current page's canvas after a batch finishes (Bug C).
+    def _refresh_current_page_after_batch(self, batch_mode: str | None = None) -> None:
+        """Refresh the current page's canvas after a batch finishes (Bug C, Bug D1).
 
-        After a clean-containing batch the currently-displayed page must show
-        the cleaned result with its mask overlay cleared — the same refresh
-        single-page Inpaint performs in ``_on_inpaint_finished``. The batch
-        writes cleaned files to ``cleaned_dir`` (D-07); reload the current
-        page from there if present, otherwise leave it. Then clear the mask
-        overlay so the red overlay does not sit on the now-cleaned page
-        (mirrors the CR-16 fix in ``_on_inpaint_finished``).
+        Mode-aware (Bug D1):
+
+        * **Clean-containing batch** (``batch_mode`` is ``"clean"`` or
+          ``"detect_and_clean"``): the currently-displayed page must show the
+          cleaned result with its mask overlay CLEARED — the same refresh
+          single-page Inpaint performs in ``_on_inpaint_finished`` (Bug C).
+          The batch writes cleaned files to ``cleaned_dir`` (D-07); reload the
+          current page from there if present, otherwise leave it. Then clear
+          the consumed mask overlay so the red overlay does not sit on the
+          now-cleaned page.
+        * **Detect-only batch** (``batch_mode`` is ``"detect"``): there is no
+          cleaned output to load, so do NOT clear the canvas. Instead RESTORE
+          the current page's just-detected ``ImageFile.mask`` onto the canvas
+          (mirroring the D-11 seam step 4 at ``on_page_selected``), so the user
+          sees the detected mask and the data model + canvas stay in sync. If
+          the page has no detected mask (``ImageFile.mask`` is None/empty),
+          clear the canvas overlay (the page had no detected text).
+
+        The mode distinction is load-bearing for Bug D1: the previous
+        unconditional clear left the canvas desynced from the correctly-written
+        ``ImageFile.mask`` after a detect batch, and the D-11 seam then
+        snapshotted that empty canvas back onto the outgoing page on the next
+        navigation — silently erasing detected masks on backwards navigation
+        ("skipping current page and pages before that").
 
         Careful with the D-11 seam (Plan 02-02): the mask is part of the
-        per-page data model. Clearing the canvas overlay here does NOT touch
-        ``ImageFile.mask`` — the consumed mask stays persisted on the data
-        model so re-navigation still shows/clears it consistently. We only
-        update the live canvas display.
+        per-page data model. For the clean path, clearing the canvas overlay
+        does NOT touch ``ImageFile.mask`` — the consumed mask stays persisted
+        on the data model so re-navigation still shows/clears it consistently.
+        We only update the live canvas display.
         """
         current = self.file_table.current_path()
         if current is None:
             return
+
+        # --- Bug D1: detect-only branch — RESTORE the detected mask. ---------
+        # No cleaned output exists for a detect-only batch, so the Bug C
+        # reload+clear is wrong here: it would wipe the just-detected mask the
+        # loop wrote onto ImageFile.mask, leaving the canvas desynced. Instead
+        # mirror the D-11 seam step 4 (on_page_selected lines ~724-734) and
+        # restore the current page's detected mask onto the canvas. The
+        # boundary .copy() matches the seam (Pitfall 2). When the page had no
+        # detected text (mask is None/empty), clear the overlay instead.
+        if batch_mode == "detect":
+            idx = self._current_page_index()
+            if (
+                idx is not None
+                and 0 <= idx < len(self.image_files)
+                and self.image_files[idx].mask is not None
+                and not self.image_files[idx].mask.isNull()
+                and self.image_files[idx].has_mask_content()
+            ):
+                # Restore the detected mask onto the canvas (D-11 seam step 4
+                # mirror). set_mask copies internally (canvas.py:305); the
+                # boundary .copy() is belt-and-suspenders and matches the seam.
+                self.canvas.set_mask(self.image_files[idx].mask.copy())
+            else:
+                # Page had no detected text — ensure the overlay is clear so
+                # the canvas matches the empty data-model mask.
+                canvas_mask = self.canvas.get_mask()
+                if canvas_mask is not None and not canvas_mask.isNull():
+                    canvas_mask.fill(Qt.GlobalColor.transparent)
+                    self.canvas.update_mask_display()
+            return
+
+        # --- Bug C: clean-containing branch — reload + clear consumed mask. --
         # Look for the cleaned output for the current page (cleaned_dir is
         # source.parent / "cleaned", D-07). If present, reload the canvas
         # image from it so the user sees the cleaned result.
