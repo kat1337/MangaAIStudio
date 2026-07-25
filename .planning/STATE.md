@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: cleaning-output-batch
 status: executing
-stopped_at: Completed 02-01-PLAN.md (image output writer)
-last_updated: "2026-07-25T03:30:27.400Z"
+stopped_at: Completed 02-02-PLAN.md (D-11 per-page mask persistence)
+last_updated: "2026-07-25T03:38:36.962Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 11
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 02 (cleaning-output-batch) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-07-25 — Phase 02 execution started
 
@@ -67,6 +67,7 @@ Progress: [████████░░] 83%
 | Phase 01 P06 | 12 min | 2 tasks | 4 files |
 | Phase 01 P07 | 13 min | 3 tasks | 4 files |
 | Phase 02 P01 | 5 min | 2 tasks | 2 files |
+| Phase 02 P02 | 4 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,10 @@ Recent decisions affecting current work:
 - [Phase ?]: PNG stores DPI as integer pixels-per-meter, so 300 DPI round-trips to 299.9994 — assert within 1 DPI in test_preserves_dpi_mode, not exact equality (02-01)
 - [Phase ?]: Use filecmp.cmp (not nonexistent shutil.cmp) for byte comparison in passthrough test (02-01)
 - [Phase ?]: core/image_io.py is pure stdlib+numpy+PIL (no Qt/torch) so it is thread-safe and unit-testable headless — adapted from PanelCleaner save_optimized under GPL v3 D-12 (02-01)
+- [Phase ?]: 02-02: OUTGOING page index read from stored _last_page_index field (NOT _current_page_index()) because _set_pages calls select_path BEFORE on_page_selected — select_path mutates current_path before the seam runs (PATTERNS file 4a)
+- [Phase ?]: 02-02: Boundary .copy() at BOTH the OUTGOING save (canvas.get_mask().copy()) and INCOMING restore (image_file.mask.copy()) — belt-and-suspenders with set_mask's internal copy; OUTGOING is load-bearing, asserted by test_mask_persistence_uses_copy (T-02-04)
+- [Phase ?]: 02-02: has_mask_content reuses mask_to_numpy_binary (lazy import inside method) — no hand-rolled alpha scan; mirrors canvas.has_mask_content but operates on the persisted ImageFile.mask slot
+- [Phase ?]: 02-02: T-02-05 write/write race mitigation (disable page-switch while _op_running) deferred to Plan 04 — touches file_table interaction which is not in this plan's files_modified; code comment flags the deferral in on_page_selected
 
 ### Pending Todos
 
@@ -126,8 +131,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-25T03:30:27.388Z
-Stopped at: Completed 02-01-PLAN.md (image output writer)
+Last session: 2026-07-25T03:38:36.953Z
+Stopped at: Completed 02-02-PLAN.md (D-11 per-page mask persistence)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

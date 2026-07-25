@@ -82,13 +82,13 @@ Plans:
   1. User can export a cleaned (text-removed, inpainted) page as PNG or JPG
   2. User can select a chapter folder and batch-process it through the cleaning pipeline (detect → clean → save) with a visible progress indicator
 
-**Plans**: 1/4 plans executed
+**Plans**: 2/4 plans executed
 
 Plans:
 **Wave 1**
 
 - [x] 02-01-PLAN.md — Image output writer: adapted save_optimized (PNG/JPG kwargs, DPI/mode) + D-03 empty-mask copy2 passthrough (PROJ-02, FLOW-03)
-- [ ] 02-02-PLAN.md — Per-page mask persistence (D-11): ImageFile.has_mask_content + on_page_selected save/restore seam + _last_page_index (FLOW-03)
+- [x] 02-02-PLAN.md — Per-page mask persistence (D-11): ImageFile.has_mask_content + on_page_selected save/restore seam + _last_page_index (FLOW-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -173,7 +173,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
-| 2. Cleaning Output & Batch | 1/4 | In Progress|  |
+| 2. Cleaning Output & Batch | 2/4 | In Progress|  |
 | 3. Text Box Detection & Interaction | 0/TBD | Not started | - |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
