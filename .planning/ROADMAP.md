@@ -82,7 +82,7 @@ Plans:
   1. User can export a cleaned (text-removed, inpainted) page as PNG or JPG
   2. User can select a chapter folder and batch-process it through the cleaning pipeline (detect → clean → save) with a visible progress indicator
 
-**Plans**: 2/4 plans executed
+**Plans**: 3/4 plans executed
 
 Plans:
 **Wave 1**
@@ -92,7 +92,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-03-PLAN.md — Batch runner: batch_detect/batch_clean/batch_detect_and_clean on one Worker loop, abort-between-pages, load-once (FLOW-03)
+- [x] 02-03-PLAN.md — Batch runner: batch_detect/batch_clean/batch_detect_and_clean on one Worker loop, abort-between-pages, load-once (FLOW-03)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -173,7 +173,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
-| 2. Cleaning Output & Batch | 2/4 | In Progress|  |
+| 2. Cleaning Output & Batch | 3/4 | In Progress|  |
 | 3. Text Box Detection & Interaction | 0/TBD | Not started | - |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
