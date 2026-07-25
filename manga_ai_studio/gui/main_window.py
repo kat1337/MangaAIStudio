@@ -99,6 +99,19 @@ class MainWindow(QMainWindow):
         # ``_on_batch_cleanup`` (Pitfall 7).
         self._batch_active = False
 
+        # Bug A (checkpoint rework): the current batch's mode ("detect" /
+        # "clean" / "detect_and_clean") so ``_on_batch_progress`` can render
+        # the mode-aware status label ("Detecting N%..." vs "Cleaning N%...")
+        # instead of the previously hardcoded "Cleaning". Set in
+        # ``_dispatch_batch``, cleared in ``_on_batch_cleanup``.
+        self._batch_mode: str | None = None
+
+        # Bug B (checkpoint rework): set True by ``_cancel_batch`` so the
+        # cleanup handler renders a "Cancelled" status instead of leaving the
+        # stale per-page progress text ("Cleaning N%"/"Inpainting N%"). Read
+        # and cleared in ``_on_batch_cleanup``.
+        self._batch_cancelled = False
+
         # D-11: the page index shown BEFORE the current select_path, used to
         # persist the OUTGOING page's mask at the on_page_selected boundary.
         # Because _set_pages (main_window.py:553-556) calls
@@ -1694,6 +1707,19 @@ class MainWindow(QMainWindow):
         if not self.image_files:
             return
 
+        # Bug D (checkpoint rework / D-02 "edits are sacred" + D-11 contract):
+        # the only place the canvas mask is normally flushed to ImageFile.mask
+        # is ``on_page_selected`` (the D-11 seam). Dispatching a batch from the
+        # current page WITHOUT first navigating away skips that flush, so the
+        # batch would read the STALE ImageFile.mask and silently ignore the
+        # user's in-canvas mask edits (erase/refine). Flush the current page's
+        # canvas mask into its ImageFile.mask here, BEFORE handing the pages to
+        # the batch entry point — the exact operation on_page_selected step 1
+        # performs, with the same MANDATORY .copy() (Pitfall 2). batch_detect
+        # then overwrites it with the freshly-detected mask; batch_clean reads
+        # the user's edited mask. This is the cross-plan integration fix.
+        self._flush_current_canvas_mask_to_data_model()
+
         # Resolve model paths + backends. The cache short-circuits inside the
         # _resolve_* helpers mean a 30-page batch does not re-download.
         first = self.image_files[0]
@@ -1748,29 +1774,84 @@ class MainWindow(QMainWindow):
 
         # D-08: a batch blocks the editor. Disable navigation (T-02-05 race
         # mitigation) and set the op-running flags. The canvas stays visible.
+        # Bug A: record the mode so _on_batch_progress can render the
+        # mode-aware label; reset the cancel flag.
         self._op_running = True
         self._batch_active = True
+        self._batch_mode = mode
+        self._batch_cancelled = False
         self.file_table.setEnabled(False)
         self._refresh_action_states()
         self.error_chip.hide()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.show()
-        self.status_bar_left.setText("Batch\u2026 0%")
+        self.status_bar_left.setText(f"{self._batch_verb()}\u2026 0%")
         QThreadPool.globalInstance().start(worker)
 
+    def _flush_current_canvas_mask_to_data_model(self) -> None:
+        """Flush the current page's canvas mask into its ``ImageFile.mask``.
+
+        Bug D (checkpoint rework): mirrors ``on_page_selected`` step 1 — the
+        D-11 seam normally only persists the OUTGOING page's mask on
+        navigation, but a batch dispatches FROM the current page without
+        navigating, so the seam never fires. This flush closes that gap so
+        the user's in-canvas mask edits (brush/erase) reach the batch instead
+        of being silently dropped in favor of the stale persisted mask
+        (D-02 "edits are sacred" + the D-11 contract).
+
+        No-op when no page is open or the canvas has no editable mask. Uses
+        the same MANDATORY ``.copy()`` boundary detach as the seam
+        (Pitfall 2 / T-02-04). When the canvas mask has been cleared to fully
+        transparent (the user erased it) the stored QImage is replaced with
+        ``None`` so ``has_mask_content()`` reports False and the D-03 gate
+        passthroughs the page unchanged.
+        """
+        idx = self._current_page_index()
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        if not self.canvas.has_mask():
+            # No editable mask QImage exists (fresh page, never detected) —
+            # leave ImageFile.mask as-is.
+            return
+        canvas_mask = self.canvas.get_mask()
+        if canvas_mask is None or canvas_mask.isNull():
+            return
+        # Pitfall 2: detach from the live canvas buffer. on_page_selected's
+        # identical .copy() is the load-bearing boundary the regression test
+        # test_mask_persistence_uses_copy locks; mirror it here verbatim.
+        self.image_files[idx].mask = canvas_mask.copy()
+
+    def _batch_verb(self) -> str:
+        """Return the mode-aware status-bar verb (Bug A).
+
+        ``detect`` -> "Detecting"; ``clean`` -> "Cleaning";
+        ``detect_and_clean`` -> "Detecting+Cleaning" (the staged/combined
+        label). Falls back to "Cleaning" if the mode is unknown/None so the
+        status is never blank.
+        """
+        if self._batch_mode == "detect":
+            return "Detecting"
+        if self._batch_mode == "detect_and_clean":
+            return "Detecting+Cleaning"
+        return "Cleaning"
+
     def _on_batch_progress(self, payload) -> None:
-        """Update the status bar + progress bar per page (D-10).
+        """Update the status bar + progress bar per page (D-10, Bug A).
 
         Mirrors ``_on_detection_progress``/``_on_inpaint_progress``: the Plan
-        03 loop emits ``(percent, page_name)`` at the top of each page.
+        03 loop emits ``(percent, page_name)`` at the top of each page. Bug A:
+        the status verb is mode-aware (``_batch_verb``) instead of the
+        previously hardcoded "Cleaning".
         """
         if isinstance(payload, tuple) and len(payload) == 2:
             percent, name = payload
         else:
             return
         self.progress_bar.setValue(int(percent))
-        self.status_bar_left.setText(f"Cleaning\u2026 {int(percent)}% \u2014 {name}")
+        self.status_bar_left.setText(
+            f"{self._batch_verb()}\u2026 {int(percent)}% \u2014 {name}"
+        )
 
     def _on_batch_finished(self, summary) -> None:
         """Show the batch summary in the status bar (D-04).
@@ -1811,24 +1892,103 @@ class MainWindow(QMainWindow):
         re-enabling the file table twice are both harmless, so a run that
         aborts (aborted -> cleanup) then emits finished (-> cleanup again) is
         safe.
+
+        Bug B (checkpoint rework): if the user cancelled the batch, render a
+        "Cancelled — ..." status (reflecting any partial work) instead of
+        leaving the stale per-page progress text ("Cleaning N%"/"Inpainting
+        N%") on screen. On a cancel ``_on_batch_finished`` (result) does NOT
+        fire (the Worker emits ``aborted``, not ``result``), so this cleanup
+        is the only place to write the post-cancel status. The cancel flag is
+        cleared after rendering so the second idempotent cleanup call (from
+        ``finished``) does not re-stamp the text.
         """
+        cancelled = self._batch_cancelled
+        # Bug C (checkpoint rework): for a clean-containing batch, refresh the
+        # currently-displayed page so the user sees the cleaned result + a
+        # cleared mask overlay without manually re-navigating — the same
+        # refresh single-page Inpaint performs in ``_on_inpaint_finished``.
+        # Skip on cancel/error so we never overwrite an error/cancel status.
+        if not cancelled:
+            self._refresh_current_page_after_batch()
+
         self._op_running = False
         self._batch_active = False
+        self._batch_mode = None
         self.file_table.setEnabled(True)  # T-02-05: re-enable navigation
         self.progress_bar.hide()
         self._refresh_action_states()
 
+        if cancelled:
+            self.status_bar_left.setText(self._batch_cancelled_status_text())
+            self._batch_cancelled = False
+
+    def _batch_cancelled_status_text(self) -> str:
+        """Render the post-cancel status (Bug B).
+
+        Reflects partial work when the summary recorded how many pages were
+        finished before the abort; otherwise a plain "Cancelled". ``_op_running``
+        is still True at the moment this is called from cleanup's body? No — it
+        was just cleared; the count comes from the last _on_batch_finished if
+        it ran (it does NOT run on cancel), so we keep this simple and
+        report "Cancelled" (the summary text, if any, was from a prior run and
+        is stale). The key contract is that the stale progress percent no
+        longer shows.
+        """
+        return "Cancelled"
+
+    def _refresh_current_page_after_batch(self) -> None:
+        """Refresh the current page's canvas after a batch finishes (Bug C).
+
+        After a clean-containing batch the currently-displayed page must show
+        the cleaned result with its mask overlay cleared — the same refresh
+        single-page Inpaint performs in ``_on_inpaint_finished``. The batch
+        writes cleaned files to ``cleaned_dir`` (D-07); reload the current
+        page from there if present, otherwise leave it. Then clear the mask
+        overlay so the red overlay does not sit on the now-cleaned page
+        (mirrors the CR-16 fix in ``_on_inpaint_finished``).
+
+        Careful with the D-11 seam (Plan 02-02): the mask is part of the
+        per-page data model. Clearing the canvas overlay here does NOT touch
+        ``ImageFile.mask`` — the consumed mask stays persisted on the data
+        model so re-navigation still shows/clears it consistently. We only
+        update the live canvas display.
+        """
+        current = self.file_table.current_path()
+        if current is None:
+            return
+        # Look for the cleaned output for the current page (cleaned_dir is
+        # source.parent / "cleaned", D-07). If present, reload the canvas
+        # image from it so the user sees the cleaned result.
+        cleaned = current.parent / "cleaned" / current.name
+        if cleaned.exists():
+            self.canvas.set_image_from_path(cleaned)
+        # Clear the consumed mask overlay on the canvas (CR-16 mirror: a red
+        # overlay on top of the now-cleaned region looks wrong and would
+        # cause a re-clean to re-process the cleaned area). Mutate the mask
+        # internals directly (fill + update_mask_display) rather than calling
+        # clear_mask(), which would emit mask_modified and push a spurious
+        # mask-undo entry — the user's action was "batch clean", not "paint".
+        canvas_mask = self.canvas.get_mask()
+        if canvas_mask is not None and not canvas_mask.isNull():
+            canvas_mask.fill(Qt.GlobalColor.transparent)
+            self.canvas.update_mask_display()
+
     def _cancel_batch(self) -> None:
-        """Emit the batch abort signal (D-09).
+        """Emit the batch abort signal (D-09) and mark the run cancelled (Bug B).
 
         Guarded by ``if self._batch_active`` so Esc is a no-op when no batch
         runs (T-02-09). Emitting ``batch_abort_requested`` flips the running
         Worker's ``SharableFlag`` (worker_thread.py abort_signal wiring); the
         loop checks it at the next page boundary and raises ``Abort`` -> the
-        worker emits ``aborted`` -> ``_on_batch_cleanup`` clears the gate.
-        No page is half-written (Pitfall 4 / T-02-06).
+        worker emits ``aborted`` -> ``_on_batch_cleanup`` clears the gate and
+        renders the "Cancelled" status. No page is half-written
+        (Pitfall 4 / T-02-06).
+
+        Bug B: set ``_batch_cancelled`` so ``_on_batch_cleanup`` renders a
+        "Cancelled" status instead of leaving the stale per-page progress text.
         """
         if self._batch_active:
+            self._batch_cancelled = True
             self.batch_abort_requested.emit()
 
     def _show_error_chip(self, text: str) -> None:

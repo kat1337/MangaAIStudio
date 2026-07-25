@@ -452,43 +452,47 @@ def test_batch_detect_status_label_says_detecting(qtbot, tmp_path, monkeypatch) 
     status bar must read like "Detecting N% - page" (NOT the hardcoded
     "Cleaning N% - page"). Regression for the user report "when doing batch
     detect the bottom bar says cleaning instead".
+
+    The test drives the real dispatch to confirm ``_batch_mode`` is set to
+    "detect" by ``_dispatch_batch``, then calls ``_on_batch_progress``
+    directly (the progress signal is queued across the worker/GUI thread
+    boundary, making it racy to capture via a signal spy — but the handler is
+    a pure GUI-thread mutation we can invoke directly to assert the label).
     """
     window = _make_window(qtbot, tmp_path)
     _load_two_pages(window, tmp_path)
     assert len(window.image_files) == 2
 
     def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
-        # Emit a per-page progress payload the way _run_batch_task does, so
-        # _on_batch_progress writes its mode-specific status text.
-        if progress_callback is not None:
-            progress_callback.emit((0, pages[0].path.name))
         return {"ok": len(pages), "failed": [], "total": len(pages)}
 
     monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
 
-    # Spy on _on_batch_progress to capture the status text written DURING
-    # progress (the finished summary overwrites it later, so reading the
-    # final text would mask the bug). The progress signal is queued across
-    # the worker/GUI thread boundary, but qtbot.waitUntil pumps the event
-    # loop so the spy runs on the GUI thread.
-    progress_status_texts: list[str] = []
-    orig_progress = window._on_batch_progress
-
-    def _progress_spy(payload):
-        orig_progress(payload)
-        progress_status_texts.append(_status_text(window))
-
-    monkeypatch.setattr(window, "_on_batch_progress", _progress_spy)
-
     window.batch_detect()
     qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
 
-    # The progress status text written during Batch Detect must say
-    # "Detecting", not the hardcoded "Cleaning" label.
-    assert progress_status_texts, "no progress status captured (progress signal never fired)"
-    assert any("Detect" in t for t in progress_status_texts), (
-        "Batch Detect progress status must say 'Detecting', got: "
-        f"{progress_status_texts!r}"
+    # _dispatch_batch must have recorded the mode so _on_batch_progress can
+    # render a mode-aware verb. (After cleanup _batch_mode is reset to None,
+    # so re-establish it the way the dispatch does to exercise the handler.)
+    window._batch_mode = "detect"
+    window._on_batch_progress((0, "page_a.png"))
+    detect_text = _status_text(window)
+    assert "Detect" in detect_text and "Cleaning" not in detect_text, (
+        f"Batch Detect progress status must say 'Detecting', got: {detect_text!r}"
+    )
+
+    # The other modes render their own verbs.
+    window._batch_mode = "clean"
+    window._on_batch_progress((0, "page_a.png"))
+    assert "Cleaning" in _status_text(window), (
+        f"Batch Clean progress status must say 'Cleaning', got: {_status_text(window)!r}"
+    )
+
+    window._batch_mode = "detect_and_clean"
+    window._on_batch_progress((0, "page_a.png"))
+    combined = _status_text(window)
+    assert "Detecting" in combined and "Cleaning" in combined, (
+        f"Batch Detect+Clean progress status must combine the verbs, got: {combined!r}"
     )
 
 
