@@ -37,8 +37,10 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
+from PySide6.QtWidgets import QFileDialog  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
+from manga_ai_studio.core import batch_runner  # noqa: E402
 from manga_ai_studio.core.mask_editor import mask_to_numpy_binary  # noqa: E402
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
@@ -220,4 +222,200 @@ def test_mask_persistence_uses_copy(qtbot, tmp_path) -> None:
     assert after_bytes == saved_bytes, (
         "Pitfall-2 regression: mutating the canvas after persistence altered "
         "the stored ImageFile.mask — the boundary .copy() is missing."
+    )
+
+
+# ===========================================================================
+# Plan 02-04: UI-wiring tests (PROJ-02 Export + D-08 op_running + Pitfall 7)
+#
+# The three tests below extend this suite with the Phase 2 Plan 04 contract:
+# Export Page writes the DISPLAYED canvas image (not a re-clean), the batch
+# dispatch sets _op_running (disabling the model actions + navigation), and
+# _on_batch_cleanup unconditionally clears _op_running so the editor is never
+# stuck disabled.
+# ===========================================================================
+
+
+def _apply_inpaint_result(window: MainWindow, fill: int = 200) -> None:
+    """Composite a known non-original RGB result onto the canvas.
+
+    Mirrors the Phase 1 inpaint-result path (``canvas.set_image_from_numpy``)
+    so the displayed image is a distinct, recognizable value the export test
+    can later compare against. Used so we do NOT need to run the real LaMa
+    adapter (Pitfall 5 — export must not be a re-clean).
+    """
+    src = window.canvas.get_image_numpy()
+    assert src is not None, "precondition: a page must be open"
+    result_rgb = np.full(src.shape, fill, dtype=np.uint8)
+    window.canvas.set_image_from_numpy(result_rgb)
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Export writes the DISPLAYED image, not a re-clean (PROJ-02 / Pitfall 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_export_writes_displayed_image(qtbot, tmp_path, monkeypatch) -> None:
+    """Export Page writes canvas.get_image_numpy() to the chosen path.
+
+    Behavior (PROJ-02 / Pitfall 5): Export writes the DISPLAYED canvas image
+    via save_image_optimized — it does NOT call the detect or inpaint models
+    (export is not a re-clean). The exported file's pixels match the displayed
+    canvas, and a fake adapter injected into the window's model-resolution
+    path is never invoked.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_path = _open_page(window, tmp_path)
+
+    # Establish a displayed inpaint result so the canvas shows a non-original
+    # image (fill=200) distinguishable from the solid-white source page.
+    _apply_inpaint_result(window, fill=200)
+    displayed = window.canvas.get_image_numpy()
+    assert displayed is not None, "precondition: canvas must show an image"
+
+    # Sentinel fakes: if export_page erroneously re-runs a model, these would
+    # be invoked. They record any call so the assertion catches a re-clean.
+    detect_calls: list = []
+    inpaint_calls: list = []
+
+    class _RecordingDetector:
+        def load(self, *a, **k):
+            pass
+
+        def detect(self, image):  # noqa: D401
+            detect_calls.append(image)
+            raise AssertionError("export_page must NOT call the detection model")
+
+    class _RecordingInpainter:
+        def load(self, *a, **k):
+            pass
+
+        def inpaint(self, image_rgb, mask_binary):  # noqa: D401
+            inpaint_calls.append((image_rgb, mask_binary))
+            raise AssertionError("export_page must NOT call the inpaint model")
+
+    # Inject the recording adapters at the factory the window resolves through
+    # (mirrors test_inpaint_gui.py's backend_factory monkeypatch).
+    def _fake_factory(kind, backend):  # noqa: ARG001
+        if kind == "detection":
+            return _RecordingDetector()
+        if kind == "inpainting":
+            return _RecordingInpainter()
+        raise AssertionError(f"unexpected factory kind: {kind}")
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _fake_factory)
+
+    # Route the Save dialog to a fixed path so export_page writes there.
+    export_path = tmp_path / "exported.png"
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        lambda *a, **k: (str(export_path), "PNG (*.png)"),
+    )
+
+    # The method under test does not exist yet (RED). Once implemented it must
+    # write the displayed image and return without touching any model.
+    window.export_page()
+
+    # PROJ-02: the file was written.
+    assert export_path.exists(), "export_page must write the chosen PNG path"
+
+    # Pitfall 5: no model was called (export is not a re-clean).
+    assert detect_calls == [], "export_page must NOT call the detection model"
+    assert inpaint_calls == [], "export_page must NOT call the inpaint model"
+
+    # The exported pixels match the DISPLAYED canvas (not a re-clean). Load the
+    # file via PIL and compare against the canvas numpy the export read.
+    from PIL import Image
+
+    with Image.open(export_path) as out:
+        exported_rgb = np.array(out.convert("RGB"))
+    assert exported_rgb.shape == displayed.shape
+    np.testing.assert_array_equal(
+        exported_rgb,
+        displayed,
+        "export must write the DISPLAYED canvas image, not a re-clean",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: batch dispatch sets _op_running + disables model actions (D-08)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_batch_sets_op_running(qtbot, tmp_path, monkeypatch) -> None:
+    """Dispatching a batch sets _op_running and disables Detect/Inpaint (D-08).
+
+    Behavior (D-08): while a batch Worker is dispatched, ``_op_running`` is True
+    and the detect/inpaint/batch actions report ``isEnabled() == False``.
+    """
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+    assert len(window.image_files) == 2, "precondition: folder must have 2 pages"
+
+    # Replace the batch entry point with a fake that records the call and
+    # returns the Plan 03 summary shape, so the dispatch never loads real
+    # torch models. The fake blocks briefly so _op_running is observable True
+    # while the worker runs.
+    import time
+
+    recorded: list = []
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        recorded.append((pages, cleaned_dir))
+        time.sleep(0.1)
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    # Dispatch the batch (the method does not exist yet — RED).
+    window._run_batch_detect()
+
+    # D-08 gate: _op_running is True and the model actions are disabled.
+    assert window._op_running is True, "_op_running must be True while a batch runs"
+    assert window.action_detect_text.isEnabled() is False, (
+        "Detect Text must be disabled while a batch runs (D-08)"
+    )
+    assert window.action_inpaint.isEnabled() is False, (
+        "Inpaint must be disabled while a batch runs (D-08)"
+    )
+
+    # Wait for the worker to finish so the test does not leak a running thread.
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert recorded, "the batch entry point must have been dispatched"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: _op_running cleared after batch (Pitfall 7 — no stuck-disabled state)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_op_running_cleared_after_batch(qtbot, tmp_path, monkeypatch) -> None:
+    """After the batch finishes, _op_running is False and actions re-enable.
+
+    Behavior (Pitfall 7): the finished/aborted handler unconditionally clears
+    ``_op_running`` so the editor is never stuck disabled. After the worker
+    completes, ``_op_running`` is False AND the model actions are re-enabled.
+    """
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
+
+    window._run_batch_clean()
+
+    # Wait for the finished handler to clear _op_running (Pitfall 7).
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    assert window._op_running is False, (
+        "_op_running must be False after the batch finishes (Pitfall 7)"
+    )
+    assert window.action_detect_text.isEnabled() is True, (
+        "Detect Text must re-enable after the batch finishes (Pitfall 7)"
     )
