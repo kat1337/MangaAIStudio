@@ -18,8 +18,8 @@ Map: Image output writing -> Core I/O").
 
 from __future__ import annotations
 
+import filecmp
 import os
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -63,21 +63,25 @@ def test_preserves_dpi_mode(tmp_path: Path) -> None:
     """When ``original=`` is a same-format image, DPI is preserved on save.
 
     The original PNG is written with dpi=(300, 300); the output re-opened
-    reports the same dpi tuple (PIL normalizes dpi values to float).
+    reports the same dpi tuple. PNG stores DPI as integer pixels-per-meter, so
+    300 DPI round-trips to ~299.9994 — assert within 1 DPI of 300 to verify
+    the DPI is genuinely preserved without being brittle to ppm quantization.
     """
     orig = tmp_path / "orig.png"
     Image.fromarray(_rgb_4x4()).save(orig, dpi=(300, 300))
     out = tmp_path / "out.png"
     save_image_optimized(_rgb_4x4(), out, original=orig)
     with Image.open(out) as im:
-        assert im.info.get("dpi") == (300.0, 300.0)
+        dpi = im.info.get("dpi")
+    assert dpi is not None
+    assert all(abs(v - 300.0) < 1.0 for v in dpi), f"DPI not preserved: {dpi}"
 
 
 @pytest.mark.unit
 def test_passthrough_copy2(tmp_path: Path) -> None:
     """passthrough_original copies bytes + metadata via shutil.copy2.
 
-    The cleaned copy exists, has identical bytes (shutil.cmp True), and the
+    The cleaned copy exists, has identical bytes (filecmp.cmp True), and the
     same mtime as the source (copy2 preserves mtime).
     """
     src = tmp_path / "src.png"
@@ -86,7 +90,7 @@ def test_passthrough_copy2(tmp_path: Path) -> None:
     dest = passthrough_original(src, cleaned)
     assert dest == cleaned / "src.png"
     assert (cleaned / "src.png").exists()
-    assert shutil.cmp(src, cleaned / "src.png") is True
+    assert filecmp.cmp(src, cleaned / "src.png") is True
     assert os.stat(src).st_mtime == os.stat(cleaned / "src.png").st_mtime
 
 
