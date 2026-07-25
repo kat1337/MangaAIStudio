@@ -86,6 +86,16 @@ class MainWindow(QMainWindow):
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
 
+        # D-11: the page index shown BEFORE the current select_path, used to
+        # persist the OUTGOING page's mask at the on_page_selected boundary.
+        # Because _set_pages (main_window.py:553-556) calls
+        # file_table.select_path(first.path) BEFORE on_page_selected(first.path),
+        # by the time on_page_selected runs, file_table.current_path() (and
+        # therefore _current_page_index()) already return the INCOMING page —
+        # so the OUTGOING index MUST come from this stored field, NOT from
+        # _current_page_index() (PATTERNS.md file 4a note + RESEARCH Open Q2).
+        self._last_page_index: int | None = None
+
         # Inpaint history hook (plan 06 wires the real HistoryManager here;
         # _on_inpaint_finished activates the push_image_action call site).
         self.history = HistoryManager(limit=20)
@@ -559,12 +569,63 @@ class MainWindow(QMainWindow):
         self._refresh_status_bar()
 
     def on_page_selected(self, path: Path) -> None:
-        """Load ``path`` into the canvas and sync window title + status bar."""
-        # Reset the history (plan 06, UI-SPEC surface 8): a fresh HistoryManager
-        # per page keeps undo from crossing page boundaries
-        # (test_page_change_resets_history). MangaCleaner_GPU main_window.py:347
-        # pattern (reimplemented).
+        """Load ``path`` into the canvas and sync window title + status bar.
+
+        D-11 per-page mask persistence seam (plan 02-02). The four-step
+        sequence lifts mask state out of the canvas (which holds one mask for
+        the *current* page) onto ``ImageFile.mask`` so masks survive page
+        navigation. This is the load-bearing data-model change that makes the
+        two-stage batch workflow possible: Batch Detect (Plan 03) stores one
+        mask per page here; Batch Clean (Plan 03) reads them all back.
+
+        Ordering (PATTERNS.md file 4a note): ``_set_pages`` (main_window.py:553-556)
+        calls ``file_table.select_path(first.path)`` BEFORE
+        ``on_page_selected(first.path)``, so by the time this method runs,
+        ``file_table.current_path()`` (and therefore ``_current_page_index()``)
+        already return the INCOMING page. The OUTGOING index MUST come from the
+        stored ``self._last_page_index`` field — NOT from
+        ``_current_page_index()`` (which has already flipped to the incoming
+        page). Pitfall 2: every write into ``ImageFile.mask`` uses ``.copy()``
+        to detach from the canvas buffer (the regression guard is
+        ``test_mask_persistence_uses_copy``).
+
+        Step 1 (persist OUTGOING): snapshot the current canvas mask (if any)
+            into the OUTGOING page's ``ImageFile.mask`` via
+            ``canvas.get_mask().copy()`` (MANDATORY .copy() — Pitfall 2).
+        Step 2 (undo reset, unchanged): a fresh HistoryManager per page keeps
+            undo from crossing page boundaries (test_page_change_resets_history).
+            Only the mask is lifted out of the canvas; undo stays per-page.
+        Step 3 (load the new page image, unchanged): set_image_from_path.
+        Step 4 (restore INCOMING): if the INCOMING page's ``ImageFile.mask``
+            has content, restore it onto the canvas via
+            ``canvas.set_mask(image_file.mask.copy())`` (set_mask also copies
+            internally at canvas.py:305, but the boundary .copy() is
+            belt-and-suspenders and what the regression test asserts on).
+        Step 5 (tail, unchanged): window title, fit-to-window, recent, status.
+
+        Plan 04 disables page-switch while ``_op_running`` to avoid the D-11
+        write race (RESEARCH Open Question Q2 / T-02-05); this plan implements
+        the persistence seam only and must NOT add navigation-disabling logic.
+        """
+        # Step 1: persist the OUTGOING page's canvas mask into its ImageFile.mask.
+        # The OUTGOING index is the stored _last_page_index (NOT
+        # _current_page_index(), which has already flipped to the incoming page).
+        outgoing_idx = self._last_page_index
+        if (
+            outgoing_idx is not None
+            and 0 <= outgoing_idx < len(self.image_files)
+            and self.canvas.has_mask()
+        ):
+            # MANDATORY .copy(): detaches the QImage from the live canvas buffer
+            # so subsequent canvas mutation cannot reach back through the shared
+            # buffer (Pitfall 2 / T-02-04, regression-guarded by
+            # test_mask_persistence_uses_copy).
+            self.image_files[outgoing_idx].mask = self.canvas.get_mask().copy()
+
+        # Step 2: reset the per-page history (unchanged from plan 06).
         self.reset_history()
+
+        # Step 3: load the new page image (unchanged).
         if not self.canvas.set_image_from_path(path):
             # UI-SPEC §Copywriting "file unreadable" dialog.
             QMessageBox.warning(
@@ -574,10 +635,34 @@ class MainWindow(QMainWindow):
                 " unsupported format.",
             )
             return
+
+        # Step 4: restore the INCOMING page's persisted mask onto the canvas.
+        # _current_page_index() now correctly returns the INCOMING index
+        # (current_path was set to the incoming page by the preceding select_path).
+        incoming_idx = self._current_page_index()
+        if (
+            incoming_idx is not None
+            and 0 <= incoming_idx < len(self.image_files)
+            and self.image_files[incoming_idx].mask is not None
+            and not self.image_files[incoming_idx].mask.isNull()
+        ):
+            # The boundary .copy() is belt-and-suspenders (set_mask also copies
+            # at canvas.py:305); it is what test_mask_persistence_uses_copy
+            # asserts on for the INCOMING direction.
+            self.canvas.set_mask(self.image_files[incoming_idx].mask.copy())
+
+        # Step 5 (unchanged tail).
         self.setWindowTitle(f"Manga AI Studio \u2014 {path.name}")
         self.canvas.fit_to_window()
         self._add_recent_file(path)
         self._refresh_status_bar()
+
+        # Record THIS page as the OUTGOING page for the NEXT navigation. Must
+        # run AFTER the restore so a subsequent select_path→on_page_selected
+        # captures this page's (now restored) state as its outgoing snapshot.
+        # Plan 04 disables navigation while _op_running to avoid the D-11 write
+        # race (RESEARCH Open Question Q2 / T-02-05).
+        self._last_page_index = self._current_page_index()
 
     def _open_single_image(self, path: Path) -> None:
         """Open one image as the sole page in the sidebar."""

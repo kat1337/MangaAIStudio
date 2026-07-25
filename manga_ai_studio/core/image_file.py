@@ -89,3 +89,22 @@ class ImageFile:
         """Drop the current mask (Edit -> Clear Mask, plan 04/06)."""
         self.mask = None
         self.dirty = True
+
+    def has_mask_content(self) -> bool:
+        """Return whether the persisted mask has non-zero content (D-03 / D-11).
+
+        Reuses :func:`manga_ai_studio.core.mask_editor.mask_to_numpy_binary`
+        exactly — do NOT reimplement the alpha scan (PATTERNS.md file 1 +
+        RESEARCH.md §Code Examples "Mask content check"). Mirrors
+        :meth:`EditorCanvas.has_mask_content` (canvas.py:348-365) but operates
+        on the persisted ``self.mask`` slot rather than the live canvas buffer.
+
+        Consumed by Plan 02-03 Batch Clean's D-03 empty-mask gate (skip LaMa
+        and passthrough the original when no mask content is present) and by
+        any future code reading per-page masks off the data model.
+        """
+        if self.mask is None or self.mask.isNull():
+            return False
+        from manga_ai_studio.core.mask_editor import mask_to_numpy_binary
+
+        return bool(mask_to_numpy_binary(self.mask).any())
