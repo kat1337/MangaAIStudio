@@ -713,3 +713,188 @@ def test_batch_clean_uses_current_canvas_mask_edits(qtbot, tmp_path, monkeypatch
         "page_a's ImageFile.mask must be flushed to the erased canvas state "
         "before batch dispatch (D-02 edits are sacred)"
     )
+
+
+# ===========================================================================
+# Plan 02-04 D1: detect-only batch must restore the current page's detected
+# mask onto the canvas (and the detection must survive a round-trip).
+#
+# Regression for the user re-test report: "batch detection will detect pages
+# N+1 on, skipping current page and pages before that." The detection loop
+# correctly writes ImageFile.mask for EVERY page (verified); the root cause is
+# a canvas/data-model DESYNC on the current page plus an erasure cascade on
+# backwards navigation:
+#   - After a detect-ONLY batch, _refresh_current_page_after_batch (written for
+#     the Bug C clean-containing fix) UNCONDITIONALLY cleared the canvas mask
+#     overlay, so the current page showed NO mask even though its
+#     ImageFile.mask had been correctly detected.
+#   - The D-11 seam then snapshotted that empty canvas back onto the OUTGOING
+#     page's ImageFile.mask on the next navigation, silently erasing the
+#     detected mask of the page being left ("skipping current page and pages
+#     before").
+# The fix makes the refresh mode-aware: for a clean-containing batch keep the
+# Bug C behavior (reload cleaned image + clear consumed overlay); for a
+# detect-only batch RESTORE the just-detected ImageFile.mask onto the canvas
+# so the data model + canvas stay in sync (mirroring the D-11 seam step 4).
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug D1: a detect-only batch leaves the current page's detected mask visible.
+
+    Behavior: after a Batch Detect finishes, the current page's just-detected
+    ``ImageFile.mask`` must be RESTORED onto the canvas (mirroring the D-11
+    seam step 4), NOT cleared. The detection loop correctly writes
+    ``ImageFile.mask`` for every page; the bug was that the post-batch refresh
+    unconditionally cleared the canvas overlay (a Bug C fix that is correct for
+    clean-containing batches but wrong for detect-only batches).
+
+    Regression for the user re-test report "batch detection will detect pages
+    N+1 on, skipping current page and pages before that" — the visible symptom
+    of the current page showing no mask after a detect batch.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+    assert window._current_page_index() == 0, "precondition: page_a is current"
+    # page_a starts with NO mask (never detected).
+    assert window.canvas.has_mask_content() is False, (
+        "precondition: canvas has no mask content before detect"
+    )
+
+    # A fake detector that returns a KNOWN non-empty mask for every page (the
+    # real CTD returns a grayscale heatmap; a small block of 255s suffices to
+    # exercise the persistence + restore path). We drive the REAL
+    # _run_batch_task so the detection write (page.mask = ...) executes against
+    # the actual ImageFile state, exactly like the Bug D test does for clean.
+    detected_block_value = 255
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        import numpy as np
+
+        from manga_ai_studio.core.batch_runner import _run_batch_task
+
+        class _FakeDetector:
+            def load(self, *a, **k):
+                pass
+
+            def detect(self, image_bgr):  # noqa: ARG002
+                h, w = 16, 16
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[2:6, 2:6] = detected_block_value  # a 4x4 detected block
+                return mask, []
+
+        return _run_batch_task(
+            pages,
+            mode="detect",
+            det_model=_FakeDetector(),
+            inp_model=None,
+            cleaned_dir=cleaned_dir,
+            progress_callback=progress_callback,
+            abort_flag=abort_flag,
+        )
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    window.batch_detect()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The data model was correctly written by the loop for the current page.
+    assert window.image_files[0].has_mask_content() is True, (
+        "the detection loop must have written page_a's mask to ImageFile.mask"
+    )
+
+    # Bug D1: the canvas must REFLECT that detected mask (not be cleared). The
+    # current bug leaves the canvas with no mask content even though the data
+    # model holds the detection.
+    assert window.canvas.has_mask_content() is True, (
+        "after a detect-only batch the current page's detected mask must be "
+        "restored onto the canvas (Bug D1: canvas must not be cleared for a "
+        "detect-only batch)"
+    )
+    # And the canvas mask content must match the detected block (sanity: it is
+    # the SAME mask the loop wrote, not some other/stale content).
+    canvas_mask_np = mask_to_numpy_binary(window.canvas.get_mask())
+    detected_nonzero = int(canvas_mask_np.sum())
+    assert detected_nonzero > 0, (
+        "the canvas mask must carry the detected content (non-zero pixels)"
+    )
+
+
+@pytest.mark.gui
+def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug D1 cascade: a detected mask survives a backwards navigation round-trip.
+
+    Behavior: the erasure cascade described in the user report is gone. After a
+    detect-only batch the detected masks must survive navigating to another
+    page and back — the D-11 seam must NOT overwrite a page's detected
+    ImageFile.mask with an empty (desynced) canvas mask. This holds because the
+    post-batch refresh now RESTORES the detected mask onto the canvas, so the
+    seam's OUTGOING snapshot (step 1) captures the real mask instead of an
+    empty buffer.
+
+    Regression for "skipping current page and pages before that" — each
+    backwards navigation previously erased the detected mask of the page being
+    left.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, page_b = _load_two_pages(window, tmp_path)
+    assert window._current_page_index() == 0, "precondition: page_a is current"
+
+    detected_block_value = 255
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        import numpy as np
+
+        from manga_ai_studio.core.batch_runner import _run_batch_task
+
+        class _FakeDetector:
+            def load(self, *a, **k):
+                pass
+
+            def detect(self, image_bgr):  # noqa: ARG002
+                h, w = 16, 16
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[2:6, 2:6] = detected_block_value
+                return mask, []
+
+        return _run_batch_task(
+            pages,
+            mode="detect",
+            det_model=_FakeDetector(),
+            inp_model=None,
+            cleaned_dir=cleaned_dir,
+            progress_callback=progress_callback,
+            abort_flag=abort_flag,
+        )
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    window.batch_detect()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # Both pages were detected.
+    assert window.image_files[0].has_mask_content() is True
+    assert window.image_files[1].has_mask_content() is True
+
+    # Snapshot page_a's detected mask content BEFORE the cascade navigation.
+    page_a_before = mask_to_numpy_binary(window.image_files[0].mask).tobytes()
+
+    # Navigate to page_b then back to page_a — the path that previously erased
+    # the detected mask of the page being left.
+    window.file_table.select_path(page_b)
+    window.on_page_selected(page_b)
+    window.file_table.select_path(page_a)
+    window.on_page_selected(page_a)
+
+    # page_a's detected mask must be byte-identical (the cascade is gone).
+    page_a_after = mask_to_numpy_binary(window.image_files[0].mask).tobytes()
+    assert page_a_after == page_a_before, (
+        "Bug D1 cascade: page_a's detected mask was altered by a backwards "
+        "navigation round-trip — the post-batch canvas desync let the D-11 "
+        "seam overwrite the detected mask with an empty canvas buffer."
+    )
+    # And the canvas must show the restored mask on page_a after returning.
+    assert window.canvas.has_mask_content() is True, (
+        "after returning to page_a the canvas must show the detected mask"
+    )
