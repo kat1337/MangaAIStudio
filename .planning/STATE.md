@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 02
 current_phase_name: cleaning-output-batch
-status: executing
-stopped_at: Completed 02-03-PLAN.md (FLOW-03 batch driver)
-last_updated: "2026-07-25T20:19:10.685Z"
+status: verifying
+stopped_at: Completed 02-04-PLAN.md (PROJ-02 export + FLOW-03 batch wiring) — all 4 Phase 02 plans done, ready_for_verification
+last_updated: "2026-07-25T21:10:16.168Z"
 last_activity: 2026-07-25
 last_activity_desc: Phase 02 execution started
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 11
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 Phase: 02 (cleaning-output-batch) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-25 — Phase 02 execution started
 
-Progress: [████████░░] 83%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [████████░░] 83%
 | Phase 02 P01 | 5 min | 2 tasks | 2 files |
 | Phase 02 P02 | 4 min | 2 tasks | 3 files |
 | Phase 02 P03 | 7 min | 2 tasks | 3 files |
+| Phase 02 P04 | 22 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 02-03: batch name guard written as idiomatic negated form (if cleaned_dir.name != 'cleaned': raise ValueError) rather than the plan's literal == assert; same behavior, verified by test_output_to_cleaned_subdir's ValueError on 'not_cleaned'
 - [Phase ?]: 02-03: D-03 re-reads the page image a second time (cv2.imdecode path) in clean/detect_and_clean mode for the inpaint RGB contract — detect discarded its BGR after persisting the mask; re-reading keeps detect-only mode free of the RGB conversion and each per-page body self-contained
 - [Phase ?]: 02-03: three entry points over one _run_batch_task loop (D-05); models load ONCE in the wrappers (Pitfall 3), abort checked at loop top ONLY (D-09/Pitfall 4), D-03 empty-mask gate via ImageFile.has_mask_content -> passthrough_original; progress_callback/abort_flag are the last two kwargs with None defaults to match Worker auto-injection
+- [Phase ?]: 02-04: Bug D (canvas mask lost on batch dispatch) was a cross-plan INTEGRATION defect in the DISPATCH layer (main_window._dispatch_batch), not batch_runner — the canvas mask was never flushed to ImageFile.mask before the worker started. Fix = _flush_current_canvas_mask_to_data_model mirroring on_page_selected step 1.
+- [Phase ?]: 02-04: Bug D1 (detect-only batch current-page canvas desync + erasure cascade on backwards navigation) was a canvas/data-model DESYNC from an unconditional refresh — _refresh_current_page_after_batch cleared the canvas overlay even for detect-only batches (no cleaned output), so the next navigation snapshotted the empty canvas back via on_page_selected step 1. Fix = mode-aware refresh (detect restores mask via D-11 step-4 pattern; clean reloads+clears). The D-11 seam (Plan 02-02) was correct throughout and never touched.
+- [Phase ?]: 02-04: _batch_mode/_batch_cancelled distinct from _batch_active — _batch_active gates Cancel enablement; _batch_mode routes mode-aware post-batch refresh; _batch_cancelled disambiguates cancel status text. Progress handler mode-aware ('Detecting' vs 'Cleaning', Bug A).
 
 ### Pending Todos
 
@@ -124,6 +128,7 @@ None yet.
 - [Phase 1]: ~~Validate PyTorch + PySide6 + simple_lama_inpainting coexistence on day one~~ — RESOLVED by source verification (2026-07-12): PanelCleaner's `requirements.txt` proves the full PyTorch stack (torch + PySide6 + manga_ocr + simple_lama + opencv + numpy) coexists in one env. Remaining open question is the frontend↔backend **subprocess/IPC boundary** (D-07/D-08), not dependency coexistence.
 - [Phase 1]: Design model adapter interface to allow optional MangaCleaner_GPU ONNX models as user-installed modules (future enhancement).
 - [Licensing]: Project is GPL v3 (derivative of PanelCleaner) — must preserve GPL v3 in all distributions and provide source code.
+- [Phase 2 follow-up]: Deliberately re-verify `cleaned/` output quality before Phase 02 is considered fully shipped. The 02-04 smoke-test spot-check (check #3) passed, but the user wants a deliberate re-confirmation. Specifically: (1) outputs are visually clean (text removed, artwork restored); (2) no-text pages are byte-identical to their source (the D-03 copy2 passthrough is not silently re-encoding via PIL); (3) files are written ONLY into `cleaned/` and never into the source chapter folder. Logged from plan 02-04 completion (2026-07-25).
 
 ## Deferred Items
 
@@ -135,8 +140,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-25T20:18:59.718Z
-Stopped at: Completed 02-03-PLAN.md (FLOW-03 batch driver)
+Last session: 2026-07-25T21:10:16.158Z
+Stopped at: Completed 02-04-PLAN.md (PROJ-02 export + FLOW-03 batch wiring) — all 4 Phase 02 plans done, ready_for_verification
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
