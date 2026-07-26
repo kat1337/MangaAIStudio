@@ -12,19 +12,18 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Clean manga pages: run PanelCleaner's mask detection + LaMa inpainting to remove text and restore artwork — *Validated in Phase 1: Cleaning Workspace*
+- [x] Edit masks: brush paint/erase masks, fix auto-detect errors (missed sfx, false positives), set per-region LaMa params, preview mask overlay before committing — *Validated in Phase 1: Cleaning Workspace*
+- [x] Export cleaned raws as PNG/JPG — *Validated in Phase 2: Cleaning Output & Batch (single-page Export via Ctrl+E)*
+- [x] Dual-mode workflow: batch-process a whole chapter (clean + OCR), then open individual pages for per-page fixes, flipping freely — *Cleaning half validated in Phase 2 (Batch Detect / Batch Clean / Batch Detect+Clean + per-page mask persistence); OCR half pending later phases*
 
 ### Active
 
-- [ ] Clean manga pages: run PanelCleaner's mask detection + LaMa inpainting to remove text and restore artwork
-- [ ] Edit masks: brush paint/erase masks, fix auto-detect errors (missed sfx, false positives), set per-region LaMa params, preview mask overlay before committing
 - [ ] Detect text boxes: run mokuro-style detection across a page, then add/remove/move boxes to correct it
 - [ ] Manual OCR: draw a rectangle on the page and run MangaOCR on just that region to fill a box the detector missed
 - [ ] Edit recognized text: correct OCR mistakes by typing into the box
 - [ ] Translation layer: add a manual translation as a second text layer per box (clean seam for future MT integration)
-- [ ] Dual-mode workflow: batch-process a whole chapter (clean + OCR), then open individual pages for per-page fixes, flipping freely
 - [ ] Basic image operations: crop, rotate, levels/curves, resize
-- [ ] Export cleaned raws as PNG/JPG
 - [ ] Save/load projects as `.mas` files (boxes, masks, text, image state — resumable like a .psd)
 - [ ] Export OCR/box JSON (mokuro-style `_ocr.json`) alongside pages for downstream tools
 
@@ -107,4 +106,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-11 after initialization*
+*Last updated: 2026-07-26 after Phase 2 (Cleaning Output & Batch) completion*
