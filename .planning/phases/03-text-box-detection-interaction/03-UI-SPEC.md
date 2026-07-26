@@ -141,7 +141,7 @@ Phase 1 copy is inherited; the table below lists Phase 3 additions and the one P
 |----------|-------------|-------------|
 | shadcn official | none | not applicable (Qt desktop app; shadcn gate does not apply — same as Phase 1) |
 | PySide6 / Qt6 | `QGraphicsRectItem`, `QGraphicsItemGroup`, `QGraphicsTextItem`, `QAction`, `QShortcut`, `QMessageBox`, `QCursor` (all via pip, LGPL) | approved — upstream Qt, LGPL (inherited) |
-| PanelCleaner `panelcleaner/` source | **`comic_text_detector/utils/textblock.py`** — `TextBlock` class *consumed* (read-only: `xyxy`, `bounding_rect()`; `text`/`translation`/`vertical`/`language` slots preserved untouched for Phase 4/5). **`inference.py`** — already vendored Phase 1; Phase 3 reads `blk_list` from the existing 3-tuple return (no new vendoring). | GPL v3 derivative *use* — license-compatible, consistent with Phase 1 D-12. No new files vendored in Phase 3. |
+| PanelCleaner `panelcleaner/` source | **`comic_text_detector/utils/textblock.py`** — `TextBlock` class *consumed* (read-only: `xyxy`, `bounding_rect()`; `text`/`translation`/`vertical`/`language` slots preserved untouched for Phase 4/5). **`inference.py`** — already vendored Phase 1; Phase 3 reads `blk_list` from the existing 3-tuple return. **`structures.py` + `masker.py` — NEWLY VENDORED in Phase 3 per CONTEXT.md D-14** (`Box` model + mask/box std-deviation logic; near-verbatim, GPL v3 → GPL v3 per Phase 1 D-12). Researcher confirms the exact vendored surface + transitive deps. | GPL v3 derivative *use* — license-compatible, consistent with Phase 1 D-12. `structures.py` + `masker.py` are newly vendored in Phase 3 (D-14). |
 | MangaCleaner_GPU | **none — reference only** | BLOCKED from vendoring by Phase 1 D-12 (binary distribution, no LICENSE). Read for QGraphicsRectItem/handle patterns; reimplement. |
 
 No third-party UI component registries. No `npx shadcn` operations. The box-layer code (`BoxItem` subclass, handles, layer group) is **our own**, written against the Qt Graphics View framework. Safety gate satisfied by policy (Phase 1 D-12), not by a `shadcn view` step.
@@ -343,7 +343,7 @@ Consolidated additions/changes vs the Phase 1 table. Inherited shortcuts (Open, 
 | Tools panel | 5 tools (V/B/R/L/E) | unchanged (D-07 — no 6th tool) | none |
 | Undo surface (surface 8→13) | 2 stacks, 4 buttons, 4 shortcuts | 3 stacks, **2 buttons, 2 shortcuts**, unified timeline | **superseding change** |
 | Menus | File/Edit/View/Tools/Help | View +`Toggle Box Overlay (Shift+M)`; Tools +`Detect Boxes` (checkable); Edit collapses undo items to 2 | additive + collapse |
-| Registry safety | Qt LGPL, PanelCleaner GPL v3, MangaCleaner_GPU reference-only | same (consume `TextBlock` read-only; no new vendoring) | none |
+| Registry safety | Qt LGPL, PanelCleaner GPL v3, MangaCleaner_GPU reference-only | same + **vendor `structures.py` + `masker.py` near-verbatim per CONTEXT D-14** (was "no new vendoring" — corrected after discuss-phase follow-up) | additive |
 
 ---
 
