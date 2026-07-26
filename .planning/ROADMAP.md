@@ -18,7 +18,7 @@ Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and tra
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Cleaning Workspace** - Open/navigate pages, detect masks, edit masks, run LaMa inpainting, undo/redo (PanelCleaner + MangaCleaner_GPU foundation) (completed 2026-07-21)
-- [ ] **Phase 2: Cleaning Output & Batch** - Export cleaned pages as PNG/JPG and batch-process a chapter through cleaning
+- [x] **Phase 2: Cleaning Output & Batch** - Export cleaned pages as PNG/JPG and batch-process a chapter through cleaning (completed 2026-07-26)
 - [ ] **Phase 3: Text Box Detection & Interaction** - Detect text boxes as editable objects and select/move/resize/delete them
 - [ ] **Phase 4: OCR Recognition & Text Editing** - Draw-to-OCR regions, correct recognized text, add manual translations
 - [ ] **Phase 5: Project Persistence, Image Ops & Export** - Save/resume .mas projects, basic image operations, export _ocr.json
@@ -173,7 +173,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
-| 2. Cleaning Output & Batch | 4/4 | In Progress|  |
+| 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 0/TBD | Not started | - |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
