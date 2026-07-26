@@ -1,9 +1,9 @@
 ---
-status: testing
+status: passed
 phase: 02-cleaning-output-batch
 source: [02-VERIFICATION.md]
 started: 2026-07-25T21:29:13Z
-updated: 2026-07-25T21:29:13Z
+updated: 2026-07-26T01:23:41Z
 ---
 
 # Phase 02 — Cleaning Output & Batch: User Acceptance Testing
@@ -38,7 +38,13 @@ expected: |
      subfolder. The source chapter folder must contain NO new/modified files
        (no cleaned outputs leaking into the source folder; T-02-01/T-02-02/
        T-02-03 write-target guards held).
-awaiting: user response
+result: pass
+tested: 2026-07-26T01:23:41Z
+notes: |
+  User confirmed all three sub-checks passed on a real chapter with real CTD +
+  LaMa models: outputs visually clean, no-text pages byte-identical (D-03 copy2
+  passthrough confirmed not re-encoding), write-target isolation held (no files
+  leaked into the source folder).
 
 ## Tests
 
@@ -63,14 +69,14 @@ awaiting: user response
 - [ ] **Write-target isolation** — `git status`-equivalent check on the source folder shows no new/modified files outside `cleaned/`
 
 expected: see above
-result: [pending]
+result: pass
 
 ## Summary
 
 total: 1
-passed: 0
+passed: 1
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
