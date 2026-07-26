@@ -1,7 +1,7 @@
 ---
 phase: 3
 slug: text-box-detection-interaction
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-07-25
@@ -129,6 +129,7 @@ Phase 1 copy is inherited; the table below lists Phase 3 additions and the one P
 | Destructive — re-detect over existing detected boxes (D-04, NEW) | Title: **"Detect Text"**. Body: **"Replace the detected text boxes with a new detection? Boxes you drew yourself are kept. Undo is available via Ctrl+Z."** Buttons: **[Cancel] [Replace Detected Boxes]**. Shown ONLY when ≥1 *detected* box exists AND Detect Boxes mode is on; fires AFTER the existing Phase 1 mask-replace gate if a mask is also present. Mirrors `_confirm_replace_mask` (`main_window.py:1328`) exactly in tone and structure. |
 | Delete-box feedback (D-12, NEW) | **"Deleted box — press Ctrl+Z to restore."** Transient status (≈3 s). NOT a dialog — delete is silent/instant per D-12; this non-blocking flash reassures recoverability without interrupting. |
 | Error — detection (UNCHANGED) | Box detection rides the existing Phase 1 detection op; reuse the model-load / detection-error copy verbatim. No new error surface for Phase 3. |
+| Inherited Phase 1 confirm dialogs (PLANNER TODO — Alt+Z removed) | Two shipped Phase 1 strings reference the now-removed `Alt+Z` mask-undo shortcut and MUST be updated when Surface 13 lands: **(a)** `main_window.py:1104` Clear Mask confirm — currently *"You can undo with mask undo (Alt+Z)."* → change to *"You can undo with Ctrl+Z."* **(b)** `main_window.py:1342` Replace Mask confirm — currently *"undo is available via mask undo (Alt+Z)."* → change to *"undo is available via Ctrl+Z."* (The `Undo Mask`/`Redo Mask` toolbar tooltips at `main_window.py:451-452` need no update — those buttons are removed entirely by Surface 13.) These are string-level edits the planner must include as tasks; flagging them here so the dead shortcut never ships in a confirm dialog. |
 
 **Copy rules (inherited + extended):** verb + noun for primary CTAs (the Phase 1 checker FLAG on bare "Inpaint" is noted; Phase 3 introduces no bare-verb CTA). Confirm-gate bodies name the action, state what is kept/lost, and name the recovery path (Ctrl+Z) — matching `_confirm_replace_mask`'s tone.
 
@@ -277,7 +278,7 @@ When the box layer is ON and **zero** boxes exist on the page (no detection run,
 
 - **Three underlying stacks (D-10):** MASK (QImage snapshots, inherited), IMAGE (`(x,y,patch)` tuples, inherited), **BOXES (NEW: full per-page boxes-list snapshot per op — cheap; matches Phase 1's full-snapshot shape per CONTEXT D-10/Claude's Discretion).** BOXES entries are `(op_type, box_id, before_bbox, after_bbox, origin, payload_ref)`.
 - **Unified timeline (D-11):** `Ctrl+Z` pops the most-recent-by-timestamp entry across all three; `Ctrl+Shift+Z` redoes likewise. One shortcut pair, chronological, no stack-switching exposed.
-- **Toolbar (CHANGED):** collapses from 4 buttons to **2** — `[Undo][Redo]` (single pair, no inner divider, no mask/image split). Tooltips: `"Undo last action (Ctrl+Z)"` / `"Redo (Ctrl+Z)"`. The dynamic status tip shows the next op type (e.g. `"Undo: box resize"`).
+- **Toolbar (CHANGED):** collapses from 4 buttons to **2** — `[Undo][Redo]` (single pair, no inner divider, no mask/image split). Tooltips: `"Undo last action (Ctrl+Z)"` / `"Redo last action (Ctrl+Shift+Z)"`. The dynamic status tip shows the next op type (e.g. `"Undo: box resize"`).
 - **Edit menu (CHANGED):** collapses to **2 items** — `Undo (Ctrl+Z)`, `Redo (Ctrl+Shift+Z)`. The Phase 1 `Undo Mask`/`Redo Mask` (`Alt+Z`/`Alt+Shift+Z`) items are **removed** (subsumed).
 - **Shortcuts (CHANGED):**
 
@@ -348,14 +349,16 @@ Consolidated additions/changes vs the Phase 1 table. Inherited shortcuts (Open, 
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+Verified by gsd-ui-checker (2026-07-25). 5 PASS + 1 FLAG (Copywriting); the two FLAG items (Redo tooltip typo + orphaned Alt+Z strings in inherited Phase 1 dialogs) have been corrected in this spec above — Redo tooltip fixed in Surface 13, and the inherited-dialog updates added as a PLANNER TODO row in the Copywriting table.
 
-**Approval:** pending (status: draft — checker upgrades to approved on PASS)
+- [x] Dimension 1 Copywriting: PASS (FLAG items resolved in spec)
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS (contrast verified ≈10:1 green / ≈9.6:1 amber on #0b0b0e)
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
+
+**Approval:** approved (status: approved)
 
 ---
 
