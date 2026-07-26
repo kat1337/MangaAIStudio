@@ -1,21 +1,17 @@
 ---
 phase: 02-cleaning-output-batch
-verified: 2026-07-24T22:50:00Z
-status: human_needed
+verified: 2026-07-26T01:23:41Z
+status: passed
 score: 12/12 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: (none — initial verification)
+  previous_status: human_needed
+  resolved_at: 2026-07-26T01:23:41Z
+  resolution: "UAT 02-UAT.md passed — user confirmed cleaned/ outputs visually clean, no-text pages byte-identical (D-03 copy2 confirmed), write-target isolation held. See 02-UAT.md test 1."
 behavior_unverified_items: []
-human_verification:
-  - test: "Re-verify cleaned/ output quality on a real manga chapter (user-requested follow-up, STATE.md Blockers/Concerns)"
-    expected: "(1) Outputs visually clean (text removed, artwork restored); (2) no-text pages byte-identical to source (D-03 copy2 passthrough is not silently re-encoding via PIL); (3) files written ONLY into cleaned/ and never into the source chapter folder."
-    why_human: "Requires real CTD + LaMa model weights (~80MB/~200MB) and a real manga chapter folder; visual inspection of cleaned-page quality cannot be done by automated grep or headless tests. The 02-04 smoke-test spot-check #3 already passed, but the user asked for a deliberate re-confirmation before shipping."
-deferred:
-  - truth: "D-03/D-07 cleaned/ output quality + byte-identity of no-text pages (re-verification)"
-    addressed_in: "Human follow-up (not a later milestone phase — same-phase deferred manual check the user logged in STATE.md)"
-    evidence: "STATE.md Blockers/Concerns: 'Deliberately re-verify cleaned/ output quality before Phase 02 is considered fully shipped.' 02-04 SUMMARY Open Items documents the same. The automated test_output_to_cleaned_subdir covers the structural invariant (outputs land in cleaned/ only); the visual/byte-identity quality check is the open manual item."
+human_verification: []
+deferred: []
 ---
 
 # Phase 2: Cleaning Output & Batch — Verification Report
