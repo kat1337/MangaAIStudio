@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
 status: executing
-stopped_at: Completed 03-01-PLAN.md (vendored structures + masker + PageBox + ImageFile.boxes)
-last_updated: "2026-07-28T15:36:42.411Z"
+stopped_at: Completed 03-02-PLAN.md (BOXES stack + unified-timeline undo/redo)
+last_updated: "2026-07-28T15:51:54.280Z"
 last_activity: 2026-07-28
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 03 (text-box-detection-interaction) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-07-28 — Phase 03 execution started
 
@@ -72,6 +72,7 @@ Progress: [██████████] 100%
 | Phase 02 P03 | 7 min | 2 tasks | 3 files |
 | Phase 02 P04 | 22 min | 3 tasks | 2 files |
 | Phase 03 P01 | 10 min | 2 tasks | 7 files |
+| Phase 03 P02 | 6 min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -118,6 +119,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 02-04: _batch_mode/_batch_cancelled distinct from _batch_active — _batch_active gates Cancel enablement; _batch_mode routes mode-aware post-batch refresh; _batch_cancelled disambiguates cancel status text. Progress handler mode-aware ('Detecting' vs 'Cleaning', Bug A).
 - [Phase ?]: 03-01: rewrote all 5 pcleaner. refs in vendored structures.py to panelcleaner. (4 imports + the pcleaner.data body ref at the dead PageData.visualize font_path call) — D-12 discipline requires the qualified name match the vendored module so the file is self-consistent
 - [Phase ?]: 03-01: deferred PageBox import in image_file.py via TYPE_CHECKING (boxes field is a forward-ref string under from __future__ import annotations) — strictly safer than the plan's suggested direct import, avoids any import-ordering sensitivity in the GUI layer
+- [Phase ?]: 03-02: monotonic _seq integer counter for stamps, NOT wall-clock (Pitfall 4)
+- [Phase ?]: 03-02: BOXES is ONE logical stack — op-type in record metadata, not per-op-type lists (D-10 anti-pattern avoided)
+- [Phase ?]: 03-02: shape-agnostic _materialize_snapshot helper — BOXES stack generic over snapshot arity; (stamp,value) widen is fully internal so test_history.py passes unchanged
 
 ### Pending Todos
 
@@ -144,8 +148,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-28T15:36:33.915Z
-Stopped at: Completed 03-01-PLAN.md (vendored structures + masker + PageBox + ImageFile.boxes)
+Last session: 2026-07-28T15:51:46.470Z
+Stopped at: Completed 03-02-PLAN.md (BOXES stack + unified-timeline undo/redo)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
