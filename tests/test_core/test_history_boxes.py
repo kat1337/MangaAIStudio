@@ -168,7 +168,14 @@ def test_unified_undo_pops_most_recent_by_stamp() -> None:
     three stores. Construct a scenario: push mask (stamp 1), push image
     (stamp 2), push boxes (stamp 3). undo returns ('boxes', ...), then
     ('image', ...), then ('mask', ...).
+
+    NOTE: the unified pop delegates to the per-type pop methods, which need a
+    real current value for whichever store they pop (they snapshot current
+    into the opposite stack). Passing None only works when boxes is the
+    popped store; here mask/image may be popped, so we pass real stand-ins.
     """
+    import numpy as np
+
     history = HistoryManager(limit=20)
     history.push_mask_state(_transparent_mask())    # stamp 1
     history.push_image_action(0, 0, _zero_patch())  # stamp 2
@@ -176,19 +183,26 @@ def test_unified_undo_pops_most_recent_by_stamp() -> None:
 
     assert history.can_undo()
 
-    kind1, _v1 = history.undo(None, None, [])
+    cur_mask = _transparent_mask()
+    cur_img = np.zeros((4, 4, 3), dtype=np.uint8)
+    kind1, _v1 = history.undo(cur_mask, cur_img, [])
     assert kind1 == "boxes"
 
-    kind2, _v2 = history.undo(None, None, [])
+    kind2, _v2 = history.undo(cur_mask, cur_img, [])
     assert kind2 == "image"
 
-    kind3, _v3 = history.undo(None, None, [])
+    kind3, _v3 = history.undo(cur_mask, cur_img, [])
     assert kind3 == "mask"
 
 
 @pytest.mark.unit
 def test_unified_undo_all_empty_returns_none() -> None:
-    """undo() returns None when all three undo lists are empty."""
+    """undo() returns None when all three undo lists are empty.
+
+    When nothing is on any undo list, no per-type pop is invoked, so passing
+    None for the current values is safe (the unified pop returns before
+    delegating).
+    """
     history = HistoryManager(limit=20)
     assert history.undo(None, None, []) is None
 
@@ -196,22 +210,25 @@ def test_unified_undo_all_empty_returns_none() -> None:
 @pytest.mark.unit
 def test_unified_redo_mirrors_undo() -> None:
     """redo() pops the most-recent-by-stamp across the REDO lists."""
+    import numpy as np
+
     history = HistoryManager(limit=20)
     # Push mask (stamp 1) then boxes (stamp 2); undo both -> both land on redo.
     history.push_mask_state(_transparent_mask())
     history.push_boxes_state(_snapshot([(1, "detected", None)]))
 
-    history.undo(None, None, [])  # pops boxes -> redo (stamp 3)
-    history.undo(None, None, [])  # pops mask -> redo (stamp 4)
+    cur_mask = _transparent_mask()
+    history.undo(cur_mask, cur_img_stand_in(), [])  # pops boxes -> redo
+    history.undo(cur_mask, cur_img_stand_in(), [])  # pops mask -> redo
 
     assert history.can_redo()
     # Redo pops in stamp order: the most-recent redo stamp first (mask, stamped
     # at the 2nd undo, has the higher stamp).
-    kind1, _v1 = history.redo(None, None, [])
+    kind1, _v1 = history.redo(cur_mask, cur_img_stand_in(), [])
     assert kind1 == "mask"
-    kind2, _v2 = history.redo(None, None, [])
+    kind2, _v2 = history.redo(cur_mask, cur_img_stand_in(), [])
     assert kind2 == "boxes"
-    assert history.redo(None, None, []) is None
+    assert history.redo(cur_mask, cur_img_stand_in(), []) is None
 
 
 @pytest.mark.unit
@@ -225,7 +242,7 @@ def test_can_undo_can_redo_reflect_union() -> None:
     assert history.can_undo()
     assert not history.can_redo()
 
-    history.undo(None, None, [])
+    history.undo(_transparent_mask(), cur_img_stand_in(), [])
     assert not history.can_undo()
     assert history.can_redo()
 
@@ -325,3 +342,16 @@ def _zero_patch(size: int = 4):
     import numpy as np
 
     return np.zeros((size, size, 3), dtype=np.uint8)
+
+
+def cur_img_stand_in():
+    """A small current-image array for the unified pop's image-swap step.
+
+    The unified pop delegates to ``pop_image_undo`` when image is the popped
+    store, which slices ``current[y:y+h, x:x+w]`` to snapshot into redo. The
+    push in the unified-undo tests is at (0, 0) with a 4x4 patch, so a 4x4
+    current image is large enough.
+    """
+    import numpy as np
+
+    return np.zeros((4, 4, 3), dtype=np.uint8)
