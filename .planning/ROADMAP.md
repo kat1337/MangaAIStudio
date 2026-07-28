@@ -111,13 +111,13 @@ Plans:
   1. User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
   2. User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 
-**Plans**: 5 plans (4 waves)
+**Plans**: 1/5 plans executed
 
 Plans:
 
 **Wave 1** (parallel — headless foundation, no Qt)
 
-- [ ] 03-01-PLAN.md — Vendor structures.py + masker.py (D-14) + PageBox model with D-15 seam + ImageFile.boxes slot + Wave 0 test stubs (TEXT-01)
+- [x] 03-01-PLAN.md — Vendor structures.py + masker.py (D-14) + PageBox model with D-15 seam + ImageFile.boxes slot + Wave 0 test stubs (TEXT-01)
 - [ ] 03-02-PLAN.md — HistoryManager BOXES stack + unified-timeline pop (D-10/D-11) + Pitfall-4 (stamp, value) entry-shape widen + test_history.py guard update (TEXT-03)
 
 **Wave 2** *(blocked on Wave 1)*
@@ -189,7 +189,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
-| 3. Text Box Detection & Interaction | 0/5 | Not started | - |
+| 3. Text Box Detection & Interaction | 1/5 | In Progress|  |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 

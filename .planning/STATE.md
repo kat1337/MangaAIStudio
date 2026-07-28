@@ -2,19 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 3
-current_phase_name: Text Box Detection & Interaction
+current_phase: 03
+current_phase_name: text-box-detection-interaction
 status: executing
-stopped_at: "Phase 3 research + validation done; PAUSED before pattern-mapper/planner (quota). Resume: /gsd-plan-phase 3"
-last_updated: "2026-07-28T04:15:16.408Z"
-last_activity: 2026-07-26
-last_activity_desc: Phase 02 complete, transitioned to Phase 3
+stopped_at: Completed 03-01-PLAN.md (vendored structures + masker + PageBox + ImageFile.boxes)
+last_updated: "2026-07-28T15:36:42.411Z"
+last_activity: 2026-07-28
+last_activity_desc: Phase 03 execution started
 progress:
-  total_phases: 5
+  total_phases: 3
   completed_phases: 2
-  total_plans: 11
-  completed_plans: 11
-  percent: 40
+  total_plans: 16
+  completed_plans: 12
 ---
 
 # Project State
@@ -24,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 02 — cleaning-output-batch
+**Current focus:** Phase 03 — text-box-detection-interaction
 
 ## Current Position
 
-Phase: 3 — Text Box Detection & Interaction
-Plan: Not started
+Phase: 03 (text-box-detection-interaction) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-07-26 — Phase 02 complete, transitioned to Phase 3
+Last activity: 2026-07-28 — Phase 03 execution started
 
 Progress: [██████████] 100%
 
@@ -72,6 +71,7 @@ Progress: [██████████] 100%
 | Phase 02 P02 | 4 min | 2 tasks | 3 files |
 | Phase 02 P03 | 7 min | 2 tasks | 3 files |
 | Phase 02 P04 | 22 min | 3 tasks | 2 files |
+| Phase 03 P01 | 10 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -116,6 +116,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 02-04: Bug D (canvas mask lost on batch dispatch) was a cross-plan INTEGRATION defect in the DISPATCH layer (main_window._dispatch_batch), not batch_runner — the canvas mask was never flushed to ImageFile.mask before the worker started. Fix = _flush_current_canvas_mask_to_data_model mirroring on_page_selected step 1.
 - [Phase ?]: 02-04: Bug D1 (detect-only batch current-page canvas desync + erasure cascade on backwards navigation) was a canvas/data-model DESYNC from an unconditional refresh — _refresh_current_page_after_batch cleared the canvas overlay even for detect-only batches (no cleaned output), so the next navigation snapshotted the empty canvas back via on_page_selected step 1. Fix = mode-aware refresh (detect restores mask via D-11 step-4 pattern; clean reloads+clears). The D-11 seam (Plan 02-02) was correct throughout and never touched.
 - [Phase ?]: 02-04: _batch_mode/_batch_cancelled distinct from _batch_active — _batch_active gates Cancel enablement; _batch_mode routes mode-aware post-batch refresh; _batch_cancelled disambiguates cancel status text. Progress handler mode-aware ('Detecting' vs 'Cleaning', Bug A).
+- [Phase ?]: 03-01: rewrote all 5 pcleaner. refs in vendored structures.py to panelcleaner. (4 imports + the pcleaner.data body ref at the dead PageData.visualize font_path call) — D-12 discipline requires the qualified name match the vendored module so the file is self-consistent
+- [Phase ?]: 03-01: deferred PageBox import in image_file.py via TYPE_CHECKING (boxes field is a forward-ref string under from __future__ import annotations) — strictly safer than the plan's suggested direct import, avoids any import-ordering sensitivity in the GUI layer
 
 ### Pending Todos
 
@@ -142,8 +144,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-26T04:47:20.877Z
-Stopped at: Phase 3 research + validation done; PAUSED before pattern-mapper/planner (quota). Resume: /gsd-plan-phase 3
-Resume file: .planning/phases/03-text-box-detection-interaction/03-RESEARCH.md
+Last session: 2026-07-28T15:36:33.915Z
+Stopped at: Completed 03-01-PLAN.md (vendored structures + masker + PageBox + ImageFile.boxes)
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
