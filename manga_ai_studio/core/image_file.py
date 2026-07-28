@@ -60,6 +60,11 @@ class ImageFile:
         thumbnail: A 64x64 letterboxed ``QPixmap`` preview, or ``None`` until
             :meth:`load_thumbnail` is called.
         mask: The page mask ``QImage`` (``None`` until plan 04 paints one).
+        boxes: The page's text boxes as ``list[PageBox]`` (``None`` until
+            plan 03-04's detection seam populates it). Mirrors the Phase 2
+            ``mask`` slot pattern (D-11 of Phase 2). Per-page, in-memory only
+            — NO disk serialization in Phase 3 (PROJ-01 ``.mas`` save is
+            Phase 5).
         dirty: True when the page has unsaved edits (mask/inpaint) — reserved
             for plan 06 history tracking.
     """
@@ -67,6 +72,7 @@ class ImageFile:
     path: Path
     thumbnail: QPixmap | None = None
     mask: QImage | None = None
+    boxes: list["PageBox"] | None = None
     dirty: bool = False
 
     def load_thumbnail(self, size: int = THUMBNAIL_SIZE) -> None:
@@ -108,3 +114,29 @@ class ImageFile:
         from manga_ai_studio.core.mask_editor import mask_to_numpy_binary
 
         return bool(mask_to_numpy_binary(self.mask).any())
+
+    def has_boxes(self) -> bool:
+        """Return whether this page has any text boxes (mirrors the trivial
+        shape of the Phase 2 ``mask`` slot's content check).
+
+        Boxes have no pixel content to scan, so unlike
+        :meth:`has_mask_content` this is a plain truthiness check on
+        ``self.boxes`` (an empty list is falsy). Mirrors the
+        :meth:`EditorCanvas.has_boxes` analog (plan 03-03).
+
+        Consumed by plan 03-05's per-page persistence seam (save/restore
+        boxes across page switches) and any future code reading per-page
+        boxes off the data model.
+        """
+        return bool(self.boxes)
+
+
+# NOTE: PageBox import is deferred to runtime via TYPE_CHECKING to keep the
+# module import cycle-safe for the GUI layer that constructs ImageFile at
+# startup. The ``boxes`` field annotation uses a forward-reference string
+# (``list["PageBox"]``) so it resolves lazily under
+# ``from __future__ import annotations``.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from manga_ai_studio.core.box_model import PageBox  # noqa: F401
