@@ -2,7 +2,7 @@
 phase: 3
 slug: text-box-detection-interaction
 status: draft
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-07-25
 ---
@@ -42,15 +42,20 @@ created: 2026-07-25
 
 ## Per-Task Verification Map
 
-> Populated by the planner (each plan's tasks get a row). Requirements TEXT-01
-> (detection → boxes) and TEXT-03 (select/move/resize/delete) must each map to
-> at least one automated test. The Researcher's Validation Architecture names
-> these target test files (carry them into the plan tasks):
+Populated from the 5 plans' `<verify><automated>` blocks (gsd-plan-checker W-01 fix). Requirements TEXT-01 (detection → boxes) and TEXT-03 (select/move/resize/delete) each map to multiple automated tests.
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| _(planner fills)_ | _ | _ | TEXT-01 | — | detection result must not execute untrusted box data | unit | `python -m pytest tests/test_core/<new>_test.py -q` | ❌ W0 | ⬜ pending |
-| _(planner fills)_ | _ | _ | TEXT-03 | — | box edits are undoable (BOXES stack) | unit + gui | `python -m pytest tests/test_history.py tests/test_gui_<box>.py -q` | ❌ W0 | ⬜ pending |
+| 03-01-T1 | 03-01 | 1 | TEXT-01 | T-03-06 (V5) | vendored code imports cleanly; ost-import guarded (Pitfall 1) | unit | `python -m pytest tests/test_core/test_structures.py tests/test_core/test_masker_vendor.py -q` | ❌ W0 | ⬜ pending |
+| 03-01-T2 | 03-01 | 1 | TEXT-01 | T-03-06 (V5) | textblock_to_box coerces model xyxy to ints (untrusted boundary) | unit | `python -m pytest tests/test_core/test_box_model.py -q` | ❌ W0 | ⬜ pending |
+| 03-02-T1 | 03-02 | 1 | TEXT-03 | — | BOXES stack + unified-timeline pop; Phase 1 test_history.py guards widened to (stamp, value) (Pitfall 4) | unit | `python -m pytest tests/test_history.py tests/test_core/test_history_boxes.py -q` | ❌ W0 | ⬜ pending |
+| 03-03-T1 | 03-03 | 2 | TEXT-03 | — | BoxItem + CornerHandle render + selection state (D-05/D-06/D-09) | gui | `python -m pytest tests/test_gui_boxes.py -q -m gui` | ❌ W0 | ⬜ pending |
+| 03-03-T2 | 03-03 | 2 | TEXT-03 | — | box layer hit-test dispatch + create/move/resize/delete (D-07/D-08/D-12/D-13) | gui | `python -m pytest tests/test_gui_boxes.py -q -m gui` | ❌ (inline TDD Wave 2) | ⬜ pending |
+| 03-04-T1 | 03-04 | 3 | TEXT-01 | T-03-06 (V5) | `_on_detection_finished` builds boxes from `result["blocks"]`; xyxy bounds-clamped against image rect | gui | `python -m pytest tests/test_gui_detection_boxes.py -q -m gui` | ❌ (inline TDD Wave 3) | ⬜ pending |
+| 03-05-T1 | 03-05 | 4 | TEXT-01, TEXT-03 | — | per-page box persistence, `.copy()` both boundaries (Phase 2 D-11 mirror) | gui | `python -m pytest tests/test_box_persistence.py -q -m gui` | ❌ (inline TDD Wave 4) | ⬜ pending |
+| 03-05-T2 | 03-05 | 4 | TEXT-01, TEXT-03 | — | Surface 13 undo collapse; Alt+Z removed; orphaned strings at main_window.py:1104 + :1342 fixed | gui | `python -m pytest tests/test_box_persistence.py -q -m gui` | ✅ (existing) | ⬜ pending |
+
+**File-exists legend:** ❌ W0 = Wave 0 stub created in Wave 1; ❌ (inline TDD) = created via TDD in the task's own wave (deviation from "all stubs in Wave 0" — acceptable: Nyquist sampling continuity is met because every impl task carries `<automated>` verify).
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -58,16 +63,17 @@ created: 2026-07-25
 
 ## Wave 0 Requirements
 
-The phase introduces new test files. Wave 0 (first plan, first wave) must create stubs so the sampling loop has targets:
+The phase introduces new test files. Wave 0 (Wave 1 plans 03-01 + 03-02) creates the headless-core stubs so the sampling loop has targets from the start; the 3 GUI test files are created inline via TDD in their own waves (deviation noted in the per-task map — sampling continuity still holds).
 
-- [ ] `tests/test_core/test_structures.py` — stubs for the vendored `Box` model (REQ coverage: TEXT-01 box-object creation; `Box.as_tuple_xywh` → `QRectF` mapping)
-- [ ] `tests/test_core/test_masker_vendor.py` — stubs for the vendored `masker.py` (std-deviation seam; the `output_structures` import is stubbed per RESEARCH Pitfall 1)
-- [ ] `tests/test_core/test_box_model.py` — stubs for the origin-tagged `PageBox` wrapper (D-03 detected/user; D-15 seam `(Box, mask, std_dev)`)
-- [ ] `tests/test_core/test_history_boxes.py` — stubs for the 3rd BOXES stack + unified-timeline pop (D-10/D-11; RESEARCH Pitfall 4 — timestamp widening)
-- [ ] `tests/test_gui_boxes.py` — stubs for BoxItem selection/move/resize/delete/create (pytest-qt, `-m gui`); mirrors `tests/test_gui_canvas.py`
-- [ ] `tests/test_box_persistence.py` — stubs for per-page box persistence (mirrors Phase 2 T-02-04 mask-persistence seam)
+- [x] `tests/test_core/test_structures.py` — stubs for the vendored `Box` model (REQ coverage: TEXT-01 box-object creation; `Box.as_tuple_xywh` → `QRectF` mapping) — Wave 1 / plan 03-01 Task 1
+- [x] `tests/test_core/test_masker_vendor.py` — stubs for the vendored `masker.py` (std-deviation seam; the `output_structures` import is stubbed per RESEARCH Pitfall 1) — Wave 1 / plan 03-01 Task 1
+- [x] `tests/test_core/test_box_model.py` — stubs for the origin-tagged `PageBox` wrapper (D-03 detected/user; D-15 seam `(Box, mask, std_dev)`) — Wave 1 / plan 03-01 Task 2
+- [x] `tests/test_core/test_history_boxes.py` — stubs for the 3rd BOXES stack + unified-timeline pop (D-10/D-11; RESEARCH Pitfall 4 — timestamp widening) — Wave 1 / plan 03-02 Task 1
+- [ ] `tests/test_gui_boxes.py` — stubs for BoxItem selection/move/resize/delete/create (pytest-qt, `-m gui`); mirrors `tests/test_gui_canvas.py` — created inline via TDD in Wave 2 / plan 03-03
+- [ ] `tests/test_gui_detection_boxes.py` — detection → boxes GUI test — created inline via TDD in Wave 3 / plan 03-04
+- [ ] `tests/test_box_persistence.py` — stubs for per-page box persistence (mirrors Phase 2 T-02-04 mask-persistence seam) — created inline via TDD in Wave 4 / plan 03-05
 
-*Wave 0 = the first plan of the phase creates these stubs alongside the vendored/model code so subsequent tasks always have a target.*
+*Headless core stubs land in Wave 1 (the foundation plans 03-01/03-02); the 3 GUI test files land inline via TDD in the waves that build the GUI they test. The Phase 1 `test_history.py` guard update (Pitfall 4) is a Wave 1 task in plan 03-02 — an existing-file edit, not a new stub.*
 
 ---
 
@@ -90,4 +96,4 @@ The phase introduces new test files. Wave 0 (first plan, first wave) must create
 - [ ] Feedback latency < 60s
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending (set to `approved YYYY-MM-DD` once the planner fills the per-task map and Wave 0 is confirmed)
+**Approval:** approved 2026-07-27 (per-task map populated from plans 03-01..03-05 `<verify>` blocks after gsd-plan-checker verification PASSED; Wave 0 headless-core stubs confirmed in Wave 1 plans)

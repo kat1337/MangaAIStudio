@@ -601,24 +601,30 @@ if incoming_idx is not None and 0 <= incoming_idx < len(self.image_files):
 
 **If this table is otherwise empty:** All other claims in this research were verified or cited — no user confirmation needed. (The single `[ASSUMED]` is a UI default already locked by the UI-SPEC.)
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All four resolved by the planner (plans 03-01..03-05, verified by gsd-plan-checker). Inline markers below cite the implementing plan/task.
 
 1. **Should the unified-timeline pop update Phase 1's `MainWindow` shortcut wiring AND the toolbar buttons in the SAME task, or split?**
    - What we know: UI-SPEC Surface 13 contracts the collapse (4 buttons → 2, 4 shortcuts → 2). The `Alt+Z` removal also touches two inherited confirm-dialog strings (main_window.py:1104, 1342).
    - What's unclear: whether the planner wants one task for the HistoryManager algorithm + a separate task for the UI surface collapse, or one combined task.
    - Recommendation: Split — HistoryManager BOXES-stack + unified-timeline pop is pure-core (headless-testable, low risk); the UI-surface collapse (toolbar/menu/shortcut/dialog-string edits) is GUI-wiring (pytest-qt). Two tasks, two test files. Matches Phase 1's plan-06 (core) + plan-04 (GUI) split.
+   - **RESOLVED:** Split adopted — plan 03-02 Task 1 (Wave 1, headless core) implements the BOXES stack + unified-timeline pop + Pitfall 4 `test_history.py` guard widening; plan 03-05 Task 2 (Wave 4) implements the Surface 13 UI collapse (toolbar/menu/shortcut + the two orphaned Alt+Z dialog strings).
 
 2. **Does the `origin`-tagging wrapper live in `core/box_model.py` (new file) or inline in `gui/box_item.py`?**
    - What we know: D-14 + Claude's Discretion say don't mutate the vendored `Box`; layer origin/identity on top. The wrapper is needed by both the GUI (`BoxItem`) and the persistence layer (`ImageFile.boxes`) and the undo layer (BOXES snapshots).
    - Recommendation: `core/box_model.py` (`PageBox` dataclass per §Code Examples) — pure Python, headless-testable, imported by both GUI and persistence. Keeps `BoxItem` as the Qt view of a `PageBox`.
+   - **RESOLVED:** `core/box_model.py` — plan 03-01 Task 2 creates `PageBox` + `textblock_to_box` + the DETECTED/USER origin constants there.
 
 3. **Is `mask_page` (the batch driver in masker.py) worth keeping in the vendored file at all, or should the vendored `masker.py` contain ONLY the `save_denoising_data` helper + the std-dev seam re-exports?**
    - What we know: Phase 3 does not call `mask_page`. The D-15 later phase calls `image_ops.pick_best_mask` directly (not `mask_page`). `mask_page` is the ONLY consumer of `ost.OutputPathGenerator`.
    - Recommendation: Keep `mask_page` in the vendored file but guard the `ost` import (`try/except ImportError`) so the module imports cleanly. Rationale: near-verbatim per D-12 is easier to audit/diff against upstream than a carved-up file; the dead code is harmless if `ost` is None. The planner decides; this is low-stakes.
+   - **RESOLVED:** Keep `mask_page` verbatim with the guarded `ost` import — plan 03-01 Task 1 vendors `masker.py` near-verbatim with the `try/except ImportError` guard on `ost` (RESEARCH Pitfall 1).
 
 4. **Should the `ImageFile.boxes` slot store `list[PageBox]` (origin-tagged) or `list[Box]` (bare vendored)?**
    - What we know: Persistence needs origin (D-03 re-detect rule) and the payload (TextBlock for Phase 4/5). Bare `Box` loses both.
    - Recommendation: `list[PageBox]` (the §Code Examples dataclass). Consistent with the D-15 seam shape.
+   - **RESOLVED:** `list[PageBox]` — plan 03-01 Task 2 types the `ImageFile.boxes` slot as `list[PageBox]`; plan 03-05 Task 1's restore path depends on it.
 
 ## Environment Availability
 

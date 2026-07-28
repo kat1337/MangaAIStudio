@@ -51,7 +51,7 @@ to the listed file itself.
 
 | New Test File | Role | Data Flow | Closest Analog | Match |
 |---------------|------|-----------|----------------|-------|
-| `tests/test_core/test_structures_box.py` | test (unit, headless) | transform | `tests/test_core/test_image_io.py:1-45` (pure-numpy unit test header) + `tests/test_core/conftest.py` (fixture shape) | exact |
+| `tests/test_core/test_structures.py` | test (unit, headless) | transform | `tests/test_core/test_image_io.py:1-45` (pure-numpy unit test header) + `tests/test_core/conftest.py` (fixture shape) | exact |
 | `tests/test_core/test_masker_vendor.py` | test (unit, headless) | import-smoke | `tests/test_core/test_image_io.py:1-45` | role-match |
 | `tests/test_core/test_box_model.py` | test (unit, headless) | state | `tests/test_core/test_image_io.py:1-45` | role-match |
 | `tests/test_core/test_history_boxes.py` | test (unit, headless) | state / stack | `tests/test_history.py:1-90` (HistoryManager tests + `_transparent_mask`/`_painted_mask` helpers) | exact |
@@ -594,7 +594,7 @@ Copy the structure verbatim — custom `[Cancel] [Verb Noun]` buttons (Qt has no
 
 **Source:** `tests/conftest.py` (top-level `pytest.importorskip("PySide6")` + `profile_manager` fixture), `tests/test_core/conftest.py` (fake adapters), `pytest.ini` (`qt_api=pyside6`, `unit`/`gui` markers). **Apply to:** all 6 new test files.
 
-- **Headless unit tests** (`test_structures_box.py`, `test_masker_vendor.py`, `test_box_model.py`, `test_history_boxes.py`): copy `tests/test_core/test_image_io.py:1-45` header — `from __future__ import annotations`, `@pytest.mark.unit`, pure numpy/stdlib, NO qtbot fixture. Headless CI runs these.
+- **Headless unit tests** (`test_structures.py`, `test_masker_vendor.py`, `test_box_model.py`, `test_history_boxes.py`): copy `tests/test_core/test_image_io.py:1-45` header — `from __future__ import annotations`, `@pytest.mark.unit`, pure numpy/stdlib, NO qtbot fixture. Headless CI runs these.
 - **GUI tests** (`test_gui_boxes.py`, `test_box_persistence.py`): copy `tests/test_gui_canvas.py:1-58` header — `pytest.importorskip("PySide6")`, `qtbot` fixture, construct `MainWindow(profile_manager)` via the shared fixture, synthesize `QMouseEvent`s. Marked `@pytest.mark.gui`.
 - **Fake-detection adapter** (`tests/test_core/conftest.py:FakeDetectionModel`): for `test_gui_boxes.py` / the detection-seam tests, reuse this fake — it already returns `(mask, blk_list)`. Extend it to return a non-empty `blk_list` of fake `TextBlock`s for the box-build path.
 
