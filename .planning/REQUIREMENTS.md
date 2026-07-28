@@ -18,9 +18,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Text/OCR
 
-- [x] **TEXT-01**: User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
+- [ ] **TEXT-01**: User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
 - [ ] **TEXT-02**: User can draw a rectangle on the page and run manga-ocr on just that region to create a box with recognized text (for boxes the auto-detector missed)
-- [x] **TEXT-03**: User can select, move, resize, and delete text boxes on the canvas to correct detection errors
+- [ ] **TEXT-03**: User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 - [ ] **TEXT-04**: User can edit the recognized OCR text inline in a box to correct recognition mistakes
 - [ ] **TEXT-05**: User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
@@ -85,9 +85,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLEAN-04 | Phase 1 | Complete |
 | CLEAN-05 | Phase 1 | Complete |
 | CLEAN-06 | Phase 1 | Complete |
-| TEXT-01 | Phase 3 | Complete |
+| TEXT-01 | Phase 3 | In Progress |
 | TEXT-02 | Phase 4 | Pending |
-| TEXT-03 | Phase 3 | Complete |
+| TEXT-03 | Phase 3 | In Progress |
 | TEXT-04 | Phase 4 | Pending |
 | TEXT-05 | Phase 4 | Pending |
 | PROJ-01 | Phase 5 | Pending |
