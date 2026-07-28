@@ -45,6 +45,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
+    QGraphicsItemGroup,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -52,6 +53,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
+from manga_ai_studio.core.box_model import DETECTED, USER, PageBox
+from panelcleaner.structures import Box
 from manga_ai_studio.core.mask_editor import (
     DEFAULT_BRUSH_SIZE,
     MASK_PAINT_COLOR,
@@ -61,6 +64,7 @@ from manga_ai_studio.core.mask_editor import (
     paint_mask_rect,
     paint_mask_stroke,
 )
+from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, origin_hue
 
 
 # Maximum zoom factor (image_viewer.py:233 clamps at 100).
@@ -72,6 +76,24 @@ ZOOM_TICK_FACTOR = 1.25
 MAX_IMAGE_DIMENSION = 10000
 # Accepted image suffixes (T-01-02 suffix allowlist).
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+
+# Phase 3 box-layer geometry (UI-SPEC §Z-order + §Spacing exceptions). The box
+# layer sits above the mask overlay, below the tool preview/cursor. The
+# empty-box hint sits below the preview_item so a create-drag preview is not
+# obscured by the hint text.
+BOX_LAYER_Z = 100
+EMPTY_BOX_HINT_Z = 850
+# D-06 / T-03-05: minimum box size enforced on create-release and resize-release
+# (clamp, not cancel — prevents zero-area boxes that would break later geometry).
+MIN_BOX_SIZE = 8
+# UI-SPEC §12e: the Alt+drag create preview is an amber dashed pen (distinct
+# from the cyan mask-rect preview on the same preview_item).
+_BOX_CREATE_PREVIEW_COLOR = QColor(245, 166, 35, 200)
+# UI-SPEC §12f empty-box-layer hint copy (12px, muted #9a9aa2).
+_EMPTY_BOX_HINT_TEXT = (
+    "No text boxes yet. Alt+drag on the page to draw one, "
+    "or Tools \u2192 Detect Text (D)."
+)
 
 
 def _disable_qimage_allocation_limit() -> None:
@@ -116,6 +138,10 @@ class EditorCanvas(QGraphicsView):
     # mouseMove. The plan-06 history/undo manager consumes this to snapshot the
     # mask (UI-SPEC surface 8).
     mask_modified = Signal()
+    # Phase 3: emitted on box create/move-commit/resize-commit/delete (mirrors
+    # mask_modified). MainWindow consumes this to push a BOXES snapshot onto
+    # the history stack (plan 03-02) + update the status-bar box count.
+    boxes_modified = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -147,6 +173,39 @@ class EditorCanvas(QGraphicsView):
         self.cursor_item = QGraphicsEllipseItem()
         self.cursor_item.setZValue(1000)
         self._scene.addItem(self.cursor_item)
+
+        # Phase 3 box layer (UI-SPEC §11/§12, D-02). A QGraphicsItemGroup at
+        # z=100 holding BoxItem children, independent of mask_item visibility.
+        # The empty_box_hint (§12f) sits at z=850 (below the preview_item) and
+        # shows only when the layer is visible AND zero boxes exist.
+        self.box_layer = QGraphicsItemGroup()
+        self.box_layer.setZValue(BOX_LAYER_Z)
+        self._scene.addItem(self.box_layer)
+        self._box_items: list[BoxItem] = []  # live box layer membership
+        self.empty_box_hint = QGraphicsTextItem(_EMPTY_BOX_HINT_TEXT)
+        self.empty_box_hint.setDefaultTextColor(QColor("#9a9aa2"))
+        hint_font = QFont("Segoe UI", 10)  # ~12px at 96 DPI
+        self.empty_box_hint.setFont(hint_font)
+        self.empty_box_hint.setZValue(EMPTY_BOX_HINT_Z)
+        self._scene.addItem(self.empty_box_hint)
+
+        # Phase 3 box-interaction state. _resizing_box / _moving_box /
+        # _creating_box are the press-time flags; _resize_corner tracks which
+        # handle is being dragged; _box_drag_anchor is the starting scene pos.
+        self._box_overlay_visible = True
+        self._resizing_box: BoxItem | None = None
+        self._resize_corner: str = ""
+        self._box_drag_anchor = QPointF()
+        self._resize_start_rect = QRectF()
+        self._moving_box: BoxItem | None = None
+        self._move_anchor_box_pos = QPointF()
+        self._creating_box = False
+        self._create_anchor = QPointF()
+
+        # Reposition corner handles on zoom (UI-SPEC §12b — they stay 8x8
+        # viewport px via ItemIgnoresTransformations, but their scene-space
+        # position is recomputed so they track the corners through the zoom).
+        self.zoom_changed.connect(self._on_zoom_changed_reposition_handles)
 
         # Empty-state overlay (UI-SPEC §Surface 9 / §Copywriting). A top-most
         # text item shown only when no image is loaded.
@@ -756,12 +815,17 @@ class EditorCanvas(QGraphicsView):
 
     # ------------------------------------------------------- pan + tool dispatch
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        """Route left-button to the active tool; middle/Space+left pans.
+        """Route mouse input to pan, box interaction, or the active mask tool.
 
-        Pan (middle button OR Space+left) takes priority. Otherwise a left
-        click with a non-MOVE tool active (and a mask present) starts a
-        stroke/rect/lasso; everything else falls through to the base
-        QGraphicsView (item selection, scrollbar click, etc.).
+        Dispatch order (UI-SPEC §12d):
+        1. Pan (middle button OR Space+left) — highest priority, unchanged.
+        2. Box hit-test (only when the box layer is visible) — a left-click on a
+           corner handle begins a resize; on a box body selects + begins a move;
+           Alt+left-drag on empty canvas begins a create; a plain left-click on
+           empty canvas deselects the current box and FALLS THROUGH to the mask
+           tool dispatch (so mask painting still works with the layer visible).
+        3. Mask tool (left-click + active mask tool) — unchanged.
+        4. Base QGraphicsView (item selection, scrollbar click, etc.).
         """
         middle = event.button() == Qt.MouseButton.MiddleButton
         space_left = self._space_held and event.button() == Qt.MouseButton.LeftButton
@@ -772,6 +836,31 @@ class EditorCanvas(QGraphicsView):
             self._cursor_overridden = True
             event.accept()
             return
+
+        # --- Phase 3 box hit-test (D-07: boxes always interactive when the
+        # layer is visible; Pitfall 5: hidden layer skips hit-testing entirely).
+        if (
+            self.box_layer.isVisible()
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            scene_pos = self._scene_pos(event)
+            item = self._scene.itemAt(scene_pos, self.transform())
+            if isinstance(item, CornerHandle):
+                self._begin_resize(item, scene_pos)
+                event.accept()
+                return
+            if isinstance(item, BoxItem):
+                self._select_and_begin_move(item, scene_pos)
+                event.accept()
+                return
+            if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                self._begin_create_box(scene_pos)
+                event.accept()
+                return
+            # Empty canvas, no Alt: deselect and FALL THROUGH (do not return)
+            # so the mask-tool branch below still runs and a mask-tool left-
+            # click paints (UI-SPEC §12d step 2 last bullet — critical).
+            self._deselect_box()
 
         if (
             event.button() == Qt.MouseButton.LeftButton
@@ -806,6 +895,30 @@ class EditorCanvas(QGraphicsView):
         curr = self._scene_pos(event)
         self.cursor_item.setPos(curr)
 
+        # --- Phase 3 box resize / create preview advance.
+        if self._resizing_box is not None:
+            self._advance_resize(curr)
+            event.accept()
+            return
+        if self._creating_box:
+            self._advance_create(curr)
+            event.accept()
+            return
+        # --- Phase 3 box move: reposition the selected box by the scene delta.
+        if self._moving_box is not None:
+            dx = curr.x() - self._box_drag_anchor.x()
+            dy = curr.y() - self._box_drag_anchor.y()
+            new_rect = QRectF(
+                self._move_anchor_box_pos.x() + dx,
+                self._move_anchor_box_pos.y() + dy,
+                self._moving_box.rect().width(),
+                self._moving_box.rect().height(),
+            )
+            self._moving_box.setRect(new_rect)
+            self._moving_box._sync_handles()
+            event.accept()
+            return
+
         if self._is_painting:
             self._advance_paint(curr)
             event.accept()
@@ -813,7 +926,7 @@ class EditorCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        """End pan OR commit the active stroke (emits mask_modified once)."""
+        """End pan, commit a box resize/create/move, OR commit the mask stroke."""
         if self._panning and event.button() in (
             Qt.MouseButton.MiddleButton,
             Qt.MouseButton.LeftButton,
@@ -826,6 +939,24 @@ class EditorCanvas(QGraphicsView):
                 self._cursor_overridden = False
             event.accept()
             return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            # --- Phase 3 box resize commit (clamp final rect to >= 8x8, D-06).
+            if self._resizing_box is not None:
+                self._commit_resize()
+                event.accept()
+                return
+            # --- Phase 3 box create commit (D-13; < 8x8 is a no-op, D-06).
+            if self._creating_box:
+                self._commit_create(event)
+                event.accept()
+                return
+            # --- Phase 3 box move commit (emit boxes_modified once on release).
+            if self._moving_box is not None:
+                self._moving_box = None
+                self.boxes_modified.emit()
+                event.accept()
+                return
 
         if (
             event.button() == Qt.MouseButton.LeftButton
@@ -896,7 +1027,12 @@ class EditorCanvas(QGraphicsView):
 
     # ----------------------------------------------------------- keyboard
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        """Track Space for pan; Shift toggles Brush<->Eraser (UI-SPEC surface 6).
+        """Handle Phase 3 box keys; track Space for pan; Shift toggles Brush<->Eraser.
+
+        Phase 3 (D-12/D-08): ``Delete``/``Backspace`` on a selected box removes
+        it silently (no dialog — the BOXES undo in plan 03-05 recovers it);
+        ``Esc`` deselects the current box. Both consume the event only when a
+        box is the target, so they never shadow other consumers.
 
         Keys we do not explicitly handle are passed to ``event.ignore()`` (NOT
         ``super().keyPressEvent()``) so the event propagates up to the
@@ -905,6 +1041,19 @@ class EditorCanvas(QGraphicsView):
         base class accepts unhandled keys, which was shadowing those shortcuts
         when the canvas had focus (CR-09).
         """
+        # --- Phase 3 box Delete/Esc (D-12 silent delete, D-08 Esc deselect).
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            selected = self._selected_box()
+            if selected is not None:
+                self._remove_box(selected)
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_Escape:
+            if self._selected_box() is not None:
+                self._deselect_box()
+                event.accept()
+                return
+
         if event.key() == Qt.Key.Key_Space and not self._space_held:
             self._space_held = True
             if not self._panning:
@@ -956,12 +1105,20 @@ class EditorCanvas(QGraphicsView):
         """Show/hide the empty-state overlay depending on image presence.
 
         Centers the three text blocks vertically with 48px (2xl) spacing per
-        UI-SPEC §Surface 9.
+        UI-SPEC §Surface 9. Also refreshes the Phase 3 empty-box hint (§12f)
+        so its visibility tracks image presence + box-layer state.
         """
         empty = self.image_item.pixmap().isNull()
         self._empty_heading.setVisible(empty)
         self._empty_body.setVisible(empty)
         self._empty_hint.setVisible(empty)
+        # The empty-box hint is hidden when no image is loaded (it is a
+        # page-scoped affordance); its visibility when an image IS loaded is
+        # governed by _refresh_empty_box_hint (box-layer visible + zero boxes).
+        if empty:
+            self.empty_box_hint.setVisible(False)
+        else:
+            self._refresh_empty_box_hint()
         if not empty:
             return
         # Center horizontally over the viewport; stack vertically with spacing.
@@ -975,3 +1132,296 @@ class EditorCanvas(QGraphicsView):
                 cx - item.boundingRect().width() / 2,
                 top + i * 48.0,
             )
+
+    # ============================================================== Phase 3
+    # ------------------------------------------------------------- box layer
+    def set_boxes(
+        self,
+        user_pageboxes: list[PageBox],
+        detected_pageboxes: list[PageBox],
+    ) -> None:
+        """Rebuild the box layer from the given pageboxes (the plan 03-04 seam).
+
+        Clears the current box items (removes them from the scene + the list),
+        then builds one :class:`BoxItem` per pagebox from the union (user boxes
+        first, then detected). Each BoxItem is a PARENT-LESS scene item at z=100
+        (UI-SPEC §11 allows "QGraphicsItemGroup OR parent-less item set"; we use
+        the parent-less form because parenting under a QGraphicsItemGroup blocks
+        Qt selection on the child — see deviation note in set_box_overlay_visible).
+        ``box_layer`` stays as the logical-visibility flag the dispatch checks.
+        """
+        # Remove existing items from the scene + the list.
+        for item in self._box_items:
+            self._scene.removeItem(item)
+        self._box_items = []
+
+        for pb in list(user_pageboxes) + list(detected_pageboxes):
+            item = BoxItem(pb)
+            self._scene.addItem(item)
+            # Parent-less items inherit their own visibility; sync to the layer
+            # state so a toggle BEFORE any boxes were added still hides them.
+            item.setVisible(self._box_overlay_visible)
+            item.setEnabled(self._box_overlay_visible)
+            self._box_items.append(item)
+
+        self._refresh_empty_box_hint()
+        self.boxes_modified.emit()
+
+    def set_box_overlay_visible(self, visible: bool) -> None:
+        """Toggle the box layer visibility (View -> Toggle Box Overlay, Shift+M).
+
+        Hidden = not interactable (D-07 / Pitfall 5): ``setVisible(False)`` hides
+        every box AND we set ``setEnabled(False)`` on each item as belt-and-
+        suspenders — ``setVisible`` alone does not always disable Qt hit-testing,
+        so ``setEnabled`` guarantees a left-click where a hidden box was falls
+        through to mask painting.
+
+        ``box_layer`` (a QGraphicsItemGroup) is kept as the logical-visibility
+        sentinel: boxes are PARENT-LESS scene items (not children of the group)
+        because parenting under a QGraphicsItemGroup blocks Qt selection on the
+        child item. The group's own visibility mirrors the logical state so
+        ``box_layer.isVisible()`` correctly gates the dispatch (Pitfall 5).
+        """
+        self._box_overlay_visible = visible
+        self.box_layer.setVisible(visible)
+        for item in self._box_items:
+            item.setVisible(visible)
+            item.setEnabled(visible)
+        self._refresh_empty_box_hint()
+
+    def has_boxes(self) -> bool:
+        """Return True iff at least one box exists on the layer."""
+        return len(self._box_items) > 0
+
+    def box_count(self) -> int:
+        """Return the total number of boxes on the layer (status-bar helper)."""
+        return len(self._box_items)
+
+    def box_origin_counts(self) -> tuple[int, int]:
+        """Return ``(detected_count, user_count)`` for the status-bar copy.
+
+        Drives the "{n} boxes . {d} detected, {u} user" status-bar text.
+        """
+        detected = sum(1 for it in self._box_items if it.pagebox.origin == DETECTED)
+        user = sum(1 for it in self._box_items if it.pagebox.origin == USER)
+        return detected, user
+
+    def boxes_snapshot(self) -> list[PageBox]:
+        """Materialize a fresh list of PageBoxes from the live BoxItem rects.
+
+        Pitfall 3 (snapshot detachment): for each BoxItem this calls
+        :meth:`BoxItem.current_box` which materializes a fresh vendored ``Box``
+        with int coords from the live ``rect()`` at call-time, then constructs a
+        fresh ``PageBox`` from it. The returned list does NOT alias the live
+        BoxItems — mutating a box after this call does not change the snapshot.
+
+        D-15 seam: ``mask`` / ``std_dev`` stay None (read off the original
+        ``pagebox``, which is None in Phase 3). The shape is the contract plan
+        03-02's ``push_boxes_state`` stores and plan 03-05's restore path
+        consumes (it reads ``.origin`` / ``.payload`` via attribute access, so
+        PageBox — not a bare tuple — is required).
+        """
+        snapshots: list[PageBox] = []
+        for item in self._box_items:
+            fresh_box = item.current_box()
+            snapshots.append(
+                PageBox(
+                    box=fresh_box,
+                    origin=item.pagebox.origin,
+                    payload=item.pagebox.payload,
+                )
+            )
+        return snapshots
+
+    def _refresh_empty_box_hint(self) -> None:
+        """Show the empty-box hint iff the layer is visible, an image is loaded,
+        and zero boxes exist (UI-SPEC §12f). Centred horizontally near the top.
+        """
+        has_image = not self.image_item.pixmap().isNull()
+        show = (
+            has_image
+            and self._box_overlay_visible
+            and len(self._box_items) == 0
+        )
+        self.empty_box_hint.setVisible(show)
+        if not show:
+            return
+        # Centre horizontally over the viewport; y ~48 scene px from the top
+        # (the 2xl inset, mirroring the empty-state philosophy).
+        scene_rect = self.sceneRect()
+        if scene_rect.isNull():
+            return
+        cx = scene_rect.center().x()
+        top = 48.0
+        self.empty_box_hint.setPos(
+            cx - self.empty_box_hint.boundingRect().width() / 2,
+            top,
+        )
+
+    def _on_zoom_changed_reposition_handles(self, _zoom: float) -> None:
+        """Reposition every box's corner handles on zoom (UI-SPEC §12b).
+
+        ``ItemIgnoresTransformations`` keeps each handle 8x8 viewport px
+        regardless of zoom — only its scene-space position is recomputed so it
+        tracks the box corner through the zoom.
+        """
+        for item in self._box_items:
+            item._sync_handles()
+
+    # --------------------------------------------------- box interaction helpers
+    def _deselect_box(self) -> None:
+        """Deselect the currently selected box, if any (UI-SPEC §12c deselect)."""
+        for item in self._box_items:
+            if item.isSelected():
+                item.setSelected(False)
+
+    def _selected_box(self) -> BoxItem | None:
+        """Return the single selected BoxItem, or None (D-08 single-select)."""
+        for item in self._box_items:
+            if item.isSelected():
+                return item
+        return None
+
+    def _select_and_begin_move(self, item: BoxItem, scene_pos: QPointF) -> None:
+        """Select a box (deselecting any other) and arm a move drag (D-08).
+
+        Records the anchor box position + the press scene pos so the move
+        delta is computed in scene coords (zoom-independent). Selection is
+        driven via the scene's selection API so ``itemChange`` fires and the
+        pen/handles update.
+        """
+        self._deselect_box()
+        # Selecting through the scene (not item.setSelected) keeps Qt's
+        # selection machinery consistent; setSelected is fine too but going
+        # via the scene avoids edge cases with the current selection set.
+        item.setSelected(True)
+        self._moving_box = item
+        r = item.rect()
+        self._move_anchor_box_pos = QPointF(r.x(), r.y())
+        self._box_drag_anchor = scene_pos
+
+    def _begin_resize(self, handle: CornerHandle, scene_pos: QPointF) -> None:
+        """Arm a corner-resize drag (D-06). Stores the starting rect + corner."""
+        item = handle.parentItem()
+        # parentItem() returns a QGraphicsItem; cast to BoxItem for typing.
+        assert isinstance(item, BoxItem), "CornerHandle must be parented to a BoxItem"
+        self._resizing_box = item
+        self._resize_corner = handle.corner
+        self._resize_start_rect = QRectF(item.rect())
+        self._box_drag_anchor = scene_pos
+
+    def _begin_create_box(self, scene_pos: QPointF) -> None:
+        """Arm an Alt+drag box-create (D-13). Stores the anchor + sets the flag."""
+        self._creating_box = True
+        self._create_anchor = scene_pos
+        # Swap the preview_item pen to the amber create-preview colour for the
+        # duration of the drag (UI-SPEC §12e). Restored on release.
+        self.preview_item.setPen(
+            QPen(_BOX_CREATE_PREVIEW_COLOR, 2, Qt.PenStyle.DashLine)
+        )
+
+    def _restore_preview_pen(self) -> None:
+        """Restore the preview_item pen to the cyan mask-rect colour after a box-create."""
+        self.preview_item.setPen(
+            QPen(QColor(0, 212, 255, 200), 2, Qt.PenStyle.DashLine)
+        )
+        self.preview_item.setPath(QPainterPath())
+
+    def _advance_resize(self, curr: QPointF) -> None:
+        """Move the dragged corner during a resize drag, clamping the opposite
+        corner so the box stays >= MIN_BOX_SIZE during the drag (D-06).
+
+        The anchor corner (opposite the dragged one) is held fixed; the two
+        edges adjacent to the dragged corner follow the cursor. The clamp
+        prevents the box from inverting/collapsing below the 8x8 min during the
+        drag — the final clamp is re-applied on release.
+        """
+        item = self._resizing_box
+        if item is None:
+            return
+        start = self._resize_start_rect
+        corner = self._resize_corner
+        # Anchor = the corner opposite the dragged one.
+        ax = start.right() if corner in ("TL", "BL") else start.left()
+        ay = start.bottom() if corner in ("TL", "TR") else start.top()
+        nx, ny = curr.x(), curr.y()
+        # Clamp so width/height never drop below MIN_BOX_SIZE during the drag:
+        # if the cursor crosses past the anchor + MIN_BOX_SIZE, pin the moving
+        # edge at anchor +/- MIN_BOX_SIZE (keeps the orientation stable).
+        if corner in ("TL", "BL"):  # moving the LEFT edge
+            nx = min(nx, ax - MIN_BOX_SIZE)
+        else:  # TR/BR: moving the RIGHT edge
+            nx = max(nx, ax + MIN_BOX_SIZE)
+        if corner in ("TL", "TR"):  # moving the TOP edge
+            ny = min(ny, ay - MIN_BOX_SIZE)
+        else:  # BL/BR: moving the BOTTOM edge
+            ny = max(ny, ay + MIN_BOX_SIZE)
+        new_rect = QRectF(
+            min(ax, nx), min(ay, ny), abs(nx - ax), abs(ny - ay)
+        ).normalized()
+        item.setRect(new_rect)
+        item._sync_handles()
+
+    def _commit_resize(self) -> None:
+        """Finalize a resize drag: ensure the rect is >= 8x8 scene px (D-06),
+        reposition handles, and emit ``boxes_modified`` once.
+        """
+        item = self._resizing_box
+        self._resizing_box = None
+        if item is None:
+            return
+        r = item.rect()
+        w = max(r.width(), MIN_BOX_SIZE)
+        h = max(r.height(), MIN_BOX_SIZE)
+        item.setRect(QRectF(r.x(), r.y(), w, h))
+        item._sync_handles()
+        self.boxes_modified.emit()
+
+    def _advance_create(self, curr: QPointF) -> None:
+        """Advance the amber-dashed create preview rect during the drag (§12e)."""
+        path = QPainterPath()
+        path.addRect(QRectF(self._create_anchor, curr).normalized())
+        self.preview_item.setPath(path)
+
+    def _commit_create(self, event) -> None:
+        """On release, create a user BoxItem if the dragged rect >= 8x8 (D-13/D-06).
+
+        A rect smaller than the 8x8 min is a no-op (no zero-area box). The new
+        box is added to the layer, selected, and ``boxes_modified`` is emitted.
+        The preview_item pen is restored to cyan + the path is cleared (§12e).
+        """
+        curr = self._scene_pos(event)
+        self._creating_box = False
+        self._restore_preview_pen()
+        rect = QRectF(self._create_anchor, curr).normalized()
+        if rect.width() < MIN_BOX_SIZE or rect.height() < MIN_BOX_SIZE:
+            return  # < 8x8 — no-op (D-06 min on create-release)
+        # Build a user PageBox with int coords (Pitfall 6 — int at the
+        # Box<->QRectF boundary; payload None for user boxes until OCR runs).
+        pb = PageBox(
+            box=Box(int(rect.x()), int(rect.y()), int(rect.right()), int(rect.bottom())),
+            origin=USER,
+            payload=None,
+        )
+        item = BoxItem(pb)
+        self._scene.addItem(item)
+        item.setVisible(self._box_overlay_visible)
+        item.setEnabled(self._box_overlay_visible)
+        self._box_items.append(item)
+        self._deselect_box()
+        item.setSelected(True)
+        self._refresh_empty_box_hint()
+        self.boxes_modified.emit()
+
+    def _remove_box(self, item: BoxItem) -> None:
+        """Remove a BoxItem from the scene/list + emit boxes_modified (D-12).
+
+        Silent (no confirm dialog) — the BOXES undo stack in plan 03-05
+        recovers the box. Used by the Delete/Backspace key handler.
+        """
+        if item not in self._box_items:
+            return
+        self._scene.removeItem(item)
+        self._box_items.remove(item)
+        self._refresh_empty_box_hint()
+        self.boxes_modified.emit()
