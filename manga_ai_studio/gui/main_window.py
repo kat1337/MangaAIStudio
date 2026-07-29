@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 from natsort import natsorted
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -259,34 +259,29 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_quit)
 
     def _build_edit_menu(self) -> None:
-        # Plan 06 undo/redo actions — disabled until their stack has content
-        # (refreshed in _update_undo_redo_actions). Shortcuts are also installed
-        # as QShortcut in _wire_history_actions so they fire regardless of focus
-        # (MangaCleaner_GPU main_window.py:168-171 pattern, reimplemented).
-        # NOTE: setShortcut is intentionally NOT called here — the focus-robust
-        # QShortcut registrations in _wire_history_actions are the single
-        # source for these key sequences. A duplicate setShortcut here would
-        # trigger Qt's "Ambiguous shortcut overload" warning (CR-14).
-        self.action_undo_image = QAction("Undo Image", self)
-        self.action_undo_image.setEnabled(False)
+        # Surface 13 (plan 03-05): the 4 Phase-1 undo/redo actions collapse to
+        # 2 unified ones. Ctrl+Z pops the merged MASK/IMAGE/BOXES timeline
+        # (plan 03-02's HistoryManager.undo); Ctrl+Shift+Z redoes. The Phase 1
+        # mask-undo actions + items (the legacy Alt-modifier Z pair) are REMOVED
+        # (subsumed by the unified Ctrl+Z).
+        # Shortcuts are installed as QShortcut in _wire_history_actions so they
+        # fire regardless of focus (MangaCleaner_GPU main_window.py:168-171
+        # pattern, reimplemented). NOTE: setShortcut is intentionally NOT called
+        # here — the focus-robust QShortcut registrations are the single source
+        # for these key sequences. A duplicate setShortcut here would trigger
+        # Qt's "Ambiguous shortcut overload" warning (CR-14).
+        self.action_undo = QAction("Undo", self)
+        self.action_undo.setEnabled(False)
 
-        self.action_redo_image = QAction("Redo Image", self)
-        self.action_redo_image.setEnabled(False)
-
-        self.action_undo_mask = QAction("Undo Mask", self)
-        self.action_undo_mask.setEnabled(False)
-
-        self.action_redo_mask = QAction("Redo Mask", self)
-        self.action_redo_mask.setEnabled(False)
+        self.action_redo = QAction("Redo", self)
+        self.action_redo.setEnabled(False)
 
         self.action_clear_mask = QAction("Clear Mask\u2026", self)
         self.action_clear_mask.setEnabled(False)  # plan 04
 
         edit_menu = self.menuBar().addMenu("&Edit")
-        edit_menu.addAction(self.action_undo_image)
-        edit_menu.addAction(self.action_redo_image)
-        edit_menu.addAction(self.action_undo_mask)
-        edit_menu.addAction(self.action_redo_mask)
+        edit_menu.addAction(self.action_undo)
+        edit_menu.addAction(self.action_redo)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_clear_mask)
 
@@ -483,21 +478,15 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_rectangle))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_lasso))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
-        # Undo/redo two-pairs-with-divider section (plan 06, UI-SPEC surface 8):
-        # [Undo Image][Redo Image] ‖ [Undo Mask][Redo Mask]. Each action carries
-        # its shortcut in the tooltip. The two addSeparator() calls flank the
-        # section; the inner addSeparator() divides the image pair from the mask
-        # pair (the contract's "two pairs separated by a divider").
+        # Surface 13 (plan 03-05): the 4-button undo toolbar collapses to 2
+        # ([Undo][Redo]). Ctrl+Z pops the merged MASK/IMAGE/BOXES timeline; the
+        # Phase 1 image/mask pair + inner divider are gone. Tooltips name the
+        # unified shortcut (UI-SPEC §13).
         self.toolbar.addSeparator()
-        self.action_undo_image.setToolTip("Undo Image (Ctrl+Z)")
-        self.action_redo_image.setToolTip("Redo Image (Ctrl+Shift+Z)")
-        self.action_undo_mask.setToolTip("Undo Mask (Alt+Z)")
-        self.action_redo_mask.setToolTip("Redo Mask (Alt+Shift+Z)")
-        self.toolbar.addAction(self.action_undo_image)
-        self.toolbar.addAction(self.action_redo_image)
-        self.toolbar.addSeparator()  # the divider between the two pairs
-        self.toolbar.addAction(self.action_undo_mask)
-        self.toolbar.addAction(self.action_redo_mask)
+        self.action_undo.setToolTip("Undo last action (Ctrl+Z)")
+        self.action_redo.setToolTip("Redo last action (Ctrl+Shift+Z)")
+        self.toolbar.addAction(self.action_undo)
+        self.toolbar.addAction(self.action_redo)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_toggle_mask_overlay)
         # Preview (hold) button (plan 05, UI-SPEC surface 7): press and hold to
@@ -981,13 +970,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ history (plan 06)
     def _wire_history_actions(self) -> None:
-        """Connect the HistoryManager + the four undo/redo actions + shortcuts.
+        """Connect the HistoryManager + the two unified undo/redo actions +
+        shortcuts (Surface 13, plan 03-05).
 
         Reimplemented patterned after MangaCleaner_GPU ``main_window.py:110``
-        (mask_changed -> push_mask_state), ``168-171`` (QShortcut Ctrl+Z /
-        Ctrl+Shift+Z / Alt+Z / Alt+Shift+Z), and ``204-228`` (the four
-        on_undo_image/on_redo_image/on_undo_mask/on_redo_mask handlers). D-12
-        reference-only.
+        (mask_changed -> push_mask_state) and ``168-171`` (QShortcut Ctrl+Z /
+        Ctrl+Shift+Z). The Phase 1 four-action surface (image/mask split plus
+        the legacy Alt-modifier Z pair) is GONE — Surface 13 collapses it to a
+        single unified Ctrl+Z over the merged MASK/IMAGE/BOXES timeline
+        (plan 03-02's HistoryManager.undo/redo). D-12 reference-only.
 
         The mask push hook: ``canvas.mask_modified`` (plan 04, once per
         completed stroke) triggers ``_on_mask_modified`` which pushes a
@@ -1000,21 +991,20 @@ class MainWindow(QMainWindow):
         # Mask push hook: plan-04 mask_modified -> push a .copy() of the mask.
         self.canvas.mask_modified.connect(self._on_mask_modified)
 
-        # Edit-menu actions -> the four handlers.
-        self.action_undo_image.triggered.connect(self.on_undo_image)
-        self.action_redo_image.triggered.connect(self.on_redo_image)
-        self.action_undo_mask.triggered.connect(self.on_undo_mask)
-        self.action_redo_mask.triggered.connect(self.on_redo_mask)
+        # Edit-menu actions -> the two unified handlers.
+        self.action_undo.triggered.connect(self.on_undo)
+        self.action_redo.triggered.connect(self.on_redo)
 
         # Application-wide QShortcuts (MangaCleaner_GPU main_window.py:168-171
         # pattern, reimplemented). The Edit-menu action shortcuts may be
         # shadowed by the canvas's keyPressEvent when the canvas has focus; the
-        # QShortcut on the MainWindow is the robust path.
+        # QShortcut on the MainWindow is the robust path. Surface 13: the legacy
+        # Alt-modifier Z mask-undo shortcuts are REMOVED (subsumed by the unified
+        # Ctrl+Z); Ctrl+Z/Ctrl+Shift+Z are repointed to the unified
+        # on_undo/on_redo handlers.
         for keys, slot in (
-            (QKeySequence("Ctrl+Z"), self.on_undo_image),
-            (QKeySequence("Ctrl+Shift+Z"), self.on_redo_image),
-            (QKeySequence("Alt+Z"), self.on_undo_mask),
-            (QKeySequence("Alt+Shift+Z"), self.on_redo_mask),
+            (QKeySequence("Ctrl+Z"), self.on_undo),
+            (QKeySequence("Ctrl+Shift+Z"), self.on_redo),
         ):
             sc = QShortcut(keys, self)
             sc.activated.connect(slot)
@@ -1037,7 +1027,7 @@ class MainWindow(QMainWindow):
 
         ``push_mask_state`` ``.copy()``-detaches internally (Pitfall 2), so
         passing the live ``canvas.get_mask()`` here is safe. The hook is the
-        ONLY mask push path; ``on_undo_mask`` applies snapshots via
+        ONLY mask push path; ``on_undo`` applies mask snapshots via
         ``canvas.apply_undo_mask`` (no re-emission).
         """
         if self.history is None or not self.canvas.has_mask():
@@ -1045,92 +1035,169 @@ class MainWindow(QMainWindow):
         self.history.push_mask_state(self.canvas.get_mask())
         self._update_undo_redo_actions()
 
-    def on_undo_mask(self) -> None:
-        """Alt+Z — pop the previous mask snapshot and apply it.
+    # ----------------------------------------------------- unified undo/redo
+    # Surface 13 (plan 03-05): the unified Ctrl+Z / Ctrl+Shift+Z pop the
+    # merged MASK/IMAGE/BOXES timeline (plan 03-02's HistoryManager.undo/redo)
+    # and route the (kind, value) result to the matching apply method. After
+    # applying, the status bar shows a transient "Undo: {op}" / "Redo: {op}"
+    # message naming the op type (UI-SPEC §Copywriting — the which-stack-was-
+    # popped indication the unified timeline requires; T-03-09 mitigation).
 
-        ``pop_mask_undo`` stashes the current mask into the redo branch and
-        returns a ``.copy()``-detached snapshot; ``canvas.apply_undo_mask``
-        replaces the editable mask WITHOUT emitting ``mask_modified`` (no
-        re-push). Reimplemented patterned after MangaCleaner_GPU
-        ``main_window.py:215-219``.
+    def _undo_op_label(self, kind: str) -> str:
+        """Map the popped ``kind`` to the UI-SPEC §Copywriting op label."""
+        if kind == "mask":
+            return "mask edit"
+        if kind == "image":
+            return "inpaint"
+        if kind == "boxes":
+            return "box edit"
+        return "edit"
+
+    def _current_undo_state(self):
+        """Gather the (current_mask, current_img, current_boxes) tuple the
+        unified ``history.undo``/``redo`` consume.
+
+        Returns ``(None, None, [])`` if no page is loaded — the unified pop
+        will then return None (all stacks empty OR no current state to swap).
+        """
+        if self._current_page_index() is None:
+            return None, None, []
+        current_mask = self.canvas.get_mask() if self.canvas.has_mask() else None
+        # image: only meaningful if the canvas has one; pop_image_undo slices
+        # current_img[y:y+h, x:x+w] so a real array is required when image is
+        # the popped candidate. Pass None when no image is loaded — the unified
+        # pop returns None before delegating if image is empty (no entry to pop).
+        current_img = self.canvas.get_image_numpy()
+        current_boxes = (
+            self.canvas.boxes_snapshot() if self.canvas.has_boxes() else []
+        )
+        return current_mask, current_img, current_boxes
+
+    def on_undo(self) -> None:
+        """Ctrl+Z — pop the most-recent entry across MASK/IMAGE/BOXES and apply.
+
+        Surface 13 unified handler. Calls ``history.undo(...)`` which delegates
+        to the matching per-type pop and returns ``(kind, value)`` (or None).
+        Routes ``kind`` to ``apply_undo_mask`` / ``apply_undo_image`` /
+        ``apply_undo_boxes``. Emits the transient "Undo: {op}" status feedback.
         """
         if self.history is None:
             return
-        current = self.canvas.get_mask()
-        if current is None:
+        current_mask, current_img, current_boxes = self._current_undo_state()
+        result = self.history.undo(current_mask, current_img, current_boxes)
+        if result is None:
+            self._update_undo_redo_actions()
             return
-        prev = self.history.pop_mask_undo(current)
-        if prev is not None:
-            self.canvas.apply_undo_mask(prev)
+        kind, value = result
+        self._apply_undo_result(kind, value)
+        self._show_transient_status(f"Undo: {self._undo_op_label(kind)}")
         self._update_undo_redo_actions()
 
-    def on_redo_mask(self) -> None:
-        """Alt+Shift+Z — replay a previously-undone mask snapshot."""
+    def on_redo(self) -> None:
+        """Ctrl+Shift+Z — redo the most-recently-undone entry (unified)."""
         if self.history is None:
             return
-        current = self.canvas.get_mask()
-        if current is None:
+        current_mask, current_img, current_boxes = self._current_undo_state()
+        result = self.history.redo(current_mask, current_img, current_boxes)
+        if result is None:
+            self._update_undo_redo_actions()
             return
-        nxt = self.history.pop_mask_redo(current)
-        if nxt is not None:
-            self.canvas.apply_undo_mask(nxt)
+        kind, value = result
+        self._apply_undo_result(kind, value)
+        self._show_transient_status(f"Redo: {self._undo_op_label(kind)}")
         self._update_undo_redo_actions()
 
-    def on_undo_image(self) -> None:
-        """Ctrl+Z — pop the previous image patch and composite it into the canvas.
+    def _apply_undo_result(self, kind: str, value) -> None:
+        """Route a ``(kind, value)`` pop result to the matching canvas apply."""
+        if kind == "mask":
+            # value is a QImage snapshot (or None if the stack was empty).
+            if value is not None:
+                self.canvas.apply_undo_mask(value)
+        elif kind == "image":
+            # value is an (x, y, patch) tuple (or None).
+            if value is not None:
+                x, y, patch = value
+                self.canvas.apply_undo_image(x, y, patch)
+        elif kind == "boxes":
+            # value is a list of PageBox (or None).
+            if value is not None:
+                self.apply_undo_boxes(value)
 
-        ``pop_image_undo`` swaps the current image's region into the redo branch
-        and returns a ``.copy()``-detached ``(x, y, patch)``; the patch is the
-        pre-inpaint content for that region. ``canvas.apply_undo_image`` writes
-        it back into the displayed image. Reimplemented patterned after
-        MangaCleaner_GPU ``main_window.py:204-208``.
+    def apply_undo_boxes(self, boxes_snapshot_list) -> None:
+        """Restore a boxes snapshot from the history (Surface 13 BOXES apply).
+
+        Mirrors ``apply_undo_mask`` / ``apply_undo_image``: rebuilds the box
+        layer from the snapshot via ``set_boxes``, splitting by origin (the
+        snapshot preserved origin per item — plan 03-03's boxes_snapshot).
+        Does NOT emit ``boxes_modified`` re-push semantics that would corrupt
+        the history (set_boxes emits boxes_modified for the canvas-internal
+        refresh, but the BOXES push hook is NOT wired to boxes_modified — only
+        detection + box edits push, never a pure restore).
         """
-        if self.history is None:
+        if not boxes_snapshot_list:
+            # Empty snapshot = restore the empty-boxes state (clear the layer).
+            self.canvas.set_boxes([], [])
             return
-        current_img = self.canvas.get_image_numpy()
-        if current_img is None:
-            return
-        result = self.history.pop_image_undo(current_img)
-        if result is not None:
-            x, y, patch = result
-            self.canvas.apply_undo_image(x, y, patch)
-        self._update_undo_redo_actions()
+        user_pbs = [pb for pb in boxes_snapshot_list if pb.origin == USER]
+        detected_pbs = [pb for pb in boxes_snapshot_list if pb.origin == DETECTED]
+        self.canvas.set_boxes(user_pbs, detected_pbs)
 
-    def on_redo_image(self) -> None:
-        """Ctrl+Shift+Z — re-apply a previously-undone image patch."""
-        if self.history is None:
-            return
-        current_img = self.canvas.get_image_numpy()
-        if current_img is None:
-            return
-        result = self.history.pop_image_redo(current_img)
-        if result is not None:
-            x, y, patch = result
-            self.canvas.apply_undo_image(x, y, patch)
-        self._update_undo_redo_actions()
+    def _show_transient_status(self, message: str) -> None:
+        """Show ``message`` in status_bar_left for ~3 s, then revert to the
+        idle status (UI-SPEC §Copywriting — transient undo/redo feedback).
+
+        The revert target is the canonical box-count status (the same text
+        ``_refresh_status_bar`` would render). A single QTimer is reused —
+        each new transient message restarts it.
+        """
+        self.status_bar_left.setText(message)
+        if not hasattr(self, "_status_revert_timer") or self._status_revert_timer is None:
+            self._status_revert_timer = QTimer(self)
+            self._status_revert_timer.setSingleShot(True)
+            self._status_revert_timer.timeout.connect(self._revert_status_bar)
+        # Capture the revert target NOW (before any later state change) so the
+        # timer fires against the post-undo state, not whatever is current at
+        # fire-time.
+        self._status_revert_target = self._idle_status_text()
+        self._status_revert_timer.start(3000)
+
+    def _revert_status_bar(self) -> None:
+        """Revert status_bar_left to the idle box-count status (QTimer slot)."""
+        target = getattr(self, "_status_revert_target", None)
+        if target is None:
+            target = self._idle_status_text()
+        self.status_bar_left.setText(target)
+
+    def _idle_status_text(self) -> str:
+        """Return the idle status-bar-left text (box count when a page is open
+        with boxes; 'No page open' otherwise). Mirrors UI-SPEC §Copywriting."""
+        if self._current_page_index() is None:
+            return "No page open"
+        if self.canvas.has_boxes():
+            detected, user = self.canvas.box_origin_counts()
+            return (
+                f"{self.canvas.box_count()} boxes · {detected} detected,"
+                f" {user} user"
+            )
+        return ""
 
     def _update_undo_redo_actions(self) -> None:
-        """Enable/disable the four undo/redo actions by stack emptiness.
+        """Enable/disable the two unified undo/redo actions by the UNION flags.
 
-        Each action is enabled iff (a) a page is open AND (b) the matching
-        ``can_*`` flag is True. Called after every push/pop and on page change
-        (UI-SPEC surface 8: each button disabled when its stack is empty).
+        Surface 13 (plan 03-05): each action is enabled iff (a) a page is open
+        AND (b) the matching union flag (``can_undo``/``can_redo`` over all
+        three stacks) is True. Called after every push/pop and on page change
+        (UI-SPEC §13: each button disabled when ALL its stacks are empty).
         """
-        if not hasattr(self, "action_undo_image"):
+        if not hasattr(self, "action_undo"):
             return  # not yet built (early init)
         has_page = self._current_page_index() is not None
         history_ready = self.history is not None
-        self.action_undo_mask.setEnabled(
-            has_page and history_ready and self.history.can_undo_mask()
+        self.action_undo.setEnabled(
+            has_page and history_ready and self.history.can_undo()
         )
-        self.action_redo_mask.setEnabled(
-            has_page and history_ready and self.history.can_redo_mask()
-        )
-        self.action_undo_image.setEnabled(
-            has_page and history_ready and self.history.can_undo_image()
-        )
-        self.action_redo_image.setEnabled(
-            has_page and history_ready and self.history.can_redo_image()
+        self.action_redo.setEnabled(
+            has_page and history_ready and self.history.can_redo()
         )
 
     def _make_tool_toolbar_button(self, action: QAction) -> QToolButton:
@@ -1191,8 +1258,7 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Clear Mask")
         box.setText(
-            "Clear the entire mask on this page? You can undo with mask undo"
-            " (Alt+Z)."
+            "Clear the entire mask on this page? You can undo with Ctrl+Z."
         )
         cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         clear_btn = box.addButton("Clear Mask", QMessageBox.ButtonRole.AcceptRole)
@@ -1568,7 +1634,7 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("Detect Text")
         box.setText(
             "Replace the current mask with a new detection? Your manual edits"
-            " will be lost \u2014 undo is available via mask undo (Alt+Z)."
+            " will be lost \u2014 undo is available via Ctrl+Z."
         )
         cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         replace_btn = box.addButton("Replace Mask", QMessageBox.ButtonRole.AcceptRole)

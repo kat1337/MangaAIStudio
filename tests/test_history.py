@@ -401,7 +401,11 @@ def test_mask_modified_pushes_to_history(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_undo_mask_applies_snapshot(qtbot, tmp_path) -> None:
-    """Alt+Z applies the prior mask snapshot; a 3rd undo is a no-op."""
+    """Unified Ctrl+Z applies the prior mask snapshot; a 3rd undo is a no-op.
+
+    Surface 13 (plan 03-05): the unified handler routes a 'mask' kind pop to
+    apply_undo_mask. Same underlying behavior as Phase 1's Alt+Z path.
+    """
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=32)
 
@@ -411,49 +415,53 @@ def test_undo_mask_applies_snapshot(qtbot, tmp_path) -> None:
     _paint_brush_dot(window.canvas, 20, 20, size=8)
 
     # Undo once: the mask should now match state_after_1 (the 2nd stroke gone).
-    window.on_undo_mask()
+    window.on_undo()
     cur = window.canvas.get_mask()
     assert cur is not None
     assert cur.pixelColor(20, 20).alpha() == state_after_1.pixelColor(20, 20).alpha()
 
     # Undo again: should be transparent (the pre-stroke state).
-    window.on_undo_mask()
+    window.on_undo()
     cur = window.canvas.get_mask()
     assert cur is not None
     assert cur.pixelColor(10, 10).alpha() == 0
 
     # 3rd undo: no-op (stack empty + button disabled).
-    window.on_undo_mask()
+    window.on_undo()
     assert not window.history.can_undo_mask()
 
 
 @pytest.mark.gui
 def test_redo_mask_replays(qtbot, tmp_path) -> None:
-    """After 2 undos, Alt+Shift+Z replays strokes; a 3rd redo is a no-op."""
+    """After 2 undos, unified Ctrl+Shift+Z replays strokes; 3rd redo is a no-op."""
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=32)
     _paint_brush_dot(window.canvas, 10, 10, size=8)
     _paint_brush_dot(window.canvas, 20, 20, size=8)
 
-    window.on_undo_mask()
-    window.on_undo_mask()
+    window.on_undo()
+    window.on_undo()
     assert window.history.can_redo_mask()
 
     # Redo: 1st replay returns the 1st-pushed state's mask (transparent),
     # 2nd replay returns the 1st-stroke mask, 3rd is a no-op.
-    window.on_redo_mask()
+    window.on_redo()
     assert window.history.can_redo_mask()
-    window.on_redo_mask()
+    window.on_redo()
     assert not window.history.can_redo_mask()
 
     # 3rd redo is a no-op.
-    window.on_redo_mask()
+    window.on_redo()
     assert not window.history.can_redo_mask()
 
 
 @pytest.mark.gui
 def test_undo_image_applies_patch(qtbot, tmp_path) -> None:
-    """Ctrl+Z restores the pre-inpaint image region."""
+    """Unified Ctrl+Z restores the pre-inpaint image region.
+
+    Surface 13 (plan 03-05): the unified handler routes an 'image' kind pop to
+    apply_undo_image. Same behavior as Phase 1's Ctrl+Z image-undo path.
+    """
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=16)
 
@@ -468,7 +476,7 @@ def test_undo_image_applies_patch(qtbot, tmp_path) -> None:
     window.canvas.set_image_from_numpy(current)
 
     # Undo: the region should be restored to pre_patch (white = 255).
-    window.on_undo_image()
+    window.on_undo()
     restored = window.canvas.get_image_numpy()
     assert np.array_equal(restored[2:6, 2:6], pre_patch)
     assert not window.history.can_undo_image()
@@ -476,7 +484,7 @@ def test_undo_image_applies_patch(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_redo_image_replays(qtbot, tmp_path) -> None:
-    """After an image undo, Ctrl+Shift+Z re-applies the inpainted patch."""
+    """After an image undo, unified Ctrl+Shift+Z re-applies the inpainted patch."""
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=16)
 
@@ -487,11 +495,11 @@ def test_redo_image_replays(qtbot, tmp_path) -> None:
     current[2:6, 2:6] = 50
     window.canvas.set_image_from_numpy(current)
 
-    window.on_undo_image()
+    window.on_undo()
     assert window.history.can_redo_image()
 
     # Redo: the region should return to value 50 (the post-edit state).
-    window.on_redo_image()
+    window.on_redo()
     after_redo = window.canvas.get_image_numpy()
     assert np.all(after_redo[2:6, 2:6] == 50)
     assert not window.history.can_redo_image()
@@ -505,7 +513,7 @@ def test_new_edit_clears_redo(qtbot, tmp_path) -> None:
     _paint_brush_dot(window.canvas, 10, 10, size=8)
     _paint_brush_dot(window.canvas, 20, 20, size=8)
 
-    window.on_undo_mask()
+    window.on_undo()
     assert window.history.can_redo_mask()
 
     # Paint a new stroke — the redo branch must clear.
@@ -514,51 +522,43 @@ def test_new_edit_clears_redo(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
-def test_toolbar_two_pairs_with_divider(qtbot, tmp_path) -> None:
-    """The toolbar shows [Undo Image][Redo Image] ‖ [Undo Mask][Redo Mask]."""
+def test_toolbar_collapsed_to_two_buttons(qtbot, tmp_path) -> None:
+    """Surface 13 (plan 03-05): the toolbar shows exactly 2 undo buttons
+    ([Undo][Redo]) — the Phase 1 image/mask pair + divider are gone."""
     window = _make_window(qtbot, tmp_path)
     # Collect the toolbar's actions in order.
     actions = window.toolbar.actions()
 
-    # Find indices of the four undo/redo actions.
-    idx_undo_img = actions.index(window.action_undo_image)
-    idx_redo_img = actions.index(window.action_redo_image)
-    idx_undo_mask = actions.index(window.action_undo_mask)
-    idx_redo_mask = actions.index(window.action_redo_mask)
+    # The two unified undo/redo actions are present.
+    idx_undo = actions.index(window.action_undo)
+    idx_redo = actions.index(window.action_redo)
+    # Undo precedes Redo.
+    assert idx_undo < idx_redo
 
-    # Image pair comes before mask pair.
-    assert idx_undo_img < idx_redo_img < idx_undo_mask < idx_redo_mask
-
-    # The separator (a QAction with isSeparator() True) between the two pairs
-    # lives between redo_image and undo_mask. Walk the actions list and verify
-    # there is at least one separator strictly between idx_redo_img and
-    # idx_undo_mask.
-    between = actions[idx_redo_img + 1 : idx_undo_mask]
-    assert any(a.isSeparator() for a in between), (
-        "no separator between the image pair and the mask pair"
-    )
+    # The 4 Phase 1 actions are gone (no attribute, not in the toolbar).
+    for name in ("action_undo_image", "action_redo_image",
+                 "action_undo_mask", "action_redo_mask"):
+        assert not hasattr(window, name), f"{name} must be removed (Surface 13)"
 
 
 @pytest.mark.gui
 def test_buttons_disabled_when_stack_empty(qtbot, tmp_path) -> None:
-    """With empty stacks all four undo/redo actions are disabled."""
+    """With empty stacks both unified undo/redo actions are disabled."""
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=16)
 
-    assert not window.action_undo_mask.isEnabled()
-    assert not window.action_redo_mask.isEnabled()
-    assert not window.action_undo_image.isEnabled()
-    assert not window.action_redo_image.isEnabled()
+    assert not window.action_undo.isEnabled()
+    assert not window.action_redo.isEnabled()
 
-    # Paint a stroke -> Undo Mask enables.
+    # Paint a stroke -> Undo enables (union flag includes the mask stack).
     _paint_brush_dot(window.canvas, 8, 8, size=6)
-    assert window.action_undo_mask.isEnabled()
-    assert not window.action_redo_mask.isEnabled()
+    assert window.action_undo.isEnabled()
+    assert not window.action_redo.isEnabled()
 
-    # Undo -> Redo Mask enables, Undo Mask disables.
-    window.on_undo_mask()
-    assert not window.action_undo_mask.isEnabled()
-    assert window.action_redo_mask.isEnabled()
+    # Undo -> Redo enables, Undo disables.
+    window.on_undo()
+    assert not window.action_undo.isEnabled()
+    assert window.action_redo.isEnabled()
 
 
 @pytest.mark.gui
@@ -586,7 +586,8 @@ def test_page_change_resets_history(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_shortcuts_wired(qtbot, tmp_path) -> None:
-    """Ctrl+Z / Ctrl+Shift+Z / Alt+Z / Alt+Shift+Z QShortcuts exist."""
+    """Surface 13 (plan 03-05): only Ctrl+Z / Ctrl+Shift+Z QShortcuts exist
+    (the unified pair). Alt+Z / Alt+Shift+Z are GONE (subsumed)."""
     from PySide6.QtGui import QShortcut
 
     window = _make_window(qtbot, tmp_path)
@@ -595,29 +596,26 @@ def test_shortcuts_wired(qtbot, tmp_path) -> None:
     key_strings = {s.key().toString() for s in shortcuts}
     assert "Ctrl+Z" in key_strings
     assert "Ctrl+Shift+Z" in key_strings
-    assert "Alt+Z" in key_strings
-    assert "Alt+Shift+Z" in key_strings
+    # The legacy mask-undo shortcuts must NOT be present.
+    assert "Alt+Z" not in key_strings
+    assert "Alt+Shift+Z" not in key_strings
 
 
 @pytest.mark.gui
 def test_no_ambiguous_shortcut_overload(qtbot, tmp_path) -> None:
     """CR-14: undo/redo QActions must NOT carry their own setShortcut.
 
-    The 4 key sequences are registered once each as QShortcut in
-    _wire_history_actions (the focus-robust path). If the QActions also carry
-    setShortcut, Qt emits ``QAction::event: Ambiguous shortcut overload`` on
-    every keypress. Assert each QAction's shortcut is empty AND that each
-    sequence appears on exactly one QShortcut (no duplicates).
+    Surface 13 (plan 03-05): the 2 unified key sequences are registered once
+    each as QShortcut in _wire_history_actions (the focus-robust path). If the
+    QActions also carry setShortcut, Qt emits
+    ``QAction::event: Ambiguous shortcut overload`` on every keypress. Assert
+    each QAction's shortcut is empty AND that each sequence appears on exactly
+    one QShortcut (no duplicates).
     """
     window = _make_window(qtbot, tmp_path)
 
-    # None of the 4 undo/redo QActions should carry a shortcut binding.
-    for action in (
-        window.action_undo_image,
-        window.action_redo_image,
-        window.action_undo_mask,
-        window.action_redo_mask,
-    ):
+    # None of the 2 unified undo/redo QActions should carry a shortcut binding.
+    for action in (window.action_undo, window.action_redo):
         assert action.shortcut().toString() == "", (
             f"{action.text()} carries a duplicate setShortcut; this triggers "
             "Qt's Ambiguous shortcut overload warning (CR-14)"
@@ -631,7 +629,7 @@ def test_no_ambiguous_shortcut_overload(qtbot, tmp_path) -> None:
     seqs = [
         s.key().toString()
         for s in window.findChildren(QShortcut)
-        if s.key().toString() in ("Ctrl+Z", "Ctrl+Shift+Z", "Alt+Z", "Alt+Shift+Z")
+        if s.key().toString() in ("Ctrl+Z", "Ctrl+Shift+Z")
     ]
     counts = Counter(seqs)
     dupes = {k: v for k, v in counts.items() if v > 1}
@@ -640,7 +638,7 @@ def test_no_ambiguous_shortcut_overload(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_undo_does_not_repush(qtbot, tmp_path) -> None:
-    """apply_undo_mask does NOT emit mask_modified (no infinite loop)."""
+    """apply_undo_mask (via the unified handler) does NOT emit mask_modified."""
     window = _make_window(qtbot, tmp_path)
     _open_page(window, tmp_path, size=32)
     _paint_brush_dot(window.canvas, 10, 10, size=8)
@@ -648,9 +646,9 @@ def test_undo_does_not_repush(qtbot, tmp_path) -> None:
     # The undo stack should have exactly 1 entry now.
     assert window.history.can_undo_mask()
 
-    # Apply undo; assert mask_modified is NOT emitted.
+    # Apply undo via the unified handler; assert mask_modified is NOT emitted.
     with qtbot.assertNotEmitted(window.canvas.mask_modified):
-        window.on_undo_mask()
+        window.on_undo()
 
     # The undo stack should now be EMPTY (the undo popped the entry; the
     # current was stashed into redo; no re-push happened).
