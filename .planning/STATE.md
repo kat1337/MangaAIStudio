@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
 status: executing
-stopped_at: "Phase 03 Wave 2 complete (03-03 done; 3/5 plans, 221 full-suite tests green). Paused for quota control. Resume Wave 3: /gsd-execute-phase 3"
-last_updated: "2026-07-28T17:04:26.195Z"
+stopped_at: Completed 03-04-PLAN.md (detection->boxes seam, TEXT-01)
+last_updated: "2026-07-29T01:27:00.975Z"
 last_activity: 2026-07-28
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 03 (text-box-detection-interaction) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-07-28 — Phase 03 execution started
 
@@ -74,6 +74,7 @@ Progress: [██████████] 100%
 | Phase 03 P01 | 10 min | 2 tasks | 7 files |
 | Phase 03 P02 | 6 min | 1 tasks | 3 files |
 | Phase 03 P03 | 10 min | 3 tasks | 3 files |
+| Phase 03 P04 | 6 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 03-03: itemChange(ItemSelectedChange) applies origin pen/brush + handle visibility directly against the prospective value (flag not flipped yet) via _apply_look_for/_sync_handles_for_state
 - [Phase ?]: 03-03: resize clamps during the drag (opposite corner held fixed, moving edge pinned at anchor+/-MIN_BOX_SIZE) so the box never inverts/collapses mid-drag; 8x8 min re-applied on release
 - [Phase ?]: 03-03: Task 3 checkpoint auto-approved under auto_advance + human_verify_mode=end-of-phase (visual feel deferred to end-of-phase gate; not package-legitimacy blocking-human)
+- [Phase ?]: 03-04: D-04 gate fires on box_origin_counts()[0] >= 1 (>= 1 DETECTED box) — user-only layer is not a replace scenario; matches UI-SPEC '>= 1 detected box' wording
+- [Phase ?]: 03-04: V5 clamp builds a fresh @frozen Box per-edge (min(max(coord,0),img_w/img_h)); zero-area post-clamp dropped with loguru debug (model xyxy untrusted, T-03-06)
+- [Phase ?]: 03-04: Task 2 checkpoint auto-approved under auto_advance + end-of-phase verify mode (visual detection quality deferred to end-of-phase gate; not package-legitimacy blocking-human)
 
 ### Pending Todos
 
@@ -153,8 +157,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-28T17:04:16.627Z
-Stopped at: Completed 03-03-PLAN.md (BoxItem + canvas box layer + hit-test dispatch)
+Last session: 2026-07-29T01:27:00.963Z
+Stopped at: Completed 03-04-PLAN.md (detection->boxes seam, TEXT-01)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

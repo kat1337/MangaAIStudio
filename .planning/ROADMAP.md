@@ -111,7 +111,7 @@ Plans:
   1. User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
   2. User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 
-**Plans**: 3/5 plans executed
+**Plans**: 4/5 plans executed
 
 Plans:
 
@@ -126,7 +126,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 03-04-PLAN.md — Detection seam: _on_detection_finished builds boxes from result["blocks"] (D-01/D-03/D-04) + V5 bounds-clamp (TEXT-01)
+- [x] 03-04-PLAN.md — Detection seam: _on_detection_finished builds boxes from result["blocks"] (D-01/D-03/D-04) + V5 bounds-clamp (TEXT-01)
 
 **Wave 4** *(blocked on Wave 2 + 3)*
 
@@ -189,7 +189,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
-| 3. Text Box Detection & Interaction | 3/5 | In Progress|  |
+| 3. Text Box Detection & Interaction | 4/5 | In Progress|  |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
