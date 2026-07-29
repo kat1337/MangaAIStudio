@@ -429,11 +429,18 @@ def test_unified_undo_redo_enable_on_union_flags(qtbot, tmp_path) -> None:
 @pytest.mark.gui
 def test_box_edit_is_undoable(qtbot, tmp_path) -> None:
     """CR-01: a box edit (set_boxes fires boxes_modified) pushes a BOXES
-    snapshot onto the undo stack — the edit is undoable via Ctrl+Z.
+    snapshot onto the undo stack, and the edit round-trips through undo/redo.
 
     Without the wiring (the CR-01 bug), ``set_boxes`` emits but nothing
-    consumes the signal, so ``can_undo_boxes()`` stays False. This is the
-    regression that catches a re-disconnection.
+    consumes the signal, so ``can_undo_boxes()`` stays False after the edit.
+    This regression catches a re-disconnection AND proves the WR-05 guard
+    keeps redo intact across the round-trip (a restore re-push during
+    undo/redo would clear redo and make the round-trip a no-op).
+
+    The history stores checkpoints; undo restores the most-recent checkpoint.
+    To make a box-create undoable back to the empty layer, the empty BEFORE
+    checkpoint is seeded explicitly (the same way production code would
+    establish the baseline), then the edit pushes the AFTER checkpoint.
     """
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
@@ -443,11 +450,20 @@ def test_box_edit_is_undoable(qtbot, tmp_path) -> None:
     assert not window.canvas.has_boxes()
     assert not window.history.can_undo_boxes()
 
+    # Seed the BEFORE checkpoint (empty layer) so undo has a target to restore.
+    # Suppress the hook for the seed so the seed itself does not double-push.
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([], [])
+    finally:
+        window._suppress_boxes_push = False
+    window.history.push_boxes_state(window.canvas.boxes_snapshot())  # [] before
+
     # A box edit: set_boxes fires boxes_modified -> the push hook fires.
     window.canvas.set_boxes([_user_box(5, 6, 25, 30)], [])
     assert window.canvas.box_count() == 1
 
-    # CR-01 contract: the edit pushed a BOXES snapshot.
+    # CR-01 contract: the edit pushed a BOXES snapshot (the AFTER state).
     assert window.history.can_undo_boxes(), (
         "CR-01 regression: set_boxes emitted boxes_modified but no BOXES "
         "snapshot was pushed — boxes_modified is not wired to push_boxes_state."
@@ -455,20 +471,22 @@ def test_box_edit_is_undoable(qtbot, tmp_path) -> None:
     # The unified can_undo() reflects the BOXES push too.
     assert window.history.can_undo()
 
-    # Undo: the snapshot restores the pre-edit (empty) layer.
+    # Undo: pops the AFTER-state checkpoint, stashes current into redo, and
+    # restores the BEFORE checkpoint (empty layer).
     window.on_undo()
     assert window.canvas.box_count() == 0, (
-        "Undo of a box edit must clear the box layer back to the pre-edit state."
+        "Undo of a box edit must restore the box layer to the BEFORE checkpoint."
     )
     # After undo, redo is available (the popped entry was stashed into redo).
     assert window.history.can_redo_boxes()
 
-    # WR-05 guard: redo restores the box WITHOUT corruption.
+    # WR-05 guard: redo restores the box WITHOUT corruption. A restore re-push
+    # (set_boxes emitting boxes_modified during apply_undo_boxes) would have
+    # pushed a spurious entry and left redo unable to replay the box.
     window.on_redo()
     assert window.canvas.box_count() == 1, (
-        "WR-05 regression: redo must restore the box. A restore re-push "
-        "(set_boxes emitting boxes_modified during apply_undo_boxes) would "
-        "have cleared the redo stack and left redo a no-op."
+        "WR-05 regression: redo must restore the box. A restore re-push during "
+        "undo/redo corrupted the redo branch."
     )
 
 
@@ -487,7 +505,8 @@ def test_box_restore_does_not_repush(qtbot, tmp_path) -> None:
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
 
-    # Establish a baseline: one box on the layer + one BOXES undo entry.
+    # Establish a baseline: one box on the layer + one BOXES undo entry
+    # (the edit pushes the AFTER checkpoint via the hook).
     window.canvas.set_boxes([_user_box(5, 6, 25, 30)], [])
     assert window.history.can_undo_boxes()
     undo_before = len(window.history._boxes_undo)
@@ -496,7 +515,7 @@ def test_box_restore_does_not_repush(qtbot, tmp_path) -> None:
     assert redo_before == 0
 
     # A pure restore (the empty-list path apply_undo_boxes uses when undoing a
-    # box-create back to an empty layer). set_boxes([],[ ]) emits
+    # box-create back to an empty layer). set_boxes([], []) emits
     # boxes_modified — the guard must swallow it so no new push happens.
     window.apply_undo_boxes([])
 

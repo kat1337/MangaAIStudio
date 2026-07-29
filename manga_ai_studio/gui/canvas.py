@@ -141,7 +141,15 @@ class EditorCanvas(QGraphicsView):
     # Phase 3: emitted on box create/move-commit/resize-commit/delete (mirrors
     # mask_modified). MainWindow consumes this to push a BOXES snapshot onto
     # the history stack (plan 03-02) + update the status-bar box count.
-    boxes_modified = Signal()
+    #
+    # CR-01 fix: the payload is the PRE-mutation snapshot (the state to restore
+    # TO on undo). The history's pop returns the most-recently-pushed checkpoint
+    # (LIFO), so for a box edit to be undoable in ONE Ctrl+Z the pushed snapshot
+    # must be the BEFORE state (mirrors the image side's pre-edit push contract,
+    # history_manager "Each push records the PRE-edit region so undo restores
+    # it"). Each emit site captures boxes_snapshot() BEFORE the mutation and
+    # passes it here.
+    boxes_modified = Signal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -201,6 +209,11 @@ class EditorCanvas(QGraphicsView):
         self._move_anchor_box_pos = QPointF()
         self._creating_box = False
         self._create_anchor = QPointF()
+        # CR-01 fix: the PRE-mutation snapshot captured at the START of a
+        # box interaction (move/resize/create), emitted on commit as the
+        # boxes_modified payload so the history push records the BEFORE state
+        # (the state to restore to on undo). See boxes_modified docstring.
+        self._boxes_interaction_start_snapshot: list = []
 
         # Reposition corner handles on zoom (UI-SPEC §12b — they stay 8x8
         # viewport px via ItemIgnoresTransformations, but their scene-space
@@ -953,8 +966,9 @@ class EditorCanvas(QGraphicsView):
                 return
             # --- Phase 3 box move commit (emit boxes_modified once on release).
             if self._moving_box is not None:
+                before = self._boxes_interaction_start_snapshot
                 self._moving_box = None
-                self.boxes_modified.emit()
+                self.boxes_modified.emit(before)
                 event.accept()
                 return
 
@@ -1150,6 +1164,13 @@ class EditorCanvas(QGraphicsView):
         Qt selection on the child — see deviation note in set_box_overlay_visible).
         ``box_layer`` stays as the logical-visibility flag the dispatch checks.
         """
+        # CR-01 fix: capture the PRE-mutation snapshot (the state to restore to
+        # on undo) BEFORE clearing the layer. set_boxes is used by detection,
+        # restore, and page-switch (all suppress the push hook via the
+        # _suppress_boxes_push guard), so this payload is only consumed when a
+        # test or future caller drives set_boxes as a user edit. Mirrors the
+        # image side's pre-edit push contract.
+        before = self.boxes_snapshot()
         # Remove existing items from the scene + the list.
         for item in self._box_items:
             self._scene.removeItem(item)
@@ -1165,7 +1186,7 @@ class EditorCanvas(QGraphicsView):
             self._box_items.append(item)
 
         self._refresh_empty_box_hint()
-        self.boxes_modified.emit()
+        self.boxes_modified.emit(before)
 
     def set_box_overlay_visible(self, visible: bool) -> None:
         """Toggle the box layer visibility (View -> Toggle Box Overlay, Shift+M).
@@ -1299,6 +1320,8 @@ class EditorCanvas(QGraphicsView):
         r = item.rect()
         self._move_anchor_box_pos = QPointF(r.x(), r.y())
         self._box_drag_anchor = scene_pos
+        # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
+        self._boxes_interaction_start_snapshot = self.boxes_snapshot()
 
     def _begin_resize(self, handle: CornerHandle, scene_pos: QPointF) -> None:
         """Arm a corner-resize drag (D-06). Stores the starting rect + corner."""
@@ -1309,11 +1332,15 @@ class EditorCanvas(QGraphicsView):
         self._resize_corner = handle.corner
         self._resize_start_rect = QRectF(item.rect())
         self._box_drag_anchor = scene_pos
+        # CR-01 fix: capture the PRE-resize snapshot (emitted on resize-commit).
+        self._boxes_interaction_start_snapshot = self.boxes_snapshot()
 
     def _begin_create_box(self, scene_pos: QPointF) -> None:
         """Arm an Alt+drag box-create (D-13). Stores the anchor + sets the flag."""
         self._creating_box = True
         self._create_anchor = scene_pos
+        # CR-01 fix: capture the PRE-create snapshot (emitted on create-commit).
+        self._boxes_interaction_start_snapshot = self.boxes_snapshot()
         # Swap the preview_item pen to the amber create-preview colour for the
         # duration of the drag (UI-SPEC §12e). Restored on release.
         self.preview_item.setPen(
@@ -1367,6 +1394,7 @@ class EditorCanvas(QGraphicsView):
         reposition handles, and emit ``boxes_modified`` once.
         """
         item = self._resizing_box
+        before = self._boxes_interaction_start_snapshot
         self._resizing_box = None
         if item is None:
             return
@@ -1375,7 +1403,7 @@ class EditorCanvas(QGraphicsView):
         h = max(r.height(), MIN_BOX_SIZE)
         item.setRect(QRectF(r.x(), r.y(), w, h))
         item._sync_handles()
-        self.boxes_modified.emit()
+        self.boxes_modified.emit(before)
 
     def _advance_create(self, curr: QPointF) -> None:
         """Advance the amber-dashed create preview rect during the drag (§12e)."""
@@ -1411,7 +1439,9 @@ class EditorCanvas(QGraphicsView):
         self._deselect_box()
         item.setSelected(True)
         self._refresh_empty_box_hint()
-        self.boxes_modified.emit()
+        # CR-01 fix: emit the PRE-create snapshot (captured at _begin_create_box),
+        # i.e. the layer WITHOUT the new box — what undo restores to.
+        self.boxes_modified.emit(self._boxes_interaction_start_snapshot)
 
     def _remove_box(self, item: BoxItem) -> None:
         """Remove a BoxItem from the scene/list + emit boxes_modified (D-12).
@@ -1421,7 +1451,10 @@ class EditorCanvas(QGraphicsView):
         """
         if item not in self._box_items:
             return
+        # CR-01 fix: capture the PRE-delete snapshot (with the box still present)
+        # BEFORE removing — undo restores to this state, recovering the box.
+        before = self.boxes_snapshot()
         self._scene.removeItem(item)
         self._box_items.remove(item)
         self._refresh_empty_box_hint()
-        self.boxes_modified.emit()
+        self.boxes_modified.emit(before)

@@ -398,7 +398,7 @@ def test_delete_selected_box_silent(qtbot) -> None:
     assert canvas.box_count() == 1
 
     emitted: list[None] = []
-    canvas.boxes_modified.connect(lambda: emitted.append(None))
+    canvas.boxes_modified.connect(lambda _before: emitted.append(None))
 
     # Select the box first (Delete only acts on the selected box).
     canvas.mousePressEvent(_press_at(canvas, 50, 50))

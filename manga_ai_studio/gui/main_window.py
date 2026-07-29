@@ -133,6 +133,18 @@ class MainWindow(QMainWindow):
         # _on_inpaint_finished activates the push_image_action call site).
         self.history = HistoryManager(limit=20)
 
+        # CR-01 / WR-05 (plan 03-05 fix): suppression guard for the BOXES push
+        # hook. The box restore path (apply_undo_boxes) rebuilds the layer via
+        # set_boxes, which emits boxes_modified — WITHOUT this guard, wiring
+        # boxes_modified -> _on_boxes_modified would make every undo/redo
+        # restore re-push the restored state and clear redo (timeline
+        # corruption, the box analogue of mask's test_undo_does_not_repush).
+        # Mirrors how the mask side avoids the trap: mask's restore path
+        # (apply_undo_mask) does not emit at all, but set_boxes ALWAYS emits,
+        # so the box side needs an explicit guard. Set True around restore /
+        # detection set_boxes calls that push themselves explicitly.
+        self._suppress_boxes_push = False
+
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
         self._build_menus()
@@ -811,7 +823,19 @@ class MainWindow(QMainWindow):
             detected_pbs = [pb for pb in incoming_boxes if pb.origin == DETECTED]
             # Always call set_boxes (even with empty lists) so stale boxes from
             # the outgoing page are cleared when the incoming page has none.
-            self.canvas.set_boxes(user_pbs, detected_pbs)
+            #
+            # WR-05 guard: this is a pure RESTORE (loading persisted boxes onto
+            # the canvas on page-switch), not a user edit. set_boxes emits
+            # boxes_modified; after the CR-01 fix that would push a spurious
+            # BOXES snapshot (history was just reset at Step 2, so the restore
+            # would seed an undo entry for a state the user never edited). The
+            # mask analog (Step 4 set_mask) is silent; set_boxes is not, so the
+            # box side suppresses. Mirrors apply_undo_boxes' guard.
+            self._suppress_boxes_push = True
+            try:
+                self.canvas.set_boxes(user_pbs, detected_pbs)
+            finally:
+                self._suppress_boxes_push = False
 
         # Step 5 (unchanged tail).
         self.setWindowTitle(f"Manga AI Studio \u2014 {path.name}")
@@ -990,6 +1014,9 @@ class MainWindow(QMainWindow):
         """
         # Mask push hook: plan-04 mask_modified -> push a .copy() of the mask.
         self.canvas.mask_modified.connect(self._on_mask_modified)
+        # Boxes push hook (CR-01 fix): boxes_modified -> push a BOXES snapshot.
+        # Sibling of the mask hook — mirrors _on_mask_modified / _on_boxes_modified.
+        self.canvas.boxes_modified.connect(self._on_boxes_modified)
 
         # Edit-menu actions -> the two unified handlers.
         self.action_undo.triggered.connect(self.on_undo)
@@ -1033,6 +1060,34 @@ class MainWindow(QMainWindow):
         if self.history is None or not self.canvas.has_mask():
             return
         self.history.push_mask_state(self.canvas.get_mask())
+        self._update_undo_redo_actions()
+
+    def _on_boxes_modified(self, before_snapshot) -> None:
+        """Box-edit push hook (CR-01 fix): a box create/move/resize/delete
+        committed -> push the PRE-edit snapshot onto the BOXES undo stack
+        (Surface 13 / D-10).
+
+        ``before_snapshot`` is the layer state the canvas captured BEFORE the
+        mutation (passed as the ``boxes_modified`` payload). The history's pop
+        returns the most-recently-pushed checkpoint (LIFO), so for the edit to
+        be undoable in ONE Ctrl+Z the pushed snapshot must be the BEFORE state
+        — the state to restore to (mirrors the image side's pre-edit push
+        contract: history_manager "Each push records the PRE-edit region so
+        undo restores it"). ``boxes_snapshot()`` already materializes fresh
+        int-Box PageBoxes (Pitfall 3 + 6), so the payload is detached from the
+        live BoxItems.
+
+        Suppressed during an undo/redo restore and during detection's /
+        page-switch's set_boxes (``apply_undo_boxes`` /
+        ``_build_detected_boxes`` / ``on_page_selected`` set
+        ``_suppress_boxes_push``) so a restore via set_boxes — which emits
+        boxes_modified for the canvas-internal refresh — does NOT re-push and
+        corrupt the redo stack. This is the box analogue of mask's
+        ``test_undo_does_not_repush`` regression guard.
+        """
+        if self.history is None or self._suppress_boxes_push:
+            return
+        self.history.push_boxes_state(before_snapshot)
         self._update_undo_redo_actions()
 
     # ----------------------------------------------------- unified undo/redo
@@ -1129,18 +1184,28 @@ class MainWindow(QMainWindow):
         Mirrors ``apply_undo_mask`` / ``apply_undo_image``: rebuilds the box
         layer from the snapshot via ``set_boxes``, splitting by origin (the
         snapshot preserved origin per item — plan 03-03's boxes_snapshot).
-        Does NOT emit ``boxes_modified`` re-push semantics that would corrupt
-        the history (set_boxes emits boxes_modified for the canvas-internal
-        refresh, but the BOXES push hook is NOT wired to boxes_modified — only
-        detection + box edits push, never a pure restore).
+
+        WR-05 guard: ``set_boxes`` always emits ``boxes_modified`` (for the
+        canvas-internal refresh). Because the BOXES push hook is now wired to
+        ``boxes_modified`` (CR-01 fix), a restore would re-push the restored
+        state and clear redo unless suppressed. The ``_suppress_boxes_push``
+        guard wraps BOTH set_boxes calls (the empty-list restore and the
+        split-origin restore) so a pop is a pure restore, never a push (the
+        box analogue of mask's ``test_undo_does_not_repush``).
         """
-        if not boxes_snapshot_list:
-            # Empty snapshot = restore the empty-boxes state (clear the layer).
-            self.canvas.set_boxes([], [])
-            return
-        user_pbs = [pb for pb in boxes_snapshot_list if pb.origin == USER]
-        detected_pbs = [pb for pb in boxes_snapshot_list if pb.origin == DETECTED]
-        self.canvas.set_boxes(user_pbs, detected_pbs)
+        # Suppress the boxes_modified -> push hook for the duration of the
+        # restore (set_boxes emits at its tail).
+        self._suppress_boxes_push = True
+        try:
+            if not boxes_snapshot_list:
+                # Empty snapshot = restore the empty-boxes state (clear layer).
+                self.canvas.set_boxes([], [])
+                return
+            user_pbs = [pb for pb in boxes_snapshot_list if pb.origin == USER]
+            detected_pbs = [pb for pb in boxes_snapshot_list if pb.origin == DETECTED]
+            self.canvas.set_boxes(user_pbs, detected_pbs)
+        finally:
+            self._suppress_boxes_push = False
 
     def _show_transient_status(self, message: str) -> None:
         """Show ``message`` in status_bar_left for ~3 s, then revert to the
@@ -1537,10 +1602,24 @@ class MainWindow(QMainWindow):
         # Step 3 — D-03: keep USER boxes, replace detected. boxes_snapshot()
         # materializes fresh PageBoxes (Pitfall 3 detachment) so the rebuild
         # does not alias live BoxItems.
-        user_pageboxes = [
-            pb for pb in self.canvas.boxes_snapshot() if pb.origin == USER
-        ]
-        self.canvas.set_boxes(user_pageboxes, detected_pageboxes)
+        #
+        # CR-01 fix (before-state convention): capture the PRE-detection
+        # snapshot NOW (the layer as it is before the detected boxes are
+        # applied) so detection is undoable back to this state. The history
+        # pop returns the most-recent checkpoint, so the pushed snapshot must
+        # be the state to restore TO on undo (mirrors the image side).
+        pre_detection_snapshot = self.canvas.boxes_snapshot()
+        user_pageboxes = [pb for pb in pre_detection_snapshot if pb.origin == USER]
+        #
+        # WR-05 guard: set_boxes emits boxes_modified, which (after the CR-01
+        # fix) would push a snapshot via _on_boxes_modified. Step 5 below
+        # pushes the single D-10 detection snapshot explicitly, so the Step 3
+        # emission must be suppressed to avoid a double-push.
+        self._suppress_boxes_push = True
+        try:
+            self.canvas.set_boxes(user_pageboxes, detected_pageboxes)
+        finally:
+            self._suppress_boxes_push = False
 
         # Step 4 — auto-show the overlay on first detect (UI-SPEC surface 10).
         # setChecked fires the toggled signal -> set_box_overlay_visible(True).
@@ -1548,9 +1627,11 @@ class MainWindow(QMainWindow):
             self.action_toggle_box_overlay.setChecked(True)
 
         # Step 5 — D-10: the detection is undoable via the unified Ctrl+Z.
-        # boxes_snapshot() at push-time (Pitfall 3 + 6 — fresh int-Box per
-        # item, detached from live rects).
-        self.history.push_boxes_state(self.canvas.boxes_snapshot())
+        # Push the PRE-detection snapshot (captured at Step 3) so a single
+        # Ctrl+Z restores the pre-detection layer (Pitfall 3 + 6 — fresh
+        # int-Box per item, detached from live rects).
+        self.history.push_boxes_state(pre_detection_snapshot)
+        self._update_undo_redo_actions()
 
         # Status-bar box count (UI-SPEC §Copywriting status — box count).
         detected, user = self.canvas.box_origin_counts()
