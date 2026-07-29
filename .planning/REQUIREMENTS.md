@@ -85,7 +85,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLEAN-04 | Phase 1 | Complete |
 | CLEAN-05 | Phase 1 | Complete |
 | CLEAN-06 | Phase 1 | Complete |
-| TEXT-01 | Phase 3 | In Progress |
+| TEXT-01 | Phase 3 | Complete |
 | TEXT-02 | Phase 4 | Pending |
 | TEXT-03 | Phase 3 | In Progress |
 | TEXT-04 | Phase 4 | Pending |
