@@ -21,7 +21,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtGui import QImage  # noqa: E402
+from PySide6.QtGui import QImage, QShortcut  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.box_model import DETECTED, USER, PageBox  # noqa: E402
@@ -222,3 +222,193 @@ def test_page_switch_resets_boxes_stack(qtbot, tmp_path) -> None:
         "BOXES stack must reset on page-switch (Phase 1 invariant extended to "
         "the 3rd stack via plan 03-02's clear())."
     )
+
+
+# ===========================================================================
+# Task 2: Surface 13 undo collapse (unified Ctrl+Z over MASK/IMAGE/BOXES)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_unified_undo_pops_across_stacks(qtbot, tmp_path) -> None:
+    """Unified Ctrl+Z pops the most-recent-by-stamp entry across all three
+    stores (mask/image/boxes), reversing ops in chronological order.
+
+    Push a mask edit, then a boxes snapshot (later stamp -> popped first);
+    undo twice and confirm the ops reverse in order (the latest-first pop).
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    from PySide6.QtGui import QImage
+
+    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
+    mask.fill(0)
+    window.canvas.set_mask(mask)
+    window.history.push_mask_state(mask)  # stamp 1 (mask edit)
+    window.history.push_boxes_state([_user_box(1, 1, 5, 5)])  # stamp 2 (boxes)
+
+    # The unified can_undo() reflects both pushes.
+    assert window.history.can_undo()
+
+    # First Ctrl+Z -> pops the BOXES entry (stamp 2 is the most recent).
+    window.on_undo()
+    # After undoing boxes, redo stack gained a boxes entry.
+    assert window.history.can_redo()
+
+    # Second Ctrl+Z -> pops the MASK entry.
+    window.on_undo()
+
+
+@pytest.mark.gui
+def test_unified_redo_after_undo(qtbot, tmp_path) -> None:
+    """Ctrl+Shift+Z redoes a unified undo (the redo path across stacks)."""
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    from PySide6.QtGui import QImage
+
+    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
+    mask.fill(0)
+    window.canvas.set_mask(mask)
+    window.history.push_mask_state(mask)
+
+    window.on_undo()
+    assert window.history.can_redo()
+    window.on_redo()
+    # After redo, the mask snapshot is back on the undo stack.
+    assert window.history.can_undo()
+
+
+@pytest.mark.gui
+def test_mask_undo_shortcut_removed(qtbot, tmp_path) -> None:
+    """The legacy Alt+Z/Alt+Shift+Z mask-undo shortcuts are GONE (Surface 13).
+
+    No QShortcut registered on the MainWindow should bind to the Alt+Z or
+    Alt+Shift+Z keysequence. The Phase 1 mask-undo buttons/methods are removed
+    entirely (subsumed by the unified Ctrl+Z).
+    """
+    window = _make_window(qtbot, tmp_path)
+
+    # Collect every QShortcut's keysequence on the MainWindow.
+    sequences = set()
+    for sc in window.findChildren(QShortcut):
+        seq_str = sc.key().toString()
+        sequences.add(seq_str)
+
+    # Alt+Z / Alt+Shift+Z (case-insensitive) must NOT be present.
+    for forbidden in ("Alt+Z", "Alt+Shift+Z", "Alt+z", "Alt+Shift+z"):
+        assert forbidden not in sequences, (
+            f"Legacy mask-undo shortcut '{forbidden}' still registered — "
+            "Surface 13 requires it removed (subsumed by unified Ctrl+Z)."
+        )
+
+
+@pytest.mark.gui
+def test_mask_undo_actions_and_methods_removed(qtbot, tmp_path) -> None:
+    """The Phase 1 mask-undo actions (action_undo_mask, action_redo_mask) and
+    their methods (on_undo_mask, on_redo_mask) are REMOVED (Surface 13).
+    """
+    window = _make_window(qtbot, tmp_path)
+    assert not hasattr(window, "action_undo_mask"), (
+        "action_undo_mask must be removed (Surface 13 collapses 4 -> 2 buttons)"
+    )
+    assert not hasattr(window, "action_redo_mask"), (
+        "action_redo_mask must be removed (Surface 13)"
+    )
+    assert not hasattr(window, "on_undo_mask"), (
+        "on_undo_mask must be removed (dead after the shortcut/menu removal)"
+    )
+    assert not hasattr(window, "on_redo_mask"), (
+        "on_redo_mask must be removed (dead after the shortcut/menu removal)"
+    )
+
+
+@pytest.mark.gui
+def test_orphaned_strings_fixed(qtbot, tmp_path) -> None:
+    """The two Phase 1 confirm-dialog strings that referenced the now-removed
+    Alt+Z mask-undo shortcut are fixed to Ctrl+Z (UI-SPEC Copywriting PLANNER TODO).
+    """
+    window = _make_window(qtbot, tmp_path)
+    import inspect
+
+    clear_src = inspect.getsource(window._confirm_clear_mask)
+    replace_src = inspect.getsource(window._confirm_replace_mask)
+    assert "Alt+Z" not in clear_src, (
+        f"_confirm_clear_mask body still references the dead Alt+Z shortcut: {clear_src!r}"
+    )
+    assert "You can undo with Ctrl+Z" in clear_src, (
+        f"_confirm_clear_mask body must say 'You can undo with Ctrl+Z' (UI-SPEC): {clear_src!r}"
+    )
+    assert "Alt+Z" not in replace_src, (
+        f"_confirm_replace_mask body still references Alt+Z: {replace_src!r}"
+    )
+    assert "undo is available via Ctrl+Z" in replace_src, (
+        f"_confirm_replace_mask body must say 'undo is available via Ctrl+Z' (UI-SPEC): {replace_src!r}"
+    )
+
+
+@pytest.mark.gui
+def test_toolbar_has_two_undo_buttons(qtbot, tmp_path) -> None:
+    """The toolbar collapses from 4 undo buttons to 2 ([Undo][Redo])
+    (Surface 13 toolbar contract)."""
+    window = _make_window(qtbot, tmp_path)
+
+    undo_actions = [
+        name
+        for name in ("action_undo", "action_redo", "action_undo_mask", "action_redo_mask")
+        if hasattr(window, name)
+    ]
+    assert "action_undo" in undo_actions, "the unified action_undo must exist"
+    assert "action_redo" in undo_actions, "the unified action_redo must exist"
+    assert "action_undo_mask" not in undo_actions, (
+        "action_undo_mask must be removed (toolbar 4 -> 2)"
+    )
+    assert "action_redo_mask" not in undo_actions, (
+        "action_redo_mask must be removed (toolbar 4 -> 2)"
+    )
+
+
+@pytest.mark.gui
+def test_undo_redo_status_feedback(qtbot, tmp_path) -> None:
+    """After an undo, the status bar shows a transient 'Undo: {op}' message
+    (UI-SPEC §Copywriting — the which-stack-was-popped indication).
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    from PySide6.QtGui import QImage
+
+    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
+    mask.fill(0)
+    window.canvas.set_mask(mask)
+    window.history.push_mask_state(mask)
+
+    window.on_undo()
+    text = window.status_bar_left.text()
+    assert text.startswith("Undo:"), (
+        f"Status bar must show transient 'Undo: {{op}}' feedback; got: {text!r}"
+    )
+
+
+@pytest.mark.gui
+def test_unified_undo_redo_enable_on_union_flags(qtbot, tmp_path) -> None:
+    """The Undo/Redo buttons enable on the union flags (can_undo/can_redo
+    over all three stacks), not the per-type flags."""
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    # Initially empty -> both disabled.
+    assert not window.action_undo.isEnabled()
+    assert not window.action_redo.isEnabled()
+
+    # Push a boxes snapshot -> Undo enabled (union includes BOXES).
+    window.history.push_boxes_state([_user_box(1, 1, 5, 5)])
+    window._update_undo_redo_actions()
+    assert window.action_undo.isEnabled(), (
+        "Undo must enable when the BOXES stack has entries (union flag)"
+    )
+
+    # Undo -> Redo now enabled.
+    window.on_undo()
+    assert window.action_redo.isEnabled()
