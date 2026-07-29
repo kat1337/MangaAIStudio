@@ -26,7 +26,33 @@ findings:
   info: 4
   total: 11
 status: issues_found
+resolved:
+  - id: CR-01
+    status: resolved
+    commits: [2dd7a9b, ad7b19d]
+    note: "Wired boxes_modified→_on_boxes_modified→push_boxes_state next to the mask hook; _suppress_boxes_push guard wraps all 3 restore sites (apply_undo_boxes, _build_detected_boxes, on_page_selected) so restores never re-push (WR-05 closed). 2 regression tests added. Suite 248 green."
+  - id: WR-05
+    status: resolved
+    commits: [ad7b19d]
+    note: "Handled together with CR-01 via the suppression guard."
+open_warnings: [WR-01, WR-02, WR-03, WR-04, WR-06]
 ---
+
+> **Orchestrator verification (2026-07-29):** CR-01/WR-05 fix independently
+> scrutinized and empirically confirmed correct — not taken on the executor's
+> prose. The executor deviated from the literal fix spec by pushing
+> **before-state** snapshots (the signal carries the pre-mutation layer state)
+> rather than after-state, justified by a claim that the mask side is
+> "one-behind." Direct testing confirmed the claim is TRUE and the deviation is
+> CORRECT: before-state pushing makes create/move/resize each undo in a single
+> press (proven via throwaway probes against the live production push path).
+> The pre-existing mask side (after-state, no baseline seed) is genuinely
+> one-behind for the first stroke of a session — Phase 1 debt, NOT introduced
+> by this fix, and out of Phase 3 scope. Cross-store unified-timeline ordering
+> verified correct under a realistic interleaved mask+box sequence (undo walks
+> box-move → box-create → mask-stroke in stamp order). WR-01 (None.copy() in
+> on_undo when canvas mask is null) was incidentally reproduced during scrutiny
+> and remains open — a latent crash if undo fires before any mask is set.
 
 # Phase 03: Code Review Report
 
