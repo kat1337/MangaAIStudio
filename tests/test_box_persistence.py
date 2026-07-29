@@ -412,3 +412,100 @@ def test_unified_undo_redo_enable_on_union_flags(qtbot, tmp_path) -> None:
     # Undo -> Redo now enabled.
     window.on_undo()
     assert window.action_redo.isEnabled()
+
+
+# ===========================================================================
+# CR-01 / WR-05 regression: boxes_modified -> push_boxes_state wiring
+# ===========================================================================
+#
+# Phase 03 code review BLOCKER CR-01: EditorCanvas emits ``boxes_modified`` on
+# every box create/move-commit/resize/delete (and on ``set_boxes``), but
+# MainWindow never connected it — box edits were NOT undoable. These tests
+# lock the fix: a box edit via the canvas API pushes a BOXES snapshot, undo
+# clears the layer, redo restores it (WR-05: redo must NOT be corrupted by a
+# restore re-push), and an undo/redo restore itself does NOT re-push.
+
+
+@pytest.mark.gui
+def test_box_edit_is_undoable(qtbot, tmp_path) -> None:
+    """CR-01: a box edit (set_boxes fires boxes_modified) pushes a BOXES
+    snapshot onto the undo stack — the edit is undoable via Ctrl+Z.
+
+    Without the wiring (the CR-01 bug), ``set_boxes`` emits but nothing
+    consumes the signal, so ``can_undo_boxes()`` stays False. This is the
+    regression that catches a re-disconnection.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+    assert window._current_page_index() == 0
+
+    # Empty layer + empty history to start.
+    assert not window.canvas.has_boxes()
+    assert not window.history.can_undo_boxes()
+
+    # A box edit: set_boxes fires boxes_modified -> the push hook fires.
+    window.canvas.set_boxes([_user_box(5, 6, 25, 30)], [])
+    assert window.canvas.box_count() == 1
+
+    # CR-01 contract: the edit pushed a BOXES snapshot.
+    assert window.history.can_undo_boxes(), (
+        "CR-01 regression: set_boxes emitted boxes_modified but no BOXES "
+        "snapshot was pushed — boxes_modified is not wired to push_boxes_state."
+    )
+    # The unified can_undo() reflects the BOXES push too.
+    assert window.history.can_undo()
+
+    # Undo: the snapshot restores the pre-edit (empty) layer.
+    window.on_undo()
+    assert window.canvas.box_count() == 0, (
+        "Undo of a box edit must clear the box layer back to the pre-edit state."
+    )
+    # After undo, redo is available (the popped entry was stashed into redo).
+    assert window.history.can_redo_boxes()
+
+    # WR-05 guard: redo restores the box WITHOUT corruption.
+    window.on_redo()
+    assert window.canvas.box_count() == 1, (
+        "WR-05 regression: redo must restore the box. A restore re-push "
+        "(set_boxes emitting boxes_modified during apply_undo_boxes) would "
+        "have cleared the redo stack and left redo a no-op."
+    )
+
+
+@pytest.mark.gui
+def test_box_restore_does_not_repush(qtbot, tmp_path) -> None:
+    """WR-05: apply_undo_boxes (the restore path) does NOT re-push onto the
+    BOXES stack.
+
+    ``set_boxes`` always emits ``boxes_modified`` (for the canvas-internal
+    refresh). Once CR-01 wires boxes_modified -> _on_boxes_modified, a naive
+    wiring would make every undo/redo restore re-push the restored state onto
+    the undo stack and clear redo — corrupting the timeline. The
+    ``_suppress_boxes_push`` guard around the restore prevents this. This is
+    the box analogue of mask's ``test_undo_does_not_repush``.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    # Establish a baseline: one box on the layer + one BOXES undo entry.
+    window.canvas.set_boxes([_user_box(5, 6, 25, 30)], [])
+    assert window.history.can_undo_boxes()
+    undo_before = len(window.history._boxes_undo)
+    redo_before = len(window.history._boxes_redo)
+    assert undo_before >= 1
+    assert redo_before == 0
+
+    # A pure restore (the empty-list path apply_undo_boxes uses when undoing a
+    # box-create back to an empty layer). set_boxes([],[ ]) emits
+    # boxes_modified — the guard must swallow it so no new push happens.
+    window.apply_undo_boxes([])
+
+    # The BOXES undo/redo counts are UNCHANGED by the restore (WR-05).
+    assert len(window.history._boxes_undo) == undo_before, (
+        "WR-05 regression: apply_undo_boxes([]) re-pushed onto the BOXES undo "
+        "stack — the _suppress_boxes_push guard is missing or ineffective."
+    )
+    assert len(window.history._boxes_redo) == redo_before, (
+        "WR-05 regression: apply_undo_boxes([]) altered the BOXES redo stack "
+        "via a spurious push."
+    )
