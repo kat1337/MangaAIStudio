@@ -751,6 +751,23 @@ class MainWindow(QMainWindow):
             # test_mask_persistence_uses_copy).
             self.image_files[outgoing_idx].mask = self.canvas.get_mask().copy()
 
+        # Step 1b (plan 03-05): persist the OUTGOING page's canvas boxes into its
+        # ImageFile.boxes (the D-11 mirror of Phase 2's mask seam). boxes_snapshot()
+        # (plan 03-03) already materializes a fresh ``PageBox(box=item.current_box(),
+        # ...)`` per item at call-time — so the snapshot is detached from the live
+        # BoxItems' QRectF rects by construction (Pitfall 3 + 6, T-03-08). NO
+        # additional .copy() is needed on the boxes path (unlike QImage which
+        # buffers alias; Box is @frozen and PageBox is a fresh dataclass per
+        # item). The same OUTGOING index (_last_page_index) is reused — the
+        # Phase 2 lesson applies identically (regression-guarded by
+        # test_box_persistence_uses_copy + test_outgoing_index_uses_last_page_index).
+        if (
+            outgoing_idx is not None
+            and 0 <= outgoing_idx < len(self.image_files)
+            and self.canvas.has_boxes()
+        ):
+            self.image_files[outgoing_idx].boxes = self.canvas.boxes_snapshot()
+
         # Step 2: reset the per-page history (unchanged from plan 06).
         self.reset_history()
 
@@ -779,6 +796,33 @@ class MainWindow(QMainWindow):
             # at canvas.py:305); it is what test_mask_persistence_uses_copy
             # asserts on for the INCOMING direction.
             self.canvas.set_mask(self.image_files[incoming_idx].mask.copy())
+
+        # Step 4b (plan 03-05): restore the INCOMING page's persisted boxes onto
+        # the canvas (the D-11 mirror of Phase 2's mask restore). set_boxes
+        # rebuilds BoxItems from the pageboxes; origin is preserved per snapshot
+        # (plan 03-03's boxes_snapshot captured .origin + .payload). Splitting by
+        # origin here keeps set_boxes's (user, detected) signature stable.
+        # The incoming boxes are already detached (snapshotted on the outgoing
+        # side at Step 1b); a re-snapshot would be belt-and-suspenders but
+        # unnecessary (PageBox.box is a @frozen Box, no aliasing risk).
+        #
+        # Unlike the mask (which set_image_from_path reinitializes to the new
+        # image size), boxes are NOT tied to image dimensions, so they must be
+        # explicitly cleared when the incoming page has none — otherwise the
+        # OUTGOING page's boxes bleed through onto the incoming page (Rule 1 bug
+        # caught by test_box_persistence_round_trip's page-B-has-no-boxes check).
+        if incoming_idx is not None and 0 <= incoming_idx < len(self.image_files):
+            incoming_imf = self.image_files[incoming_idx]
+            # ImageFile.has_boxes() (plan 03-01) is the truthiness check on the
+            # persisted slot — mirrors the canvas's has_boxes() API on the data
+            # model side. Empty list = no boxes (the slot was either never set
+            # or was cleared).
+            incoming_boxes = incoming_imf.boxes if incoming_imf.has_boxes() else []
+            user_pbs = [pb for pb in incoming_boxes if pb.origin == USER]
+            detected_pbs = [pb for pb in incoming_boxes if pb.origin == DETECTED]
+            # Always call set_boxes (even with empty lists) so stale boxes from
+            # the outgoing page are cleared when the incoming page has none.
+            self.canvas.set_boxes(user_pbs, detected_pbs)
 
         # Step 5 (unchanged tail).
         self.setWindowTitle(f"Manga AI Studio \u2014 {path.name}")
