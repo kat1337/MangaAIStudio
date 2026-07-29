@@ -48,10 +48,17 @@ from PySide6.QtWidgets import (
 
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
+from manga_ai_studio.core.box_model import (
+    DETECTED,
+    USER,
+    PageBox,
+    textblock_to_box,
+)
 from manga_ai_studio.core.history_manager import HistoryManager
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode, mask_to_numpy_binary
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
+from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.tools_panel import ToolsPanel
 from manga_ai_studio.gui.worker_thread import Worker
@@ -307,6 +314,26 @@ class MainWindow(QMainWindow):
         # Enabled iff a mask exists (updated in _refresh_action_states).
         self.action_toggle_mask_overlay.setEnabled(False)
 
+        # Toggle Box Overlay (Shift+M) — plan 03-04 D-02 layer toggle. Sibling
+        # of Toggle Mask Overlay, placed immediately after it in the View menu
+        # (UI-SPEC §11). Checkable; checked state mirrors the box layer
+        # visibility (box_layer.isVisible()). Enabled iff a page is open
+        # (refreshed in _refresh_action_states). Shortcut Shift+M — M is taken
+        # by the mask overlay; Shift+M is the mnemonic "the other overlay" and
+        # conflicts with nothing (UI-SPEC shortcut audit).
+        self.action_toggle_box_overlay = QAction("Toggle Box Overlay", self)
+        self.action_toggle_box_overlay.setShortcut(QKeySequence("Shift+M"))
+        self.action_toggle_box_overlay.setCheckable(True)
+        self.action_toggle_box_overlay.setChecked(True)  # layer defaults visible
+        self.action_toggle_box_overlay.setStatusTip(
+            "Show or hide the text-box layer (Shift+M). Hidden boxes are not"
+            " interactable."
+        )
+        self.action_toggle_box_overlay.toggled.connect(
+            self._on_toggle_box_overlay_toggled
+        )
+        self.action_toggle_box_overlay.setEnabled(False)
+
         # Show Original (P) — wired in plan 05 (sticky before/after preview,
         # UI-SPEC surface 7). Checkable: toggling calls canvas.show_original.
         self.action_show_original = QAction("Show Original", self)
@@ -329,6 +356,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_zoom_out)
         view_menu.addSeparator()
         view_menu.addAction(self.action_toggle_mask_overlay)
+        view_menu.addAction(self.action_toggle_box_overlay)
         view_menu.addAction(self.action_show_original)
         view_menu.addSeparator()
         view_menu.addAction(self.action_toggle_sidebar)
@@ -341,6 +369,20 @@ class MainWindow(QMainWindow):
         self.action_detect_text.triggered.connect(self.detect_text)
         # Enabled iff a page is open and no async op is running.
         self.action_detect_text.setEnabled(False)
+
+        # Detect Boxes (D-01 mode toggle, plan 03-04). Checkable, default
+        # checked (UI-SPEC §Copywriting A1). When on, Detect Text also creates
+        # editable text boxes from the model's blk_list (in addition to the
+        # mask); when off, Phase 1 behaviour is preserved (mask only). There is
+        # NO second model pass — the toggle only gates whether _on_detection_
+        # finished surfaces the already-returned blk_list (UI-SPEC surface 10).
+        self.action_detect_boxes_mode = QAction("Detect Boxes", self)
+        self.action_detect_boxes_mode.setCheckable(True)
+        self.action_detect_boxes_mode.setChecked(True)  # default on (UI-SPEC A1)
+        self.action_detect_boxes_mode.setStatusTip(
+            "When on, Detect Text also creates editable text boxes (in addition"
+            " to the mask). Turn off for mask-only behaviour."
+        )
 
         # Inpaint (C) — wired in plan 05 (async LaMa inpainting).
         self.action_inpaint = QAction("Inpaint", self)
@@ -392,6 +434,7 @@ class MainWindow(QMainWindow):
 
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
+        tools_menu.addAction(self.action_detect_boxes_mode)
         tools_menu.addAction(self.action_inpaint)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_tool_move)
@@ -551,6 +594,10 @@ class MainWindow(QMainWindow):
         )
         self.action_toggle_mask_overlay.setEnabled(has_mask)
         self.action_clear_mask.setEnabled(has_mask)
+        # Toggle Box Overlay (Shift+M): enabled iff a page is open (the box
+        # layer belongs to a page; the toggle is meaningful only with one
+        # loaded — UI-SPEC §11).
+        self.action_toggle_box_overlay.setEnabled(page_open)
         has_inpaint = self.canvas.has_inpaint_result()
         self.action_show_original.setEnabled(has_inpaint)
         self.btn_preview_hold.setEnabled(has_inpaint)
@@ -1288,6 +1335,14 @@ class MainWindow(QMainWindow):
         buffer discipline (RESEARCH Pitfall 2), and hands it to
         ``EditorCanvas.set_mask`` which tints it with the rgba(255,0,0,0.63)
         overlay (UI-SPEC §Color).
+
+        Plan 03-04 TEXT-01 seam (the load-bearing one-line thread-through):
+        Phase 1 discarded ``result["blocks"]``; Phase 3, when the Detect Boxes
+        mode toggle (D-01) is on, surfaces it as editable ``BoxItem``s on the
+        canvas. NO worker change, NO new model call, NO adapter change — the
+        blk_list is ALREADY in the dict (``_run_detection_task`` returns
+        ``{"mask": ..., "blocks": blk_list}`` at line ~1217). Mode off =
+        Phase 1 behaviour preserved exactly (mask only, no box work).
         """
         import numpy as np
 
@@ -1300,7 +1355,137 @@ class MainWindow(QMainWindow):
         qimage = QImage(mask.data, w, h, w, QImage.Format.Format_Grayscale8)
         self.canvas.set_mask(qimage.copy())
         self.status_bar_left.setText("Detection complete")
+
+        # D-01 mode-toggle gate: only build boxes when Detect Boxes is on. When
+        # off, Phase 1 behaviour (mask only) is preserved exactly — no box
+        # work, no overlay side-effects, no history push. result["blocks"] is
+        # the blk_list the worker ALREADY returned (main_window.py:1217).
+        if self.action_detect_boxes_mode.isChecked():
+            blk_list = result.get("blocks") or []
+            self._build_detected_boxes(blk_list)
+
         self._refresh_action_states()
+
+    def _build_detected_boxes(self, blk_list) -> None:
+        """Build detected PageBoxes from the model's blk_list (TEXT-01, plan 03-04).
+
+        Implements the D-03 re-detect rule (replace detected, keep user), the
+        D-04 confirm gate (fire before replacing detected boxes), and the V5
+        input-validation control (model xyxy is bounds-clamped against the
+        image rect and zero-area boxes are dropped — T-03-06).
+
+        Sequence:
+        1. D-04 gate: if >= 1 DETECTED box already exists, ask the user before
+           replacing (mirrors _confirm_replace_mask). Cancel aborts (no build).
+        2. V5 build: for each TextBlock, coerce to int via textblock_to_box,
+           then bounds-clamp x1/x2 to [0, img_w] and y1/y2 to [0, img_h]. Drop
+           any box with non-positive area after clamping (model output is
+           untrusted — T-03-06).
+        3. D-03 merge: collect the existing USER boxes from the canvas
+           (they survive re-detect), then rebuild the layer via set_boxes with
+           the user boxes + the fresh detected boxes.
+        4. Auto-show the box overlay (the boxes the user asked for are visible).
+        5. D-10: push a BOXES snapshot so the detection itself is undoable.
+        """
+        # Step 1 — D-04 confirm gate. Fires only when >= 1 DETECTED box exists
+        # (a user-only layer is not a "replace detected" scenario). The mask
+        # replace gate (detect_text) already ran before the worker started.
+        detected_now, _user_now = self.canvas.box_origin_counts()
+        if detected_now >= 1:
+            if not self._confirm_replace_boxes():
+                return  # Cancel — no replace (D-04)
+
+        # Step 2 — V5 build. Bounds-clamp against the current image rect. Model
+        # xyxy is UNTRUSTED (T-03-06): a negative/out-of-image/inverted xyxy is
+        # clamped or dropped, never allowed to corrupt the canvas or crash Qt.
+        pixmap = self.canvas.image_item.pixmap()
+        img_w = pixmap.width()
+        img_h = pixmap.height()
+        detected_pageboxes: list[PageBox] = []
+        for blk in blk_list:
+            box = textblock_to_box(blk)  # int coercion (plan 03-01, pure)
+            clamped = Box(
+                min(max(box.x1, 0), img_w),
+                min(max(box.y1, 0), img_h),
+                min(max(box.x2, 0), img_w),
+                min(max(box.y2, 0), img_h),
+            )
+            # V5 drop: non-positive area after clamping -> drop, never trust.
+            if clamped.x2 <= clamped.x1 or clamped.y2 <= clamped.y1:
+                logger.debug(
+                    f"dropped zero-area detected box "
+                    f"({box.as_tuple} -> {clamped.as_tuple} after clamp)"
+                )
+                continue
+            # payload = the TextBlock, preserved untouched for Phase 4/5 OCR
+            # + Phase 5 export (CONTEXT). origin DETECTED so re-detect can
+            # replace it (D-03).
+            detected_pageboxes.append(
+                PageBox(box=clamped, origin=DETECTED, payload=blk)
+            )
+
+        # Step 3 — D-03: keep USER boxes, replace detected. boxes_snapshot()
+        # materializes fresh PageBoxes (Pitfall 3 detachment) so the rebuild
+        # does not alias live BoxItems.
+        user_pageboxes = [
+            pb for pb in self.canvas.boxes_snapshot() if pb.origin == USER
+        ]
+        self.canvas.set_boxes(user_pageboxes, detected_pageboxes)
+
+        # Step 4 — auto-show the overlay on first detect (UI-SPEC surface 10).
+        # setChecked fires the toggled signal -> set_box_overlay_visible(True).
+        if not self.action_toggle_box_overlay.isChecked():
+            self.action_toggle_box_overlay.setChecked(True)
+
+        # Step 5 — D-10: the detection is undoable via the unified Ctrl+Z.
+        # boxes_snapshot() at push-time (Pitfall 3 + 6 — fresh int-Box per
+        # item, detached from live rects).
+        self.history.push_boxes_state(self.canvas.boxes_snapshot())
+
+        # Status-bar box count (UI-SPEC §Copywriting status — box count).
+        detected, user = self.canvas.box_origin_counts()
+        self.status_bar_left.setText(
+            f"Detection complete · {self.canvas.box_count()} boxes"
+            f" · {detected} detected, {user} user"
+        )
+
+    def _confirm_replace_boxes(self) -> bool:
+        """Show the replace-detected-boxes confirmation (D-04, plan 03-04).
+
+        Mirrors :meth:`_confirm_replace_mask` verbatim in structure. Returns
+        True only on Replace Detected Boxes; False on Cancel. Caller guard:
+        only invoked when ``canvas.box_origin_counts()[0] >= 1`` (>= 1
+        DETECTED box exists). Fires AFTER the existing mask-replace gate if a
+        mask is also present (the mask gate runs first in detect_text; both
+        gates can fire on a page with both a mask and detected boxes).
+
+        Uses custom buttons so the UI-SPEC §Copywriting body renders exactly
+        — Qt's standard button set has no "Replace Detected Boxes" member.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Detect Text")
+        box.setText(
+            "Replace the detected text boxes with a new detection? Boxes you"
+            " drew yourself are kept. Undo is available via Ctrl+Z."
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        replace_btn = box.addButton(
+            "Replace Detected Boxes", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.setDefaultButton(replace_btn)
+        box.exec()
+        return box.clickedButton() is replace_btn
+
+    def _on_toggle_box_overlay_toggled(self, checked: bool) -> None:
+        """View -> Toggle Box Overlay (Shift+M) handler (D-02, plan 03-04).
+
+        Forwards to the canvas (which toggles per-item visibility + the
+        box_layer sentinel + the empty-box hint). Hidden boxes are not
+        interactable (Pitfall 5 — setEnabled belt-and-suspenders in the
+        canvas). The canvas call refreshes the empty-box-hint visibility.
+        """
+        self.canvas.set_box_overlay_visible(checked)
 
     def _on_detection_error(self, worker_error) -> None:
         """Show the model-load error dialog + persistent #7a1f1f error chip.
