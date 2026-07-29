@@ -20,7 +20,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **TEXT-01**: User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
 - [ ] **TEXT-02**: User can draw a rectangle on the page and run manga-ocr on just that region to create a box with recognized text (for boxes the auto-detector missed)
-- [ ] **TEXT-03**: User can select, move, resize, and delete text boxes on the canvas to correct detection errors
+- [x] **TEXT-03**: User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 - [ ] **TEXT-04**: User can edit the recognized OCR text inline in a box to correct recognition mistakes
 - [ ] **TEXT-05**: User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
