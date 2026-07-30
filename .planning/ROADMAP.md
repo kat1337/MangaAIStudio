@@ -111,7 +111,7 @@ Plans:
   1. User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
   2. User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 
-**Plans**: 5/5 plans executed
+**Plans**: 5/5 plans executed + 3 gap-closure plans (UAT fixes)
 
 Plans:
 
@@ -131,6 +131,12 @@ Plans:
 **Wave 4** *(blocked on Wave 2 + 3)*
 
 - [x] 03-05-PLAN.md — Per-page box persistence (Phase 2 D-11 mirror) + Surface 13 undo collapse + legacy mask-undo shortcut removal + orphaned string fixes (TEXT-01, TEXT-03)
+
+**Gap-closure waves** (UAT fixes — run via `/gsd-execute-phase 3 --gaps-only`)
+
+- [ ] 03-06-PLAN.md — *(Wave 1)* Enlarge CornerHandle hit shape (UAT test 2: resize handle unhittable) — TEXT-03
+- [ ] 03-07-PLAN.md — *(Wave 2, blocked on 06)* Detection non-undoable baseline (UAT test 3) + moved-box position persistence (UAT test 4) + WR-04 — TEXT-01, TEXT-03
+- [ ] 03-08-PLAN.md — *(Wave 3, blocked on 07)* Mask stroke baseline seeding (UAT test 3 addendum, Phase 1 FLOW-02 regression) + WR-01 null-mask crash guard — TEXT-03
 
 **UI hint**: yes
 
