@@ -298,8 +298,17 @@ def test_auto_show_overlay_on_first_detect(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
-def test_detection_pushes_boxes_snapshot(qtbot, tmp_path) -> None:
-    """After a detect-with-build, the BOXES stack is non-empty (D-10 undoable)."""
+def test_detection_does_not_push_boxes_snapshot(qtbot, tmp_path) -> None:
+    """After a detect-with-build, the BOXES stack is EMPTY — detection is a
+    NON-undoable baseline (plan 03-07, UAT test 3).
+
+    Previously detection pushed a 0-box pre-detection snapshot, making the
+    INITIAL detection undoable. After [detect, move] the BOXES stack held
+    [0-box, 3-box]; undo#3 popped the 0-box entry -> restored [] -> ALL
+    detected boxes vanished (the UAT test 3 defect). The fix removes the
+    explicit push so detection establishes the live layer WITHOUT seeding an
+    undo entry; the first real user edit pushes against that baseline.
+    """
     window = _window_with_page(qtbot, tmp_path)
     window.action_detect_boxes_mode.setChecked(True)
     assert not window.history.can_undo()
@@ -308,8 +317,16 @@ def test_detection_pushes_boxes_snapshot(qtbot, tmp_path) -> None:
         {"mask": _mask_np(), "blocks": [_blk(5, 6, 25, 30)]}
     )
 
-    # The unified can_undo() reflects the BOXES push (no mask/image pushes here).
-    assert window.history.can_undo()
+    # Detection is a non-undoable baseline: NO boxes undo entry was seeded.
+    assert not window.history.can_undo_boxes(), (
+        "Gap 3 (UAT test 3): detection must NOT seed a boxes undo entry — it is "
+        "a non-undoable baseline. The explicit push_boxes_state in "
+        "_build_detected_boxes was removed."
+    )
+    assert not window.history.can_undo(), (
+        "Detection seeds no baseline in any stack (set_mask is silent; no "
+        "mask/image pushes here either)."
+    )
 
 
 @pytest.mark.gui

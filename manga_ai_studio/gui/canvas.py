@@ -207,6 +207,10 @@ class EditorCanvas(QGraphicsView):
         self._resize_start_rect = QRectF()
         self._moving_box: BoxItem | None = None
         self._move_anchor_box_pos = QPointF()
+        # WR-04 (plan 03-07): the box rect at move-ARM time, so the move-commit
+        # branch can delta-check (a plain click-to-select with no drag must NOT
+        # emit boxes_modified / seed a spurious no-op BOXES entry).
+        self._move_start_rect = QRectF()
         self._creating_box = False
         self._create_anchor = QPointF()
         # CR-01 fix: the PRE-mutation snapshot captured at the START of a
@@ -965,10 +969,17 @@ class EditorCanvas(QGraphicsView):
                 event.accept()
                 return
             # --- Phase 3 box move commit (emit boxes_modified once on release).
+            # WR-04 (plan 03-07): delta-check — a plain click-to-select (no drag)
+            # leaves the rect unchanged; do NOT emit boxes_modified in that case
+            # (it would push a redundant no-op BOXES snapshot whose before ==
+            # after, consuming a history slot and disabling redo). Only a REAL
+            # move emits.
             if self._moving_box is not None:
                 before = self._boxes_interaction_start_snapshot
+                moved = self._moving_box.rect() != self._move_start_rect
                 self._moving_box = None
-                self.boxes_modified.emit(before)
+                if moved:
+                    self.boxes_modified.emit(before)
                 event.accept()
                 return
 
@@ -1319,6 +1330,10 @@ class EditorCanvas(QGraphicsView):
         self._moving_box = item
         r = item.rect()
         self._move_anchor_box_pos = QPointF(r.x(), r.y())
+        # WR-04 (plan 03-07): record the start rect so the move-commit branch
+        # can skip emitting boxes_modified when the box did not actually move
+        # (a plain click-to-select with no drag).
+        self._move_start_rect = QRectF(r)
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
@@ -1391,7 +1406,13 @@ class EditorCanvas(QGraphicsView):
 
     def _commit_resize(self) -> None:
         """Finalize a resize drag: ensure the rect is >= 8x8 scene px (D-06),
-        reposition handles, and emit ``boxes_modified`` once.
+        reposition handles, and emit ``boxes_modified`` once (only on a real
+        resize).
+
+        WR-04 (plan 03-07): delta-check — a click-on-handle-with-no-drag leaves
+        the rect unchanged; do NOT emit boxes_modified in that case (it would
+        push a redundant no-op BOXES snapshot). ``_resize_start_rect`` was
+        captured in ``_begin_resize``; only emit when the final rect differs.
         """
         item = self._resizing_box
         before = self._boxes_interaction_start_snapshot
@@ -1403,7 +1424,9 @@ class EditorCanvas(QGraphicsView):
         h = max(r.height(), MIN_BOX_SIZE)
         item.setRect(QRectF(r.x(), r.y(), w, h))
         item._sync_handles()
-        self.boxes_modified.emit(before)
+        # WR-04 delta-check: only emit when the resize actually changed the rect.
+        if item.rect() != self._resize_start_rect:
+            self.boxes_modified.emit(before)
 
     def _advance_create(self, curr: QPointF) -> None:
         """Advance the amber-dashed create preview rect during the drag (§12e)."""

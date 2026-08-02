@@ -1560,7 +1560,11 @@ class MainWindow(QMainWindow):
            (they survive re-detect), then rebuild the layer via set_boxes with
            the user boxes + the fresh detected boxes.
         4. Auto-show the box overlay (the boxes the user asked for are visible).
-        5. D-10: push a BOXES snapshot so the detection itself is undoable.
+        5. D-10 baseline (plan 03-07, UAT test 3): detection is a NON-undoable
+           seeding event — it establishes the live box layer WITHOUT pushing a
+           boxes undo entry. The first real user box edit pushes its before-
+           snapshot against this baseline (mirrors how the initial mask presence
+           from a detect is not individually undoable, only strokes are).
         """
         # Step 1 — D-04 confirm gate. Fires only when >= 1 DETECTED box exists
         # (a user-only layer is not a "replace detected" scenario). The mask
@@ -1603,18 +1607,15 @@ class MainWindow(QMainWindow):
         # materializes fresh PageBoxes (Pitfall 3 detachment) so the rebuild
         # does not alias live BoxItems.
         #
-        # CR-01 fix (before-state convention): capture the PRE-detection
-        # snapshot NOW (the layer as it is before the detected boxes are
-        # applied) so detection is undoable back to this state. The history
-        # pop returns the most-recent checkpoint, so the pushed snapshot must
-        # be the state to restore TO on undo (mirrors the image side).
+        # The snapshot captured here is used ONLY to derive the USER boxes that
+        # survive the re-detect (D-03). It is NOT pushed to history (see Step 5):
+        # detection establishes a NON-undoable baseline (plan 03-07, UAT test 3).
         pre_detection_snapshot = self.canvas.boxes_snapshot()
         user_pageboxes = [pb for pb in pre_detection_snapshot if pb.origin == USER]
         #
         # WR-05 guard: set_boxes emits boxes_modified, which (after the CR-01
-        # fix) would push a snapshot via _on_boxes_modified. Step 5 below
-        # pushes the single D-10 detection snapshot explicitly, so the Step 3
-        # emission must be suppressed to avoid a double-push.
+        # fix) would push a snapshot via _on_boxes_modified. Detection must seed
+        # NO boxes undo entry (Step 5), so the Step 3 emission is suppressed.
         self._suppress_boxes_push = True
         try:
             self.canvas.set_boxes(user_pageboxes, detected_pageboxes)
@@ -1626,11 +1627,18 @@ class MainWindow(QMainWindow):
         if not self.action_toggle_box_overlay.isChecked():
             self.action_toggle_box_overlay.setChecked(True)
 
-        # Step 5 — D-10: the detection is undoable via the unified Ctrl+Z.
-        # Push the PRE-detection snapshot (captured at Step 3) so a single
-        # Ctrl+Z restores the pre-detection layer (Pitfall 3 + 6 — fresh
-        # int-Box per item, detached from live rects).
-        self.history.push_boxes_state(pre_detection_snapshot)
+        # Step 5 — D-10 baseline (plan 03-07, UAT test 3): detection is a
+        # NON-undoable seeding event. It establishes the live box layer as the
+        # implicit baseline; the FIRST real user box edit then pushes its
+        # before-snapshot against that baseline (WR-04's delta-checks ensure
+        # only real edits push). NO push happens here — the previous explicit
+        # push of pre_detection_snapshot made the INITIAL detection undoable,
+        # which was never desired mid-session: after [detect, move] the BOXES
+        # stack held [0-box, 3-box]; undo#3 popped the 0-box pre-detection
+        # entry -> restored [] -> ALL detected boxes vanished. This mirrors
+        # how the initial mask presence from a detect is not individually
+        # undoable, only subsequent strokes are. pre_detection_snapshot is
+        # retained above only for the user_pageboxes derivation.
         self._update_undo_redo_actions()
 
         # Status-bar box count (UI-SPEC §Copywriting status — box count).
