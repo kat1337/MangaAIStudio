@@ -146,11 +146,22 @@ class HistoryManager:
         guard). The current mask is captured (``.copy()``) into the redo stack
         so a redo reverses the undo. Phase 3: the ``(stamp, value)`` unwrap is
         internal — callers still receive a bare ``QImage``.
+
+        WR-01 (03-REVIEW.md): ``current_mask`` may be ``None`` (the unified
+        ``undo`` is invoked with ``current_mask=None`` whenever
+        ``canvas.has_mask()`` is False in ``_current_undo_state``). The redo
+        stash is only meaningful when there IS a current mask to swap in; a
+        null current short-circuits the stash but the popped previous is still
+        returned. Without this guard the unconditional ``current_mask.copy()``
+        raised ``AttributeError: 'NoneType' object has no attribute 'copy'``
+        on Ctrl+Z — a latent crash when the mask buffer is null but a mask undo
+        entry survives.
         """
         if not self._mask_undo:
             return None
         _stamp, previous = self._mask_undo.pop()
-        self._mask_redo.append((self._stamp(), current_mask.copy()))
+        if current_mask is not None:
+            self._mask_redo.append((self._stamp(), current_mask.copy()))
         return previous.copy()
 
     def pop_mask_redo(self, current_mask: QImage) -> QImage | None:
@@ -160,11 +171,14 @@ class HistoryManager:
         subsequent undo reverses the redo. The returned snapshot is
         ``.copy()``-detached from the internal list. Phase 3: the
         ``(stamp, value)`` unwrap is internal.
+
+        WR-01: symmetric null-current guard with :meth:`pop_mask_undo`.
         """
         if not self._mask_redo:
             return None
         _stamp, next_state = self._mask_redo.pop()
-        self._mask_undo.append((self._stamp(), current_mask.copy()))
+        if current_mask is not None:
+            self._mask_undo.append((self._stamp(), current_mask.copy()))
         return next_state.copy()
 
     # -------------------------------------------------------- image stack
@@ -196,13 +210,20 @@ class HistoryManager:
         returned patch is ``.copy()``-detached from the internal list
         (``test_image_undo_swaps_current_into_redo`` is the regression guard).
         Phase 3: the ``(stamp, value)`` unwrap is internal.
+
+        WR-01 (03-REVIEW.md): symmetric null-current guard with
+        :meth:`pop_mask_undo`. ``current_img`` may be ``None`` (no page loaded)
+        — slicing ``current_img[...]`` crashes on None. The redo stash is
+        skipped when there is no current image, but the popped patch is still
+        returned.
         """
         if not self._image_undo:
             return None
         _stamp, (x, y, patch) = self._image_undo.pop()
-        h, w = patch.shape[:2]
-        redo_patch = current_img[y : y + h, x : x + w].copy()
-        self._image_redo.append((self._stamp(), (x, y, redo_patch)))
+        if current_img is not None:
+            h, w = patch.shape[:2]
+            redo_patch = current_img[y : y + h, x : x + w].copy()
+            self._image_redo.append((self._stamp(), (x, y, redo_patch)))
         return (x, y, patch.copy())
 
     def pop_image_redo(
@@ -214,13 +235,16 @@ class HistoryManager:
         stack so a subsequent undo reverses the redo. The returned patch is
         ``.copy()``-detached from the internal list. Phase 3: the
         ``(stamp, value)`` unwrap is internal.
+
+        WR-01: symmetric null-current guard with :meth:`pop_image_undo`.
         """
         if not self._image_redo:
             return None
         _stamp, (x, y, patch) = self._image_redo.pop()
-        h, w = patch.shape[:2]
-        undo_patch = current_img[y : y + h, x : x + w].copy()
-        self._image_undo.append((self._stamp(), (x, y, undo_patch)))
+        if current_img is not None:
+            h, w = patch.shape[:2]
+            undo_patch = current_img[y : y + h, x : x + w].copy()
+            self._image_undo.append((self._stamp(), (x, y, undo_patch)))
         return (x, y, patch.copy())
 
     # --------------------------------------------------------- boxes stack

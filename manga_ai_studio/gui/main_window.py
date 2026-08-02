@@ -145,6 +145,24 @@ class MainWindow(QMainWindow):
         # detection set_boxes calls that push themselves explicitly.
         self._suppress_boxes_push = False
 
+        # Plan 03-08 (FLOW-02 regression / UAT test 3 addendum): per-page
+        # before-state snapshot for the mask push hook. The mask side
+        # historically pushed ONLY the after-state (``canvas.get_mask()`` post-
+        # stroke) with no before-state, so undo returned the after-state itself
+        # — a no-op that left the stroke on the canvas and, after an inpaint
+        # interleaving, made the brush appear "stuck" on the 2nd Ctrl+Z. This
+        # mirrors the IMAGE side's pre-edit push contract (``push_image_action``
+        # "records the PRE-edit region so undo restores it") and plan 03-07's
+        # BOXES before-state discipline: each mask stroke now pushes the mask
+        # state as it was BEFORE the stroke began (= the after-state of the
+        # previous stroke, or a clean baseline for the first stroke of the
+        # session). ``_on_mask_modified`` fires AFTER the stroke is painted, so
+        # the before-state is reconstructed as "the previous stroke's after-
+        # state", tracked here and refreshed after each push. reset_history
+        # clears it (fresh per page). None = "no prior stroke; the next stroke
+        # seeds the clean baseline as its before-state".
+        self._pre_stroke_mask: QImage | None = None
+
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
         self._build_menus()
@@ -1044,22 +1062,64 @@ class MainWindow(QMainWindow):
         Called on page change (``on_page_selected``) so undo never crosses
         page boundaries (UI-SPEC surface 8; MangaCleaner_GPU
         main_window.py:347 pattern — ``self.history = HistoryManager(...)`` on
-        file open). Also refreshes the undo/redo button enable state.
+        file open). Also refreshes the undo/redo button enable state. Clears
+        the per-page mask-baseline-seeded sentinel (plan 03-08) so the first
+        stroke of the new page re-seeds its clean baseline.
         """
         self.history = HistoryManager(limit=20)
+        self._pre_stroke_mask = None
         self._update_undo_redo_actions()
 
     def _on_mask_modified(self) -> None:
-        """Mask push hook: a stroke committed -> snapshot the current mask.
+        """Mask push hook: a stroke committed -> push the PRE-stroke state.
 
         ``push_mask_state`` ``.copy()``-detaches internally (Pitfall 2), so
         passing the live ``canvas.get_mask()`` here is safe. The hook is the
         ONLY mask push path; ``on_undo`` applies mask snapshots via
         ``canvas.apply_undo_mask`` (no re-emission).
+
+        Plan 03-08 (FLOW-02 regression / UAT test 3 addendum): the push
+        convention is the mask BEFORE-state (the state to restore to on undo),
+        mirroring the IMAGE side's pre-edit push contract (each
+        ``push_image_action`` "records the PRE-edit region so undo restores
+        it") and plan 03-07's BOXES before-state discipline. The pre-fix code
+        pushed the AFTER-state (``canvas.get_mask()`` post-stroke), which made
+        ``pop_mask_undo`` return the after-state itself — a no-op that left the
+        stroke on the canvas and, after an inpaint interleaving, made the brush
+        appear "stuck" on the 2nd Ctrl+Z.
+
+        The before-state of stroke N is the mask as it was BEFORE stroke N
+        began = the after-state of stroke N-1. Because this hook fires AFTER
+        the stroke is painted (canvas ``_end_paint`` paints then emits), the
+        before-state cannot be read from ``canvas.get_mask()`` (that is the
+        post-stroke state); instead it is reconstructed as the previous
+        stroke's after-state, tracked in ``self._pre_stroke_mask``. For the
+        FIRST stroke of a per-page session there is no previous after-state,
+        so the before-state is a clean/empty mask of the current size/format
+        (the user's mental model: "undo my brush work -> clean canvas"). After
+        pushing the before-state, ``_pre_stroke_mask`` is refreshed to the
+        current (post-stroke) mask so the next stroke's before-state is this
+        stroke's after-state.
+
+        Result: mask stack after stroke 1 = [clean]; undo pops clean -> stroke
+        gone. After stroke 2 = [clean, after_1]; undo pops after_1 -> stroke 2
+        gone; undo pops clean -> stroke 1 gone. This is exactly parallel to how
+        plan 03-07 lets the first box edit push against the detection baseline.
         """
         if self.history is None or not self.canvas.has_mask():
             return
-        self.history.push_mask_state(self.canvas.get_mask())
+        current = self.canvas.get_mask()
+        if self._pre_stroke_mask is None:
+            # First stroke of the per-page session: the before-state is a clean
+            # baseline (the canvas as it was before any stroke). Same size/
+            # format as the live mask so apply_undo_mask can swap it in.
+            before = QImage(current.size(), current.format())
+            before.fill(Qt.GlobalColor.transparent)
+        else:
+            before = self._pre_stroke_mask
+        self.history.push_mask_state(before)
+        # Track this stroke's after-state as the next stroke's before-state.
+        self._pre_stroke_mask = current.copy()
         self._update_undo_redo_actions()
 
     def _on_boxes_modified(self, before_snapshot) -> None:
