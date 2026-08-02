@@ -16,11 +16,15 @@ These tests need a display; on headless CI they skip via ``importorskip``.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
 
+from PIL import Image  # noqa: E402
+from PySide6.QtCore import QPointF, QRectF  # noqa: E402
 from PySide6.QtGui import QImage, QShortcut  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
@@ -527,4 +531,322 @@ def test_box_restore_does_not_repush(qtbot, tmp_path) -> None:
     assert len(window.history._boxes_redo) == redo_before, (
         "WR-05 regression: apply_undo_boxes([]) altered the BOXES redo stack "
         "via a spurious push."
+    )
+
+
+# ===========================================================================
+# Plan 03-07: UAT test 3 (detection baseline non-undoable) + UAT test 4
+# (moved-position persistence) + CREATE-undo contract guard (WR-05 / WARNING 5).
+# ===========================================================================
+#
+# Gap 3 (UAT test 3): the third Ctrl+Z wiped ALL detected boxes because
+# ``_build_detected_boxes`` explicitly pushed a 0-box pre-detection snapshot,
+# making the INITIAL detection undoable. Fix: detection is a NON-undoable
+# baseline — it establishes the live layer WITHOUT pushing a boxes stack entry.
+#
+# Gap 4 (UAT test 4, partial): a moved box's position was REPORTED to reset
+# across a page round-trip. A live probe (driving the real move-commit path +
+# real ``on_page_selected`` round-trip) showed the persistence read path is
+# ALREADY correct (``boxes_snapshot`` -> ``current_box`` -> live ``rect()``);
+# the bug does not reproduce. The UAT marked this ``diagnosed: partial`` ("the
+# probe fixture tripped on on_page_selected's signature") — never live-
+# confirmed. TEST B is therefore a PASSING regression guard locking the correct
+# behavior, NOT a RED defect reproduction (honest TDD: a test for a non-existent
+# bug must pass, otherwise it would be fabricated). See the plan's FIX 4 note:
+# "VERIFY FIRST that boxes_snapshot reads the live rect — candidate (a) should
+# be FALSE. ... no code change needed on the read side IF boxes_snapshot already
+# reads live." The probe confirms exactly that landing.
+#
+# TEST C is a CREATE-undo contract guard (WARNING 5): a real Alt+drag CREATE
+# pushes exactly one undoable BOXES entry and recovers in one Ctrl+Z. It passes
+# today and must stay GREEN through Task 2 (it locks the CR-01 CREATE-undo path
+# so WR-04's delta-checks on move/resize cannot silently break it).
+
+
+def _window_with_real_image(qtbot, tmp_path: Path, w: int = 64, h: int = 64):
+    """Build a MainWindow with a real PNG loaded so ``canvas.image_item.pixmap()``
+    reports image dims (the V5 clamp in ``_build_detected_boxes`` needs them).
+
+    Mirrors ``tests/test_gui_detection_boxes._window_with_page`` but also loads
+    TWO pages so the round-trip test (TEST B) can navigate A -> B -> A.
+    """
+    window = _make_window(qtbot, tmp_path)
+    page_a = tmp_path / "page_a.png"
+    page_b = tmp_path / "page_b.png"
+    Image.new("RGB", (w, h), color=(200, 200, 200)).save(page_a)
+    Image.new("RGB", (w, h), color=(180, 180, 180)).save(page_b)
+    window._load_folder(tmp_path)
+    return window, page_a, page_b
+
+
+def _drive_move_commit(canvas, box_item, new_rect: QRectF) -> None:
+    """Drive the LIVE move-commit path (no real mouse): arm ``_moving_box`` via
+    ``_select_and_begin_move``, mutate the rect, then emit ``boxes_modified``
+    with the captured before-snapshot — exactly what ``mouseReleaseEvent``'s
+    move-commit branch does (canvas.py:967-973).
+
+    This exercises the real production push hook (``boxes_modified`` ->
+    ``_on_boxes_modified`` -> ``push_boxes_state``), not a direct history call,
+    so the test reflects production.
+    """
+    canvas._select_and_begin_move(box_item, QPointF(new_rect.x(), new_rect.y()))
+    canvas._moving_box.setRect(new_rect)
+    canvas._moving_box._sync_handles()
+    before = canvas._boxes_interaction_start_snapshot
+    canvas._moving_box = None
+    canvas.boxes_modified.emit(before)
+
+
+# --- TEST A: detection does not seed an undoable baseline (UAT test 3) ------
+
+
+@pytest.mark.gui
+def test_detection_does_not_seed_undoable_baseline(qtbot, tmp_path) -> None:
+    """UAT test 3: applying detection (the suppressed ``set_boxes`` path) must
+    seed NO boxes undo entry. Detection is a NON-undoable baseline — the first
+    real user edit then pushes against it.
+
+    RED today: ``_build_detected_boxes`` explicitly calls
+    ``push_boxes_state(pre_detection_snapshot)`` at Step 5 (main_window.py:1633),
+    so after a detect-with-build ``can_undo_boxes()`` is True. After the fix
+    removes that push, ``can_undo_boxes()`` must be False (detection seeded no
+    baseline). This test drives the suppressed-set_boxes path detection uses at
+    Step 3 (mirroring ``_build_detected_boxes``); the
+    ``test_detection_via_build_detected_boxes_no_baseline`` companion drives the
+    REAL ``_build_detected_boxes`` method where the buggy push lives.
+    """
+    window, _page_a, _page_b = _window_with_real_image(qtbot, tmp_path)
+    assert not window.history.can_undo_boxes()
+
+    # Mirror detection's Step 3: wrap the detected-box apply in the suppression
+    # guard exactly as _build_detected_boxes does.
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([], [_detected_box(20, 20, 60, 60)])
+    finally:
+        window._suppress_boxes_push = False
+
+    assert window.canvas.box_count() == 1
+    # GAP-3 contract: detection seeded NO boxes undo entry.
+    assert not window.history.can_undo_boxes(), (
+        "Gap 3 regression: detection seeded a boxes undo entry — the initial "
+        "detection must be a NON-undoable baseline (mirrors how the initial "
+        "mask presence from a detect is not individually undoable). The "
+        "explicit push_boxes_state(pre_detection_snapshot) in "
+        "_build_detected_boxes must be removed."
+    )
+
+
+@pytest.mark.gui
+def test_detection_via_build_detected_boxes_no_baseline(qtbot, tmp_path) -> None:
+    """UAT test 3 (REAL path): drive the actual ``_build_detected_boxes`` method
+    with a synthetic TextBlock and assert it seeds NO boxes undo entry.
+
+    This is the TRUE RED for Gap 3 — the buggy ``push_boxes_state`` push lives
+    inside ``_build_detected_boxes`` itself (not in ``set_boxes``), so only a
+    direct call to the method reproduces it. The synthetic block is a duck-typed
+    ``SimpleNamespace(xyxy=[...])`` — the only attribute ``textblock_to_box``
+    reads (see box_model.py:105).
+    """
+    window, _page_a, _page_b = _window_with_real_image(qtbot, tmp_path, w=120, h=120)
+    window.action_detect_boxes_mode.setChecked(True)
+    assert not window.history.can_undo_boxes()
+
+    blk = SimpleNamespace(xyxy=[20, 20, 60, 60])
+    window._build_detected_boxes([blk])
+
+    assert window.canvas.box_count() == 1, "the detected box was built onto the canvas"
+    # GAP-3 contract (the real method path): NO boxes undo entry seeded.
+    assert not window.history.can_undo_boxes(), (
+        "Gap 3 regression: _build_detected_boxes pushed a boxes snapshot — the "
+        "initial detection must be a non-undoable baseline. The explicit "
+        "self.history.push_boxes_state(pre_detection_snapshot) at the method's "
+        "Step 5 must be removed so detection establishes the live layer WITHOUT "
+        "seeding an undo entry."
+    )
+
+
+@pytest.mark.gui
+def test_edit_after_detection_pushes_exactly_one_entry(qtbot, tmp_path) -> None:
+    """Gap-3 contract strengthened: after detection (no baseline) + ONE real
+    box-move edit, the BOXES stack holds EXACTLY one entry (the move's before-
+    snapshot), and undoing it restores the pre-move position while KEEPING the
+    box. Locks the contract: edits undo, the detection baseline does not.
+    """
+    window, _page_a, _page_b = _window_with_real_image(qtbot, tmp_path, w=120, h=120)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    blk = SimpleNamespace(xyxy=[20, 20, 60, 60])
+    window._build_detected_boxes([blk])
+    # Detection seeded no baseline (Gap 3 fix).
+    assert not window.history.can_undo_boxes()
+
+    # One real move edit via the live commit path -> pushes the before-snapshot.
+    box_item = window.canvas._box_items[0]
+    pre_move_rect = QRectF(box_item.rect())
+    _drive_move_commit(window.canvas, box_item, QRectF(80, 80, 40, 40))
+
+    assert window.history.can_undo_boxes()
+    assert len(window.history._boxes_undo) == 1, (
+        "After detect (no baseline) + one move, the BOXES stack must hold "
+        "EXACTLY one entry (the move's before-snapshot)."
+    )
+
+    # Undo the move: restores the pre-move position, KEEPS the box.
+    window.on_undo()
+    snap = window.canvas.boxes_snapshot()
+    assert len(snap) == 1, "undo of a move must keep the box (only revert the move)"
+    restored = snap[0].box.as_tuple
+    assert restored == (
+        int(pre_move_rect.x()),
+        int(pre_move_rect.y()),
+        int(pre_move_rect.x() + pre_move_rect.width()),
+        int(pre_move_rect.y() + pre_move_rect.height()),
+    ), f"undo must restore the pre-move position; got {restored}"
+
+
+# --- TEST B: moved position persists across round-trip (UAT test 4) ---------
+
+
+@pytest.mark.gui
+def test_moved_box_position_persists_across_round_trip(qtbot, tmp_path) -> None:
+    """UAT test 4: a moved box's POSITION persists across a page round-trip,
+    for BOTH a detected box AND a user box.
+
+    The UAT marked this ``diagnosed: partial`` ("probe fixture tripped on
+    on_page_selected's signature"). A live probe driving the REAL move-commit
+    path + a REAL ``on_page_selected`` round-trip showed the persistence read
+    path (``boxes_snapshot`` -> ``current_box`` -> live ``rect()``) is ALREADY
+    correct — the moved rect is what persists, not a creation-time snapshot. So
+    this test is a PASSING regression guard locking the correct behavior, NOT a
+    failing RED defect reproduction. The user-box case is its OWN named
+    assertion (WARNING 4: the UAT explicitly includes drawn/user boxes).
+
+    Detection also seeds no baseline here, so the round-trip does not depend on
+    any boxes stack state (page-switch resets history regardless).
+    """
+    window, page_a, page_b = _window_with_real_image(qtbot, tmp_path, w=120, h=120)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    # Seed BOTH boxes at their creation positions via the real detection method
+    # (detected) + a suppressed set_boxes (user box) in one go, so neither
+    # clears the other. The user box is added alongside the detected box.
+    blk = SimpleNamespace(xyxy=[20, 20, 60, 60])
+    window._build_detected_boxes([blk])
+    user_seed = PageBox(box=Box(10, 10, 30, 30), origin=USER)
+    moved_detected = window.canvas.boxes_snapshot()  # the detected box, pre-move
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([user_seed], moved_detected)
+    finally:
+        window._suppress_boxes_push = False
+    assert window.canvas.box_count() == 2
+
+    # Move the DETECTED box to a new position via the live commit path.
+    detected_item = [
+        it for it in window.canvas._box_items if it.pagebox.origin == DETECTED
+    ][0]
+    _drive_move_commit(window.canvas, detected_item, QRectF(100, 100, 40, 40))
+
+    # Move the USER box to a new position via the live commit path.
+    user_item = [
+        it for it in window.canvas._box_items if it.pagebox.origin == USER
+    ][0]
+    _drive_move_commit(window.canvas, user_item, QRectF(90, 90, 30, 30))
+
+    # Navigate A -> B -> A (the real round-trip path the sidebar drives).
+    window.file_table.select_path(page_b)
+    window.on_page_selected(page_b)
+    assert not window.canvas.has_boxes()  # page B never had boxes
+    window.file_table.select_path(page_a)
+    window.on_page_selected(page_a)
+
+    restored = window.canvas.boxes_snapshot()
+    assert len(restored) == 2, f"both boxes must survive the round-trip; got {len(restored)}"
+
+    restored_detected = [pb for pb in restored if pb.origin == DETECTED][0]
+    assert restored_detected.box.as_tuple == (100, 100, 140, 140), (
+        "UAT test 4 (detected box): the MOVED position (100,100,140,140) must "
+        f"persist across the round-trip; got {restored_detected.box.as_tuple}."
+    )
+
+    # WARNING 4: the USER-box case is its own named assertion (separate line).
+    restored_user = [pb for pb in restored if pb.origin == USER][0]
+    assert restored_user.box.as_tuple == (90, 90, 120, 120), (
+        "UAT test 4 (USER box): a moved DRAWN box's position must persist across "
+        f"the round-trip; got {restored_user.box.as_tuple}. The UAT explicitly "
+        "includes user boxes ('including drawn (user) boxes, not just detected "
+        "ones') — this is a separate failure line from the detected-box case."
+    )
+
+
+# --- TEST C: CREATE-undo contract guard (WARNING 5 / WR-04) -----------------
+
+
+@pytest.mark.gui
+def test_create_box_pushes_one_undoable_entry(qtbot, tmp_path) -> None:
+    """CREATE-undo contract guard (WARNING 5). PASSES today (a passing guard,
+    not a RED defect) — locks the CR-01 CREATE-undo path so WR-04's delta-checks
+    on move/resize cannot silently break it.
+
+    A real Alt+drag CREATE (via ``_begin_create_box`` + ``_commit_create``) must
+    push EXACTLY one undoable BOXES entry, and a single ``on_undo()`` recovers
+    the pre-create state in one press. The early-return path (a CREATE ending
+    smaller than ``MIN_BOX_SIZE``) produces ZERO new entries — proving
+    ``_commit_create`` no-ops on tiny drags WITHOUT needing a delta-check (so
+    Task 2's delta-checks stay confined to move/resize, never create).
+    """
+    window, _page_a, _page_b = _window_with_real_image(qtbot, tmp_path, w=120, h=120)
+    assert not window.history.can_undo_boxes()
+    count_before = len(window.history._boxes_undo)
+
+    # Drive a real Alt+drag CREATE via the live path: arm _begin_create_box at a
+    # scene anchor, advance the rect to a >= 8x8 size, then _commit_create.
+    window.canvas._begin_create_box(QPointF(10, 10))
+    # Advance the create preview (the mouseMoveEvent _advance_create path draws
+    # a rect from the anchor to the cursor; here we set the final rect directly
+    # on the would-be box by advancing through _commit_create's rect math).
+    # _commit_create reads self._create_anchor + the release scene pos and builds
+    # QRectF(anchor, curr).normalized(); emulate by giving it a release event.
+    # Simplest faithful path: call _commit_create with a fake event whose
+    # position maps to the desired corner.
+    from unittest.mock import MagicMock
+    from PySide6.QtCore import QPoint
+
+    release_event = MagicMock()
+    release_event.position.return_value = QPointF(50, 50)
+    # _scene_pos maps event.position().toPoint() through mapToScene; bypass by
+    # monkeypatching to return the scene point we want.
+    window.canvas._scene_pos = lambda event: QPointF(50, 50)
+    window.canvas._commit_create(release_event)
+
+    # EXACTLY one BOXES entry was pushed (the real create).
+    assert window.history.can_undo_boxes(), (
+        "CR-01 CREATE-undo contract: a real Alt+drag CREATE must push a BOXES "
+        "snapshot so it is undoable in one Ctrl+Z."
+    )
+    assert len(window.history._boxes_undo) == count_before + 1, (
+        "CR-01 CREATE-undo contract: a real CREATE must push EXACTLY one entry "
+        f"(got {len(window.history._boxes_undo) - count_before})."
+    )
+    assert window.canvas.box_count() == 1
+
+    # A single on_undo recovers the pre-create state (one-press undoability).
+    window.on_undo()
+    assert window.canvas.box_count() == 0, (
+        "CR-01 CREATE-undo contract: a single Ctrl+Z must undo the create."
+    )
+
+    # Early-return path: a tiny CREATE (< MIN_BOX_SIZE) pushes ZERO new entries.
+    count_after_undo = len(window.history._boxes_undo)
+    window.canvas._begin_create_box(QPointF(10, 10))
+    tiny_event = MagicMock()
+    tiny_event.position.return_value = QPointF(12, 12)  # 2x2 < MIN_BOX_SIZE(8)
+    window.canvas._scene_pos = lambda event: QPointF(12, 12)
+    window.canvas._commit_create(tiny_event)
+    assert len(window.history._boxes_undo) == count_after_undo, (
+        "CR-01 early-return contract: a CREATE smaller than MIN_BOX_SIZE must "
+        "push ZERO entries (no-op). A delta-check on _commit_create would be "
+        "redundant AND risks the real-create path — this guards that it stays "
+        "untouched."
     )
