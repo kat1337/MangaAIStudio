@@ -4,16 +4,17 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
-status: verifying
-stopped_at: "Phase 03 ALL 4 WAVES complete (5/5 plans, 246 full-suite tests green). TEXT-01 + TEXT-03 complete. PAUSED before post-execution: code review, verify phase goal, and routing deferred to next session per user. Resume: /gsd-execute-phase 3 (will skip completed plans and resume post-execution)"
-last_updated: "2026-07-29T02:20:00.540Z"
-last_activity: 2026-07-28
+status: executing
+stopped_at: "Completed 03-06-PLAN.md (UAT test 2 corner-handle hit-target fix: shape()+boundingRect() override enlarges grab area; visible 8x8 handle unchanged; 249 full-suite green)"
+last_updated: "2026-08-02T04:44:45.209Z"
+last_activity: 2026-08-02
 last_activity_desc: Phase 03 execution started
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 16
-  completed_plans: 16
+  total_phases: 5
+  completed_phases: 2
+  total_plans: 19
+  completed_plans: 17
+  percent: 40
 ---
 
 # Project State
@@ -28,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 03 (text-box-detection-interaction) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-07-28 — Phase 03 execution started
+Plan: 2 of 8
+Status: Ready to execute
+Last activity: 2026-08-02 — Phase 03 execution started
 
 Progress: [██████████] 100%
 
@@ -76,6 +77,7 @@ Progress: [██████████] 100%
 | Phase 03 P03 | 10 min | 3 tasks | 3 files |
 | Phase 03 P04 | 6 min | 2 tasks | 2 files |
 | Phase 03 P05 | 18 min | 3 tasks | 3 files |
+| Phase 03 P06 | 5 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -135,6 +137,7 @@ Recent decisions affecting current work:
 - [Phase ?]: 03-05: boxes-save reads OUTGOING index from _last_page_index (reused from Phase 2 mask seam) — same lesson applies (select_path mutates current_path before on_page_selected runs)
 - [Phase ?]: 03-05: Step 4b ALWAYS calls set_boxes (even empty) — boxes not tied to image dims, so stale boxes must be cleared when incoming page has none (unlike mask which set_image_from_path re-sizes)
 - [Phase ?]: 03-05: Surface 13 undo collapse — unified on_undo/on_redo pop merged MASK/IMAGE/BOXES timeline via history.undo/redo and route (kind, value) -> apply_undo_{mask,image,boxes}; toolbar/menu 4->2; Alt+Z removed; orphaned strings fixed to Ctrl+Z
+- [Phase ?]: 03-06: BOTH CornerHandle.shape() AND CornerHandle.boundingRect() must be overridden to enlarge the hit area — shape() alone is filtered out by itemAt's coarse boundingRect first-pass (probe-confirmed); boundingRect does NOT change the painted 8x8 handle (paint draws rect()). Visible handle stays 8x8 (UI-SPEC 12b preserved).
 
 ### Pending Todos
 
@@ -161,8 +164,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-29T02:20:00.527Z
-Stopped at: Completed 03-05-PLAN.md (per-page box persistence + Surface 13 undo collapse). Phase 3 feature-complete: TEXT-01 + TEXT-03 + persistence + unified undo. 246 full-suite tests green.
+Last session: 2026-08-02T04:44:38.686Z
+Stopped at: Completed 03-06-PLAN.md (UAT test 2 corner-handle hit-target fix: shape()+boundingRect() override enlarges grab area; visible 8x8 handle unchanged; 249 full-suite green)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
