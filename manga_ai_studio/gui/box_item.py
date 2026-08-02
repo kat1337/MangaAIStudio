@@ -46,7 +46,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPen
+from PySide6.QtGui import QBrush, QColor, QPen, QPainterPath
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsRectItem,
@@ -73,6 +73,12 @@ _UNSELECTED_PEN_WIDTH = 2
 _SELECTED_PEN_WIDTH = 3
 # UI-SPEC §Spacing exceptions: 8x8 viewport-px corner handle.
 _HANDLE_SIZE = 8
+# Invisible hit-area enlargement (UAT test 2 gap-closure, plan 03-06). The VISIBLE
+# handle stays 8x8 (UI-SPEC §12b); only the invisible grab tolerance grows so a
+# corner drag registers even when the click lands slightly off the exact corner
+# on real artwork at production zoom. 18 gives a 9px radius (> the +-5px probe in
+# the regression test) within the fix_direction's "~16-20px" range.
+_HANDLE_HIT_SIZE = 18
 # Handle z (above the box border z=100 — UI-SPEC §Z-order).
 _HANDLE_Z = 150
 # Handle outline 1px matte (#0b0b0e) separates the handle fill from artwork.
@@ -88,6 +94,33 @@ def origin_hue(origin: str) -> str:
     D-03 origin constants are the only valid values in Phase 3).
     """
     return _ORIGIN_HUES.get(origin, _ORIGIN_HUES[DETECTED])
+
+
+# Half of the enlarged hit size (corner of the handle = local (4,4); the hit
+# rect is centred on that point, so the local top-left is 4 - half).
+_HANDLE_HIT_HALF = _HANDLE_HIT_SIZE / 2.0
+
+
+def _handle_hit_rect() -> QRectF:
+    """The enlarged invisible hit rect for a :class:`CornerHandle` (local coords).
+
+    Centred on the corner point at local ``(4, 4)`` (the handle is constructed
+    as ``QGraphicsRectItem(0,0,8,8)``; local ``(4,4)`` maps to the exact scene
+    corner after :meth:`CornerHandle.reposition` sets ``pos = scene corner - 4``).
+    """
+    return QRectF(
+        _HANDLE_OFFSET - _HANDLE_HIT_HALF,
+        _HANDLE_OFFSET - _HANDLE_HIT_HALF,
+        _HANDLE_HIT_SIZE,
+        _HANDLE_HIT_SIZE,
+    )
+
+
+def _handle_hit_path() -> QPainterPath:
+    """A :class:`QPainterPath` wrapping :func:`_handle_hit_rect` (for ``shape()``)."""
+    path = QPainterPath()
+    path.addRect(_handle_hit_rect())
+    return path
 
 
 class CornerHandle(QGraphicsRectItem):
@@ -144,6 +177,58 @@ class CornerHandle(QGraphicsRectItem):
             self.setPos(parent_rect.left() - _HANDLE_OFFSET, parent_rect.bottom() - _HANDLE_OFFSET)
         else:  # BR
             self.setPos(parent_rect.right() - _HANDLE_OFFSET, parent_rect.bottom() - _HANDLE_OFFSET)
+
+    def shape(self) -> QPainterPath:  # noqa: D401 (Qt API casing)
+        """Return a LARGER invisible hit rect than the painted 8x8 handle.
+
+        ``QGraphicsScene.itemAt`` uses each item's ``shape()`` (a
+        :class:`QPainterPath`) for the FINE hit-test, and its
+        :meth:`boundingRect` for the COARSE first pass (the scene's BSP index
+        only considers items whose ``boundingRect`` contains the probe point).
+        The default ``QGraphicsRectItem.shape()`` returns the 8x8 painted rect
+        plus the pen width, which on real artwork at production zoom is
+        practically unhittable (UAT test 2): the handle is centred ON the box
+        corner, so ~half of the 8x8 sits outside the box (reads as
+        background/pixmap -> no-op) and the inner half overlaps the
+        :class:`BoxItem` body (-> triggers a move, not a resize). ``itemAt``
+        therefore returns a ``CornerHandle`` only in a ~6x6 central pocket.
+
+        Overriding ``shape()`` to return a larger rect enlarges ONLY the hit
+        area — :meth:`paint` (inherited from ``QGraphicsRectItem``) draws
+        ``rect()`` (the 8x8 set in ``__init__``), NOT ``shape()`` /
+        :meth:`boundingRect`, so the VISIBLE handle stays 8x8 (UI-SPEC §12b
+        preserved). :meth:`boundingRect` is overridden identically because
+        ``itemAt`` consults ``shape()`` ONLY for items that survived the
+        ``boundingRect`` coarse pass — enlarging ``shape()`` alone has no effect
+        (the probe point is filtered out before the fine test runs). The corner
+        POINT of the handle is at LOCAL coord ``(4, 4)`` — the handle is
+        constructed as ``QGraphicsRectItem(0,0,8,8)`` and positioned via
+        :meth:`reposition` so its local origin sits at ``scene corner - 4``;
+        local ``(4, 4)`` therefore maps to the exact scene corner. The hit rect
+        is centred on that point.
+
+        This is the standard Qt Graphics View technique for "fat finger" grab
+        targets and is localised entirely to the handle — the canvas hit-test
+        dispatch (``canvas.py:859-864``) is already correct in scene coords and
+        is NOT changed; it merely consults the larger ``shape()`` via
+        ``scene.itemAt``.
+        """
+        return _handle_hit_path()
+
+    def boundingRect(self) -> QRectF:  # noqa: D401 (Qt API casing)
+        """Return the enlarged hit rect (matches :meth:`shape`).
+
+        ``itemAt`` only fine-tests ``shape()`` for items whose ``boundingRect``
+        already contains the probe point, so ``boundingRect`` MUST cover the
+        same region as ``shape()`` or the coarse pass filters the probe out
+        before ``shape()`` is consulted (verified by probe — see SUMMARY
+        Deviation 1). This does NOT change the painted handle: the inherited
+        :meth:`paint` draws ``rect()`` (the 8x8 from ``__init__``), not
+        ``boundingRect``; the larger rect only widens the scene's repaint +
+        hit-test region.
+        """
+        return _handle_hit_rect()
+
 
 
 class BoxItem(QGraphicsRectItem):
