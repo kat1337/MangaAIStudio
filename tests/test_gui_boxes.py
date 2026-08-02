@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QMouseEvent  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QGraphicsScene,
@@ -561,3 +561,68 @@ def test_mask_painting_still_works_with_box_layer_visible(qtbot) -> None:
     canvas.mouseReleaseEvent(_release_at(canvas, 80, 50))
 
     assert canvas.get_mask().pixelColor(65, 50).alpha() > 0
+
+
+# ===========================================================================
+# Plan 03-06 — UAT test 2 hit-target regression (RED gate)
+# ===========================================================================
+#
+# UAT test 2 diagnosed (03-UAT.md): the 8x8 viewport-px CornerHandle is centred
+# ON the box corner, so ~half of it sits outside the box (reads as background/
+# pixmap -> no-op) and the inner half overlaps the BoxItem body (-> triggers a
+# move, not a resize). scene.itemAt returns a CornerHandle only in a ~6x6 central
+# pocket; +-6px offsets return the BoxItem/pixmap. The fix is to enlarge ONLY the
+# hit shape (not the painted handle) via CornerHandle.shape(). These tests
+# exercise the SAME scene.itemAt(scene_pos, QTransform()) path the canvas uses
+# (canvas.py:860), so a green here proves the production dispatch reaches the
+# resize affordance on real off-centre clicks.
+
+
+@pytest.mark.gui
+def test_corner_handle_hit_target_covers_offset_zone(qtbot) -> None:
+    """A selected box's corner is hittable within +-5px of the handle centre (UAT test 2).
+
+    Before the fix these offset points return a BoxItem (or the pixmap) because
+    the default 8x8 shape only covers the exact-centre pocket. The probe
+    exercises ``scene.itemAt(scene_pos, QTransform())`` — the exact path
+    ``canvas.py:860`` uses at 1:1 zoom (``self.transform()`` is identity at
+    zoom 1.0), so green here means production dispatch reaches the resize
+    affordance.
+    """
+    # Box(100,100,300,300) -> scene rect (100,100)-(300,300). BR corner = (300,300).
+    _scene, item = _scene_with_box(PageBox(box=Box(100, 100, 300, 300), origin=DETECTED))
+    # Selection makes the CornerHandle children visible + hittable (D-08).
+    _scene.clearSelection()
+    item.setSelected(True)
+    br = item.handles["BR"]
+
+    # Sanity: the painted visible handle is still 8x8 (UI-SPEC §12b) — the fix
+    # must NOT change the painted geometry, only the invisible hit shape.
+    assert int(br.rect().width()) == 8 and int(br.rect().height()) == 8
+
+    # 1) Exact handle centre (the central pocket) STILL returns a CornerHandle.
+    #    This already works today; the fix must not regress it.
+    assert isinstance(_scene.itemAt(QPointF(300, 300), QTransform()), CornerHandle)
+
+    # 2) The OFFSET zone (+-5px from the exact corner) now returns a CornerHandle.
+    #    RED before the fix: these return the BoxItem (or the pixmap), because the
+    #    default 8x8 shape only covers the central pocket.
+    offset_probes = [
+        QPointF(305, 305),
+        QPointF(295, 295),
+        QPointF(305, 295),
+        QPointF(295, 305),
+    ]
+    for probe in offset_probes:
+        hit = _scene.itemAt(probe, QTransform())
+        assert isinstance(
+            hit, CornerHandle
+        ), f"offset probe {probe.x()},{probe.y()} did not hit a CornerHandle (got {type(hit).__name__})"
+
+    # 3) The box BODY (centre, ~100px from any corner) is NOT swallowed by the
+    #    enlarged handle hit shape — a click there must still select/move the box,
+    #    not resize it (T-03-06-02 mitigation).
+    body_hit = _scene.itemAt(QPointF(200, 200), QTransform())
+    assert isinstance(body_hit, BoxItem)
+    assert not isinstance(body_hit, CornerHandle)
+
