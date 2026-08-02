@@ -111,7 +111,7 @@ Plans:
   1. User can run text-box detection across a page to create editable text-box objects (not a pixel mask)
   2. User can select, move, resize, and delete text boxes on the canvas to correct detection errors
 
-**Plans**: 6/8 plans executed
+**Plans**: 7/8 plans executed
 
 Plans:
 
@@ -135,7 +135,7 @@ Plans:
 **Gap-closure waves** (UAT fixes — run via `/gsd-execute-phase 3 --gaps-only`)
 
 - [x] 03-06-PLAN.md — *(Wave 1)* Enlarge CornerHandle hit shape (UAT test 2: resize handle unhittable) — TEXT-03
-- [ ] 03-07-PLAN.md — *(Wave 2, blocked on 06)* Detection non-undoable baseline (UAT test 3) + moved-box position persistence (UAT test 4) + WR-04 — TEXT-01, TEXT-03
+- [x] 03-07-PLAN.md — *(Wave 2, blocked on 06)* Detection non-undoable baseline (UAT test 3) + moved-box position persistence (UAT test 4) + WR-04 — TEXT-01, TEXT-03
 - [ ] 03-08-PLAN.md — *(Wave 3, blocked on 07)* Mask stroke baseline seeding (UAT test 3 addendum, Phase 1 FLOW-02 regression) + WR-01 null-mask crash guard — TEXT-03
 
 **UI hint**: yes
@@ -195,7 +195,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
-| 3. Text Box Detection & Interaction | 6/8 | In Progress|  |
+| 3. Text Box Detection & Interaction | 7/8 | In Progress|  |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
