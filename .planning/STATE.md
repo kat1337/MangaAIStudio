@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
 status: executing
-stopped_at: Completed 03-07-PLAN.md (Gap 3 detection-baseline non-undoable + Gap 4 probe-confirmed-no-fix + WR-04 delta-checks; 254 full-suite green)
-last_updated: "2026-08-02T05:01:42.021Z"
-last_activity: 2026-08-02
-last_activity_desc: Phase 03 execution started
+stopped_at: Completed 03-08-PLAN.md (mask-stroke before-state push + WR-01 null-current guard; UAT test 3 addendum + WR-01 closed; 257 full-suite green)
+last_updated: "2026-07-31T00:00:00Z"
+last_activity: 2026-07-31
+last_activity_desc: Phase 03 plan 03-08 (gap-closure) executed
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 19
-  completed_plans: 18
+  completed_plans: 19
   percent: 40
 ---
 
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 03 (text-box-detection-interaction) — EXECUTING
-Plan: 3 of 8
-Status: Ready to execute
-Last activity: 2026-08-02 — Phase 03 execution started
+Plan: 8 of 8
+Status: All Phase 03 plans executed (8/8); gap-closure waves complete. Awaiting post-execution (code-review → verify_phase_goal → phase.complete).
+Last activity: 2026-07-31 — Plan 03-08 (mask-undo before-state + WR-01) executed
 
 Progress: [██████████] 100%
 
@@ -79,6 +79,7 @@ Progress: [██████████] 100%
 | Phase 03 P05 | 18 min | 3 tasks | 3 files |
 | Phase 03 P06 | 5 min | 2 tasks | 2 files |
 | Phase 03 P07 | 12 min | 2 tasks | 4 files |
+| Phase 03 P08 | ~22 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -140,6 +141,7 @@ Recent decisions affecting current work:
 - [Phase ?]: 03-05: Surface 13 undo collapse — unified on_undo/on_redo pop merged MASK/IMAGE/BOXES timeline via history.undo/redo and route (kind, value) -> apply_undo_{mask,image,boxes}; toolbar/menu 4->2; Alt+Z removed; orphaned strings fixed to Ctrl+Z
 - [Phase ?]: 03-06: BOTH CornerHandle.shape() AND CornerHandle.boundingRect() must be overridden to enlarge the hit area — shape() alone is filtered out by itemAt's coarse boundingRect first-pass (probe-confirmed); boundingRect does NOT change the painted 8x8 handle (paint draws rect()). Visible handle stays 8x8 (UI-SPEC 12b preserved).
 - [Phase ?]: 03-07: detection is a NON-undoable baseline (Gap 3) — removed the explicit push_boxes_state(pre_detection_snapshot) at _build_detected_boxes Step 5; the Step 3 _suppress_boxes_push guard already suppresses the set_boxes emission, so detection produces NO boxes stack entry. A live probe confirmed Gap 4 (moved-position persistence) was a misdiagnosis — the read path already works; no production fix needed. WR-04 closed via move/resize delta-checks (create exempt per WARNING 5).
+- [Phase ?]: 03-08: mask push hook now pushes the BEFORE-state per stroke (tracked via self._pre_stroke_mask, defaulting to a clean baseline for the first stroke of a per-page session) — closes the one-behind defect (UAT test 3 addendum / FLOW-02 regression). A live probe proved the plan's literal Option 2 (seed [clean, after-state]) does NOT work: pop_mask_undo returns the stack TOP (the after-state), so applying it is a no-op — the correct fix pushes the BEFORE-state so the stack top at undo-time IS the state to restore to. Mirrors the IMAGE pre-edit push contract + plan 03-07's BOXES before-state discipline. WR-01 closed via null-current guards on all 4 per-type pops (pop_mask/image_undo/redo skip the redo-stash when current is None). Also found: the single-point _painted_mask draws zero opaque pixels on PySide6 6.x (false-pass generator) — new _opaque_stroked_mask/_paint_brush_stroke helpers use a real two-point segment.
 
 ### Pending Todos
 
@@ -166,8 +168,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-02T05:01:42.010Z
-Stopped at: Completed 03-07-PLAN.md (Gap 3 detection-baseline non-undoable + Gap 4 probe-confirmed-no-fix + WR-04 delta-checks; 254 full-suite green)
+Last session: 2026-07-31T00:00:00Z
+Stopped at: Completed 03-08-PLAN.md (mask-stroke before-state push + WR-01 null-current guard; UAT test 3 addendum + WR-01 closed; 257 full-suite green)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
