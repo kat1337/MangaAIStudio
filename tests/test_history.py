@@ -54,6 +54,30 @@ def _painted_mask(brush_size: int, size: int = 64) -> QImage:
     return mask
 
 
+def _opaque_stroked_mask(size: int = 64, brush_size: int = 10) -> QImage:
+    """Build a mask QImage with a genuinely-opaque two-point brush stroke.
+
+    The single-point ``_painted_mask`` helper (p1 == p2) draws a degenerate
+    line that renders ZERO opaque pixels on this Qt build (a zero-length
+    ``drawLine`` is a no-op), so it is indistinguishable from the transparent
+    baseline. The plan-08 regression tests MUST distinguish a "stroked" mask
+    from a clean baseline, so they use a real two-point segment whose round-cap
+    caps fill a measurable disc. Each call returns a fresh QImage.
+    """
+    mask = _transparent_mask(size)
+    mid = size / 2
+    p1 = QPointF(mid - brush_size, mid)
+    p2 = QPointF(mid + brush_size, mid)
+    paint_mask_stroke(mask, p1, p2, brush_size, eraser=False)
+    return mask
+
+
+def _opaque_pixel_count(img: QImage) -> int:
+    """Count non-transparent pixels in ``img`` (a mask-content proxy)."""
+    w, h = img.width(), img.height()
+    return sum(1 for y in range(h) for x in range(w) if img.pixelColor(x, y).alpha() > 0)
+
+
 # ---------------------------------------------------------------------------
 # Task 1 — core HistoryManager behavior (no GUI)
 # ---------------------------------------------------------------------------
@@ -654,4 +678,148 @@ def test_undo_does_not_repush(qtbot, tmp_path) -> None:
     # current was stashed into redo; no re-push happened).
     assert not window.history.can_undo_mask()
     assert window.history.can_redo_mask()
+
+
+# ---------------------------------------------------------------------------
+# Plan 03-08 — mask-undo-stuck (UAT test 3 addendum, FLOW-02 regression) +
+# WR-01 null-mask crash guard. Three @pytest.mark.gui tests (the multi-store
+# unified-undo path exercises QImage construction + cross-store pop, so the
+# gui marker / qtbot QApplication is required; the GREEN verify references
+# node-IDs explicitly rather than -m gui because test_mask_editor is 100% unit).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_mask_stroke_stuck_after_inpaint_undo_symptom(qtbot) -> None:
+    """UAT test 3 addendum (FLOW-02 regression): after inpainting, the brush
+    mask "comes back on the 2nd Ctrl+Z and no matter how much Ctrl+Z it never
+    goes away again."
+
+    This is the SYMPTOM reproduction — it drives the CURRENT (buggy) push
+    pattern that ``_on_mask_modified`` uses today (after-state only, no baseline
+    seed) through the real multi-store unified ``history.undo(...)`` path,
+    verbatim from 03-UAT.md Gap 4 (detect -> stroke -> inpaint -> repeated
+    Ctrl+Z). It uses a real HistoryManager + real transparent QImages (via the
+    qtbot QApplication) so the ``.copy()`` detachment path is exercised.
+
+    DESIRED (post-fix) behaviour: the FIRST undo pops the image (inpaint
+    undone, ordering by stamp); the SECOND undo pops the mask and the returned
+    mask equals ``base`` (the clean PRE-stroke baseline — the stroke removed);
+    the THIRD undo returns None (all stacks empty). Repeated undo never
+    re-materializes the stroke.
+
+    RED failure mode (CONFIRMED by a live probe against pop_mask_undo semantics
+    — history_manager.py:150-154): with after-state-only push and NO baseline
+    seed, the single-entry mask stack ``[stroked]`` is popped by undo#2 and
+    ``pop_mask_undo`` returns ``stroked.copy()`` — i.e. the STROKED AFTER-STATE
+    itself. So the stroke SURVIVES undo#2 (``m != base``), and undo#3 then
+    returns None because the stack is now empty — the stroke was never removed
+    at all. The plan's checker corrected an earlier round-1 hypothesis that
+    claimed "returns None or leaves the stroke" — that is FALSE; the actual
+    RED behaviour is "returns the stroked after-state, so the stroke persists
+    and a further undo has nothing below it." Assert that exact failure below.
+    """
+    history = HistoryManager(limit=20)
+    base = _transparent_mask(64)
+    stroked = _opaque_stroked_mask(64, brush_size=10)
+    assert _opaque_pixel_count(stroked) > 0, "fixture must paint a real stroke"
+    assert _opaque_pixel_count(base) == 0
+
+    # Current buggy push pattern: after-state only, no pre-stroke baseline seed.
+    history.push_mask_state(stroked)  # the mask stroke
+    # The inpaint — pre_patch is a small zeros array (matches
+    # test_undo_image_applies_patch). x,y == 0,0 for a clean cross-store stamp.
+    history.push_image_action(0, 0, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    # The "current" mask after both pushes is the stroked after-state; the
+    # current image is a fresh array.
+    cur_mask = stroked
+    cur_img = np.zeros((64, 64, 3), dtype=np.uint8)
+
+    # Undo #1: pops the most-recent entry by stamp -> the image (inpaint).
+    r1 = history.undo(cur_mask, cur_img, [])
+    assert r1 is not None and r1[0] == "image"
+
+    # Undo #2: pops the mask stack's only entry. DESIRED: returns the clean
+    # baseline (the stroke removed). RED (today): returns the stroked
+    # after-state itself.
+    r2 = history.undo(cur_mask, cur_img, [])
+    assert r2 is not None and r2[0] == "mask"
+    popped_mask = r2[1]
+    assert _opaque_pixel_count(popped_mask) == 0, (
+        "undo #2 must return the CLEAN baseline (the stroke removed), not the "
+        "stroked after-state"
+    )
+
+    # Undo #3: all stacks empty -> None (no further state to restore, and the
+    # stroke must NOT re-materialize on repeated undo).
+    r3 = history.undo(cur_mask, cur_img, [])
+    assert r3 is None
+
+
+@pytest.mark.gui
+def test_first_mask_stroke_undoable_to_baseline(qtbot) -> None:
+    """MECHANISM guard for the one-behind fix, isolated at the mask layer.
+
+    DISTINCT from the symptom test above: this isolates the mask-layer
+    baseline-seeding mechanism so the fix can be validated WITHOUT the image
+    store interleaving. WHY fixing this mechanism closes the symptom: the
+    symptom (Test A) is the cross-store manifestation of the same one-behind
+    defect — the mask side pushes ONLY the after-state with no baseline seed,
+    so the first stroke of a session has nothing below it to restore to.
+    Seeding the baseline on the first stroke makes undo #2 of Test A land on
+    the clean baseline instead of the stroked after-state.
+
+    DESIRED (post-fix): ``history.undo`` on a single-entry mask stack returns
+    ("mask", m) where m pixel-equals the clean baseline (the stroke removed).
+
+    RED (today): returns ``stroked.copy()`` (the after-state) because there is
+    no pre-stroke baseline on the stack (CONFIRMED by live probe — the single
+    after-state entry is what gets popped). Document this exact failure mode,
+    NOT "returns None".
+    """
+    history = HistoryManager(limit=20)
+    base = _transparent_mask(64)
+    stroked = _opaque_stroked_mask(64, brush_size=10)
+    assert _opaque_pixel_count(stroked) > 0
+
+    # Current buggy pattern: after-state only, no baseline seed.
+    history.push_mask_state(stroked)
+
+    dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
+    result = history.undo(stroked, dummy_img, [])
+    assert result is not None and result[0] == "mask"
+    popped = result[1]
+    assert _opaque_pixel_count(popped) == 0, (
+        "the first stroke of a session must undo back to a clean baseline "
+        "(the stroke removed), not the stroked after-state"
+    )
+
+
+@pytest.mark.gui
+def test_pop_mask_undo_with_null_current_mask_does_not_crash(qtbot) -> None:
+    """WR-01 (03-REVIEW.md): ``pop_mask_undo`` does ``current_mask.copy()``
+    unconditionally (history_manager.py:153). When the unified ``undo`` is
+    called with ``current_mask=None`` (which ``_current_undo_state`` returns
+    whenever ``canvas.has_mask()`` is False — main_window.py:1120) while the
+    mask undo stack is non-empty, it crashes with
+    ``AttributeError: 'NoneType' object has no attribute 'copy'``.
+
+    DESIRED (post-fix): returns ("mask", <qimage>) WITHOUT raising. RED
+    (today): crashes (CONFIRMED by live probe).
+    """
+    history = HistoryManager(limit=20)
+    history.push_mask_state(_opaque_stroked_mask(64, brush_size=10))
+
+    # Undo with a null current mask must not raise AttributeError. The popped
+    # previous mask is still returned (there is just no current to swap into
+    # the redo branch).
+    result = history.undo(
+        current_mask=None,
+        current_img=np.zeros((4, 4, 3), dtype=np.uint8),
+        current_boxes=[],
+    )
+    assert result is not None
+    assert result[0] == "mask"
+    assert result[1] is not None
 
