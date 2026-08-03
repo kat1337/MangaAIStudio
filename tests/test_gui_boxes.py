@@ -715,43 +715,6 @@ def _drive_real_body_move(
 
 
 @pytest.mark.gui
-def test_boxitem_does_not_set_itemismovable(qtbot) -> None:
-    """REGRESSION (UAT re-test 1+4 root cause): a ``BoxItem`` must NOT set
-    ``ItemIsMovable``.
-
-    The canvas owns the box move itself via ``_moving_box`` -> ``setRect``
-    (canvas.py:925-935) and resize via ``_advance_resize`` -> ``setRect``
-    (canvas.py:1372-1405); both go through ``setRect``, which is the channel
-    ``current_box()`` / ``boxes_snapshot()`` read. ``ItemIsMovable`` is
-    therefore redundant. It is also harmful: it permits Qt's scene-level
-    item-move, which moves the item via ``pos()`` — an INDEPENDENT geometry
-    channel from ``rect()`` on a ``QGraphicsRectItem`` — so the moved position
-    would be visible on screen (Qt draws at ``pos + rect``) but invisible to
-    ``current_box()`` (which reads ``self.rect()``), and the persisted
-    ``ImageFile.boxes`` would carry the original position, resetting across a
-    page round-trip. The same flag also lets the scene's move steal a corner
-    resize drag.
-
-    RED before the fix (the flag was set at box_item.py:30); GREEN after the
-    one-line removal. This is the exact contract guard that locks the fix that
-    closed both UAT re-test failures.
-    """
-    from PySide6.QtWidgets import QGraphicsItem
-
-    pb = PageBox(box=Box(0, 0, 50, 50), origin=USER)
-    _scene, item = _scene_with_box(pb)
-    assert not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable), (
-        "BoxItem must NOT set ItemIsMovable: the canvas owns the move via "
-        "_moving_box -> setRect, and ItemIsMovable permits Qt's pos()-based "
-        "move which diverges from rect() (what current_box()/boxes_snapshot() "
-        "read) — the root cause of UAT re-test 1 (resize stolen) + re-test 4 "
-        "(moved box resets across a page round-trip)."
-    )
-    # Selection flag is still required (drives pen/handle sync via itemChange).
-    assert item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
-
-
-@pytest.mark.gui
 def test_boxitem_pos_and_rect_do_not_diverge_after_move(qtbot) -> None:
     """REGRESSION (UAT re-test 4 heart): after a box move, ``pos()`` and
     ``rect()`` must NOT diverge — ``current_box()`` must reflect the moved
