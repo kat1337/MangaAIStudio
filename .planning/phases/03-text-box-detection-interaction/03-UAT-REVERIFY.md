@@ -29,7 +29,14 @@ awaiting: user response
 
 ### 1. Resize corner-drag now works (was: does nothing)
 expected: Click+drag a corner handle resizes the box; opposite corner stays fixed; clamps at a small minimum. The visible handle stays the small 8x8 square (only the invisible hit area enlarged).
-result: [pending]
+result: issue
+reported: "box does not resize, fail"
+severity: major
+diagnosed: true
+root_cause: "The 03-06 hit-target fix shipped correctly (_HANDLE_HIT_SIZE=18, shape()+boundingRect() both return the 18px rect; offscreen probe confirms itemAt now returns CornerHandle and _begin_resize arms _resizing_box). The handlers themselves are correct (_advance_resize recomputes rect with opposite corner anchored + MIN_BOX_SIZE clamp; _commit_resize finalizes). The REAL defect: BoxItem sets ItemIsMovable (box_item.py:30) — Qt's scene-level item-move machinery then steals the mouse-drag flow on the next mouseMoveEvent, preempting _advance_resize. The canvas implements its OWN move via _moving_box (canvas.py:925-935: computes delta, setRect), so ItemIsMovable is BOTH redundant AND harmful. When the user grabs a corner, _begin_resize arms _resizing_box, but Qt's built-in move on the parent BoxItem takes over the drag → the resize never advances → 'box does not resize.' The offscreen suite missed this because tests call _begin_resize/_advance_resize DIRECTLY, bypassing Qt's scene event delivery. This is why 03-06's fix (hit area) was necessary but not sufficient — it fixed the hit-test, but the move-vs-resize event conflict remained."
+fix_direction: "Remove ItemIsMovable from BoxItem (box_item.py:30) — the canvas already owns move via _moving_box. Keep ItemIsSelectable (needed for selection/handles) and ItemSendsGeometryChanges. After removal, Qt's scene will no longer steal the drag, so _resizing_box (resize) and _moving_box (move) both receive the move events as the canvas's mouseMoveEvent intends. Add a regression test that synthesizes a REAL Qt press/move/release event sequence (not a direct _advance_resize call) on a corner handle and asserts the rect changed — this is the test gap that let the bug ship. Expect this same fix to resolve the live move path too (current move also competes with ItemIsMovable, though less visibly because both move the box). Re-run re-test 1 after fix."
+artifacts: [manga_ai_studio/gui/box_item.py (line 30 ItemIsMovable), manga_ai_studio/gui/canvas.py (_select_and_begin_move, mouseMoveEvent, _advance_resize)]
+verification: "Offscreen probe: itemAt returns CornerHandle at corner point; _begin_resize arms _resizing_box=True, corner=BR, start rect captured. Static read: handlers correct. Live failure explained by ItemIsMovable event interception (cannot reproduce offscreen because direct handler calls bypass Qt scene event delivery)."
 
 ### 2. 3rd undo no longer wipes all boxes (was: all detected boxes vanish)
 expected: After detect + move a box + inpaint, Ctrl+Z undoes the inpaint, Ctrl+Z undoes the box move (box snaps back, detected boxes stay), further Ctrl+Z continues sensibly — NOT "all boxes disappear" on the 3rd press.
@@ -47,10 +54,19 @@ result: [pending]
 
 total: 4
 passed: 0
-issues: 0
-pending: 4
+issues: 1
+pending: 3
 skipped: 0
 
 ## Gaps
 
-[none yet]
+- truth: "User can resize a text box by dragging its corner handle (TEXT-03) — persists after 03-06 fix"
+  status: failed
+  reason: "User reported (re-test 1): box does not resize, fail. The 03-06 hit-target fix was necessary but not sufficient."
+  severity: major
+  test: 1
+  diagnosed: true
+  root_cause: "BoxItem sets ItemIsMovable (box_item.py:30). Qt's scene-level item-move machinery then steals the mouse-drag on the next mouseMoveEvent, preempting _advance_resize. The canvas implements its OWN move via _moving_box (canvas.py:925-935), so ItemIsMovable is both redundant and harmful. The 03-06 fix enlarged the hit area (so the press now correctly arms _resizing_box), but Qt's built-in move on the parent BoxItem takes over the drag, so the resize never advances. Offscreen tests missed it because they call _begin_resize/_advance_resize directly, bypassing Qt scene event delivery."
+  fix_direction: "Remove ItemIsMovable from BoxItem. Keep ItemIsSelectable + ItemSendsGeometryChanges. Add a REAL-event regression test (synthesize press/move/release via Qt event delivery, not direct handler calls) asserting a corner-drag changes the rect. Likely also clarifies the live move path."
+  artifacts: [manga_ai_studio/gui/box_item.py, manga_ai_studio/gui/canvas.py]
+  missing: []
