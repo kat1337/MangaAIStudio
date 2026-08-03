@@ -4,11 +4,11 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
-status: executing
-stopped_at: Completed 03-08-PLAN.md (mask-stroke before-state push + WR-01 null-current guard; UAT test 3 addendum + WR-01 closed; 257 full-suite green)
-last_updated: "2026-07-31T00:00:00Z"
-last_activity: 2026-07-31
-last_activity_desc: Phase 03 plan 03-08 (gap-closure) executed
+status: verifying
+stopped_at: "Phase 03 gap-closure done (03-06/07/08): 2 of 4 UAT symptoms closed (detection-undo, mask-undo). 2 remain OPEN and UNDIAGNOSED (resize re-test 1, move-persistence re-test 4) — live-app-only, offscreen tests pass. Previous session's ItemIsMovable diagnosis was WRONG and reverted. HANDOFF: read .planning/phases/03-text-box-detection-interaction/.continue-here.md FIRST (it documents the traps that caused 2 wrong diagnoses). Do NOT diagnose from direct-handler probes. Resume: /gsd-execute-phase 3"
+last_updated: "2026-08-03T12:10:00Z"
+last_activity: 2026-08-03
+last_activity_desc: Phase 03 gap-closure + UAT re-verify; 2 symptoms open, handoff written
 progress:
   total_phases: 5
   completed_phases: 2
