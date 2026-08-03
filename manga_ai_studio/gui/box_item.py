@@ -259,8 +259,32 @@ class BoxItem(QGraphicsRectItem):
         # Above mask_item, below preview_item z=900 / cursor z=1000
         # (UI-SPEC §Z-order).
         self.setZValue(100)
+        # ItemIsSelectable is required for native Qt selection (which drives
+        # pen/handle sync via itemChange + the canvas hit-test dispatch).
+        # ItemIsMovable is INTENTIONALLY NOT set: the canvas owns the box move
+        # itself via ``_moving_box`` -> ``setRect(new_rect)`` + ``_sync_handles()``
+        # (canvas.py:925-935), and resize via ``_advance_resize`` -> ``setRect``
+        # (canvas.py:1372-1405). Both go through ``setRect``, which keeps
+        # ``rect()`` authoritative — the same channel ``current_box()`` /
+        # ``boxes_snapshot()`` read at persistence boundaries.
+        #
+        # If ItemIsMovable WERE set, Qt's scene-level item-move machinery would
+        # move the item by changing ``pos()`` (NOT ``rect()``). For a
+        # ``QGraphicsRectItem`` ``pos()`` and ``rect()`` are INDEPENDENT geometry
+        # channels, so ``current_box()`` (which reads ``self.rect()``) would
+        # materialize the STALE pre-move rect — the moved position would be
+        # visible on screen (Qt draws at ``pos + rect``) but invisible to the
+        # snapshot, and the persisted ``ImageFile.boxes`` would carry the
+        # original position, resetting across a page round-trip (UAT re-test 4).
+        # The same ``ItemIsMovable`` flag also lets the scene's move machinery
+        # steal a corner-handle resize drag (the parent ``BoxItem`` moves instead
+        # of ``_advance_resize`` running) when the press reaches the scene
+        # (UAT re-test 1). The flag is redundant here (the canvas accepts box-
+        # interaction presses and returns before ``super().mousePressEvent()``)
+        # and cannot help — only hurt — so it is removed.
+        # ItemSendsGeometryChanges stays (the hook the canvas uses to commit
+        # box moves to the BOXES undo stack, plan 03-05).
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         # SizeAllCursor over the box body = the move affordance (UI-SPEC §12c).
         self.setCursor(Qt.CursorShape.SizeAllCursor)
