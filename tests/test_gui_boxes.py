@@ -626,3 +626,280 @@ def test_corner_handle_hit_target_covers_offset_zone(qtbot) -> None:
     assert isinstance(body_hit, BoxItem)
     assert not isinstance(body_hit, CornerHandle)
 
+
+# ===========================================================================
+# Plan 03 post-UAT-reverify: BoxItem.ItemIsMovable regression (UAT re-test 1+4)
+# ===========================================================================
+#
+# UAT re-test 1 (resize does nothing) + re-test 4 (moved box resets across a
+# page round-trip) share ONE root cause: ``BoxItem`` set ``ItemIsMovable``
+# (box_item.py:30). ``ItemIsMovable`` is BOTH redundant (the canvas owns the
+# box move itself via ``_moving_box`` -> ``setRect`` + ``_sync_handles``,
+# canvas.py:925-935; and resize via ``_advance_resize`` -> ``setRect``,
+# canvas.py:1372-1405) AND harmful: Qt's scene-level item-move machinery moves
+# the item by changing ``pos()`` (NOT ``rect()``). For a ``QGraphicsRectItem``
+# ``pos()`` and ``rect()`` are INDEPENDENT geometry channels, so
+# ``current_box()`` (which reads ``self.rect()``) materializes the STALE
+# pre-move rect — the moved position is visible on screen (Qt draws at
+# ``pos + rect``) but invisible to the snapshot, and the persisted
+# ``ImageFile.boxes`` carry the original position, resetting across a page
+# round-trip. The same flag also lets the scene's move steal a corner resize
+# drag (the parent ``BoxItem`` moves instead of ``_advance_resize`` running).
+#
+# PROOF (reproduced offscreen): a BoxItem with rect=(10,10,30,30)+pos=(0,0);
+# after setPos(40,40) (what Qt's ItemIsMovable does), pos()=(40,40) but rect()
+# is STILL (10,10,30,30), and current_box() returns the stale (10,10,40,40).
+#
+# TEST-GAP NOTE (why these tests are the regression that did not exist before):
+# the prior GUI tests called ``_begin_resize``/``_advance_resize``/``setRect``
+# DIRECTLY, which bypasses Qt's scene event delivery — so they passed while the
+# live app failed. The strongest feasible approximation is to drive the
+# interactions through REAL Qt event delivery (``QTest.mousePress/Move/Release``
+# on the viewport, the same primitive pytest-qt's ``qtbot.mousePress`` wraps)
+# so the ``ItemIsMovable`` flag actually participates in event resolution. In
+# offscreen Qt the canvas's ``mousePressEvent`` accepts box-interaction presses
+# and returns before ``super().mousePressEvent()`` (so the scene's grabber stays
+# clear and the flag is inert for the resize/move themselves); nonetheless these
+# tests lock the contract that (a) the flag is absent (the exact one-line fix),
+# (b) the pos()/rect() channels never diverge for a moved box, and (c) a
+# corner-drag and a body-drag driven through real events both land geometry on
+# ``rect()`` (the channel persistence reads). If a future change re-adds the
+# flag OR routes moves through ``pos()``, ``current_box()`` would diverge and
+# these tests would catch it.
+
+
+def _drive_real_corner_resize(
+    qtbot, canvas: EditorCanvas, item: BoxItem, from_scene: tuple[float, float], to_scene: tuple[float, float]
+) -> None:
+    """Drive a REAL Qt corner-handle resize via ``QTest.mousePress/Move/Release``
+    on the canvas viewport (the same primitive ``qtbot.mousePress`` wraps).
+
+    Maps scene coords to viewport coords and delivers the full press/move/
+    release sequence through Qt's real event machinery so the
+    ``ItemIsMovable``/selection flags actually participate in resolution.
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    vp = canvas.viewport()
+    vp_from = canvas.mapFromScene(QPointF(*from_scene))
+    vp_to = canvas.mapFromScene(QPointF(*to_scene))
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_from.x(), vp_from.y()))
+    QTest.mouseMove(vp, QPoint(vp_to.x(), vp_to.y()))
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_to.x(), vp_to.y()))
+    QApplication.processEvents()
+
+
+def _drive_real_body_move(
+    qtbot, canvas: EditorCanvas, item: BoxItem, from_scene: tuple[float, float], to_scene: tuple[float, float]
+) -> None:
+    """Drive a REAL Qt body-drag move via ``QTest.mousePress/Move/Release`` on
+    the canvas viewport (real event delivery, NOT a direct ``setRect``).
+
+    The ``item`` arg is retained for parity with the resize helper + future
+    assertion convenience; the move resolves the box via the scene hit-test at
+    ``from_scene`` (which the canvas dispatch routes to ``_select_and_begin_move``).
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    vp = canvas.viewport()
+    vp_from = canvas.mapFromScene(QPointF(*from_scene))
+    vp_to = canvas.mapFromScene(QPointF(*to_scene))
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_from.x(), vp_from.y()))
+    QApplication.processEvents()
+    QTest.mouseMove(vp, QPoint(vp_to.x(), vp_to.y()))
+    QApplication.processEvents()
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_to.x(), vp_to.y()))
+    QApplication.processEvents()
+
+
+@pytest.mark.gui
+def test_boxitem_does_not_set_itemismovable(qtbot) -> None:
+    """REGRESSION (UAT re-test 1+4 root cause): a ``BoxItem`` must NOT set
+    ``ItemIsMovable``.
+
+    The canvas owns the box move itself via ``_moving_box`` -> ``setRect``
+    (canvas.py:925-935) and resize via ``_advance_resize`` -> ``setRect``
+    (canvas.py:1372-1405); both go through ``setRect``, which is the channel
+    ``current_box()`` / ``boxes_snapshot()`` read. ``ItemIsMovable`` is
+    therefore redundant. It is also harmful: it permits Qt's scene-level
+    item-move, which moves the item via ``pos()`` — an INDEPENDENT geometry
+    channel from ``rect()`` on a ``QGraphicsRectItem`` — so the moved position
+    would be visible on screen (Qt draws at ``pos + rect``) but invisible to
+    ``current_box()`` (which reads ``self.rect()``), and the persisted
+    ``ImageFile.boxes`` would carry the original position, resetting across a
+    page round-trip. The same flag also lets the scene's move steal a corner
+    resize drag.
+
+    RED before the fix (the flag was set at box_item.py:30); GREEN after the
+    one-line removal. This is the exact contract guard that locks the fix that
+    closed both UAT re-test failures.
+    """
+    from PySide6.QtWidgets import QGraphicsItem
+
+    pb = PageBox(box=Box(0, 0, 50, 50), origin=USER)
+    _scene, item = _scene_with_box(pb)
+    assert not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable), (
+        "BoxItem must NOT set ItemIsMovable: the canvas owns the move via "
+        "_moving_box -> setRect, and ItemIsMovable permits Qt's pos()-based "
+        "move which diverges from rect() (what current_box()/boxes_snapshot() "
+        "read) — the root cause of UAT re-test 1 (resize stolen) + re-test 4 "
+        "(moved box resets across a page round-trip)."
+    )
+    # Selection flag is still required (drives pen/handle sync via itemChange).
+    assert item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+
+
+@pytest.mark.gui
+def test_boxitem_pos_and_rect_do_not_diverge_after_move(qtbot) -> None:
+    """REGRESSION (UAT re-test 4 heart): after a box move, ``pos()`` and
+    ``rect()`` must NOT diverge — ``current_box()`` must reflect the moved
+    position.
+
+    This is the proven defect: with ``ItemIsMovable`` set, a Qt move changes
+    ``pos()`` but leaves ``rect()`` at the original, so ``current_box()``
+    (which reads ``self.rect()``) materializes the STALE pre-move rect. PROVEN
+    offscreen: rect=(10,10,30,30)+pos=(0,0); after setPos(40,40), pos()=(40,40)
+    but rect() is still (10,10,30,30) and current_box() returns (10,10,40,40).
+    The canvas moves via ``_moving_box`` -> ``setRect`` (so this holds today),
+    but this test locks the invariant: ``pos()`` stays at the origin AND
+    ``current_box()`` equals the on-screen position, so any future change that
+    routes moves through ``pos()`` (re-adding ``ItemIsMovable`` or a manual
+    ``setPos``) is caught immediately.
+    """
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _add_user_box(canvas, Box(20, 20, 80, 80))  # scene rect (20,20)-(80,80)
+
+    # Drive a real body-drag move through Qt event delivery (NOT setRect).
+    _drive_real_body_move(qtbot, canvas, item, (50.0, 50.0), (100.0, 100.0))
+
+    # The move channel must be setRect (pos stays at origin) — NOT Qt's pos().
+    assert item.pos().x() == 0.0 and item.pos().y() == 0.0, (
+        "pos() must stay at the origin: the canvas moves the box via setRect "
+        "(canvas.py:934), NOT via Qt's ItemIsMovable pos()-based move. A "
+        "non-origin pos() means the move went through pos() (the UAT re-test 4 "
+        "defect channel) and current_box() will diverge from the screen."
+    )
+    # current_box() must reflect the MOVED position (the snapshot channel).
+    moved = item.current_box()
+    assert (moved.x1, moved.y1) == (70, 70), (
+        f"current_box() must reflect the moved position (70,70); got "
+        f"({moved.x1},{moved.y1}). If it returns the ORIGINAL (20,20), the "
+        f"move went through pos() (invisible to rect()) — UAT re-test 4."
+    )
+    assert (moved.x2, moved.y2) == (130, 130)
+
+
+@pytest.mark.gui
+def test_corner_resize_via_real_qtest_events_changes_rect(qtbot) -> None:
+    """REGRESSION (UAT re-test 1): a corner-handle drag driven through REAL Qt
+    event delivery (``QTest.mousePress/Move/Release`` on the viewport) must
+    change the BoxItem's ``rect()``.
+
+    The prior tests called ``_begin_resize``/``_advance_resize`` directly,
+    bypassing Qt's scene event delivery — so they passed while the live app's
+    resize did nothing (the documented defect: ``ItemIsMovable`` let the
+    scene's move machinery steal the drag). This test drives the FULL press/
+    move/release sequence through ``QTest`` (the same primitive pytest-qt's
+    ``qtbot.mousePress`` wraps) so the ``ItemIsMovable`` flag participates in
+    event resolution. With the flag removed the canvas's ``_advance_resize``
+    path owns the drag and ``rect()`` changes; the test locks that contract.
+
+    (In offscreen Qt the canvas's ``mousePressEvent`` accepts box presses and
+    returns before ``super().mousePressEvent()``, so the scene's grabber stays
+    clear and the resize is owned by ``_advance_resize`` regardless of the
+    flag; the live-app failure under hardware input is the behavior this test
+    guards against regressing.)
+    """
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    # Box (50,50)-(150,150); BR corner at scene (150,150).
+    item = _add_user_box(canvas, Box(50, 50, 150, 150))
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    rect_before = QRectF(item.rect())
+    # Drag the BR corner out to (180,180) -> box grows to (50,50)-(180,180).
+    _drive_real_corner_resize(qtbot, canvas, item, (150.0, 150.0), (180.0, 180.0))
+
+    rect_after = QRectF(item.rect())
+    assert rect_after != rect_before, (
+        "A real corner-handle drag must change the BoxItem rect() — the canvas "
+        "mousePressEvent -> _begin_resize -> _advance_resize -> setRect path "
+        "must own the drag (UAT re-test 1: 'box does not resize')."
+    )
+    # The TL corner is anchored; only the BR edge moved (width+height grew).
+    assert int(rect_after.x()) == 50 and int(rect_after.y()) == 50, (
+        "the opposite (TL) corner must stay anchored during a BR resize"
+    )
+    assert rect_after.width() > rect_before.width() and rect_after.height() > rect_before.height()
+
+
+@pytest.mark.gui
+def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
+    """REGRESSION (UAT re-test 4): a box moved via REAL Qt event delivery
+    (``QTest`` press/move/release on the viewport — NOT a direct ``setRect``)
+    must persist its MOVED position across a page round-trip.
+
+    The 03-07 executor's probe passed because it simulated the move via
+    ``setRect`` (updates ``rect()``); the live app moves through Qt's
+    ``ItemIsMovable`` (updates ``pos()``), which diverges from ``rect()`` — so
+    ``boxes_snapshot()`` materializes the stale rect and the persisted boxes
+    carry the original position. This test drives the move through REAL Qt
+    events (the closest offscreen approximation to the live path), then drives
+    the real ``on_page_selected`` round-trip, and asserts the restored box is
+    at the MOVED position, not the original.
+    """
+    from manga_ai_studio.gui.main_window import MainWindow
+
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+
+    # Two real PNG pages so the round-trip can navigate A -> B -> A.
+    from PIL import Image as PILImage
+
+    page_a = tmp_path / "page_a.png"
+    page_b = tmp_path / "page_b.png"
+    PILImage.new("RGB", (120, 120), color=(200, 200, 200)).save(page_a)
+    PILImage.new("RGB", (120, 120), color=(180, 180, 180)).save(page_b)
+    window._load_folder(tmp_path)
+    assert window._current_page_index() == 0
+    window.show()
+    window.canvas.viewport().setFocus(Qt.FocusReason.MouseFocusReason)
+    QApplication.processEvents()
+
+    # Seed one user box at scene (20,20)-(80,80) — center at (50,50).
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([PageBox(box=Box(20, 20, 80, 80), origin=USER)], [])
+    finally:
+        window._suppress_boxes_push = False
+    item = window.canvas._box_items[0]
+    QApplication.processEvents()
+
+    # Drive a real body-drag move (50,50) -> (100,100): box lands at (70,70)-(130,130).
+    _drive_real_body_move(qtbot, window.canvas, item, (50.0, 50.0), (100.0, 100.0))
+    moved_now = item.current_box().as_tuple
+    assert moved_now == (70, 70, 130, 130), (
+        f"precondition: the real-event move must land the box at (70,70,130,130); "
+        f"got {moved_now} (if this is the original (20,20,80,80) the move went "
+        f"through pos() — the UAT re-test 4 defect)."
+    )
+
+    # Round-trip A -> B -> A through the REAL on_page_selected seam.
+    window.file_table.select_path(page_b)
+    window.on_page_selected(page_b)
+    assert not window.canvas.has_boxes()
+    window.file_table.select_path(page_a)
+    window.on_page_selected(page_a)
+
+    restored = window.canvas.boxes_snapshot()
+    assert len(restored) == 1, f"the box must survive the round-trip; got {len(restored)}"
+    assert restored[0].box.as_tuple == (70, 70, 130, 130), (
+        "UAT re-test 4: the MOVED position (70,70,130,130) must persist across "
+        f"the round-trip; got {restored[0].box.as_tuple}. If this is the ORIGINAL "
+        "(20,20,80,80), the move was visible on screen (pos+rect) but the snapshot "
+        "materialized the stale rect() — the ItemIsMovable root cause."
+    )
+
