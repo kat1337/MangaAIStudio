@@ -1,13 +1,15 @@
 ---
 phase: 03-text-box-detection-interaction
-verified: 2026-07-29T16:45:00Z
-status: human_needed
+verified: 2026-08-04T03:55:00Z
+status: passed
 score: 8/8 must-haves verified
-behavior_unverified: 4
+behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: none
-  mode: initial
+  previous_status: human_needed
+  mode: post_uat
+  previous_verified: 2026-07-29T16:45:00Z
+  note: "Re-verified 2026-08-04 after post-gap-closure cursor-overlay fix + user live UAT. The 4 human_verification items below were confirmed by the user in 03-UAT-REVERIFY.md (4/4 pass). status canonicalized human_needed -> passed per verify-work complete_session (zero UAT issues)."
 human_verification:
   - test: "Launch app, open a manga chapter text page, press D (Detect Text) with Detect Boxes on. Confirm green boxes appear over detected text regions and overlay auto-toggles on."
     expected: "Green (#5fd068) BoxItems render over each detected text region; box overlay action auto-checks; mask also appears (Phase 1)."
@@ -43,13 +45,13 @@ behavior_unverified_items:
 # Phase 3: Text Box Detection & Interaction — Verification Report
 
 **Phase Goal:** User can detect text boxes as first-class editable objects (not pixel masks) and correct detection errors by selecting, moving, resizing, and deleting boxes on the canvas, with per-page persistence and a unified undo over mask/image/box ops.
-**Verified:** 2026-07-29T16:45:00Z
-**Status:** human_needed
-**Re-verification:** No — initial verification (no prior VERIFICATION.md with `gaps:` section)
+**Verified:** 2026-08-04T03:55:00Z
+**Status:** passed
+**Re-verification:** Yes — canonicalized from `human_needed` → `passed` on 2026-08-04 after the 4 deferred human-verification items were confirmed by user live UAT (03-UAT-REVERIFY.md, 4/4 pass) and a post-gap-closure fix (brush cursor overlay root cause; see .planning/debug/resolved/box-resize-move.md).
 
 ## Goal Achievement
 
-The phase goal is structurally achieved in code: TEXT-01 (detect → editable boxes) and TEXT-03 (select/move/resize/delete) are delivered by real, tested implementations, plus the two cross-cutting supports (per-page persistence + unified undo collapse). The CR-01 BLOCKER from code review (box edits were never pushed to the undo stack) is RESOLVED — verified by reading the wiring and by running the two dedicated regression tests. The remaining gaps are human-verification items (visual detection quality, real-artwork legibility, live interleaved undo feel) that grep/tests cannot judge, so the overall status is `human_needed` (not `passed`).
+The phase goal is structurally achieved in code: TEXT-01 (detect → editable boxes) and TEXT-03 (select/move/resize/delete) are delivered by real, tested implementations, plus the two cross-cutting supports (per-page persistence + unified undo collapse). The CR-01 BLOCKER from code review (box edits were never pushed to the undo stack) is RESOLVED — verified by reading the wiring and by running the two dedicated regression tests. The deferred human-verification items (visual detection quality, real-artwork legibility, live interleaved undo feel) were confirmed by user live UAT on 2026-08-04 (03-UAT-REVERIFY.md 4/4 pass), so the overall status is `passed`.
 
 ### Observable Truths
 
@@ -183,9 +185,9 @@ The automated suite (248 green, including 16 CR-01 regression tests) verifies th
 
 **No structural gaps.** All 8 must-have truths are verified in code, all 9 required artifacts are substantive and wired, all 6 key links are wired, TEXT-01 and TEXT-03 are satisfied by real implementations (not just marked complete), the CR-01 BLOCKER is resolved (commits 2dd7a9b test-first, ad7b19d fix; orchestrator deviation scrutiny corroborated), and the vendored security surface is clean. The 5 open warnings from code review are advisory and do not block the phase goal.
 
-The phase is held at `human_needed` (not `passed`) because the deferred end-of-phase human checkpoints (plans 03-03/04/05) cover perception judgments and real-CTD-model runtime behavior that the offscreen automated suite cannot make: real-artwork detection quality, green/amber legibility, live interleaved undo feel, and persistence round-trip on real navigation. These were auto-deferred under `human_verify_mode=end-of-phase` and route to the `{phase_num}-UAT.md` path for manual confirmation before the phase ships.
+The phase is `passed` (canonicalized from `human_needed` on 2026-08-04). The deferred end-of-phase human checkpoints (plans 03-03/04/05) — real-artwork detection quality, green/amber legibility, live interleaved undo feel, and persistence round-trip on real navigation — were confirmed by user live UAT (03-UAT-REVERIFY.md 4/4 pass). A post-gap-closure fix for two live-only box-interaction bugs (brush cursor overlay swallowed the hit-test) is documented in .planning/debug/resolved/box-resize-move.md and regression-guarded.
 
 ---
 
-_Verified: 2026-07-29T16:45:00Z_
-_Verifier: Claude (gsd-verifier)_
+_Verified: 2026-08-04T03:55:00Z (re-verified; initial 2026-07-29T16:45:00Z)_
+_Verifier: Claude (gsd-verifier) + user live UAT_

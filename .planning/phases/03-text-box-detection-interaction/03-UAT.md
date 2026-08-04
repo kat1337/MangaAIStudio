@@ -1,16 +1,17 @@
 ---
-status: complete
+status: superseded
+superseded_by: 03-UAT-REVERIFY.md
 phase: 03-text-box-detection-interaction
 source: [03-VERIFICATION.md, 03-01..05-SUMMARY.md]
 started: 2026-07-29T17:00:00Z
-updated: 2026-07-29T18:30:00Z
+updated: 2026-08-04T03:50:00Z
 mode: standard
-note: "Goal is not in User-Story format; user opted for standard (non-MVP) UAT. 4 human-verification items sourced from 03-VERIFICATION.md. Result: 1 pass, 3 major issues (2 confirmed-diagnosed, 1 partial + 1 Phase-1 mask regression undiagnosed). All 4 tests have a definitive result."
+note: "Initial UAT (1 pass / 3 issues). The 3 issues were addressed by gap-closure plans 03-06/07/08 and the post-gap-closure cursor-overlay fix. SUPERSEDED by 03-UAT-REVERIFY.md, which is the authoritative post-fix record (4/4 pass as of 2026-08-04, user live-confirmed). This file is retained for traceability only; do not treat its issue results as open."
 ---
 
 ## Current Test
 
-[testing complete — 1 pass, 3 issues; proceeding to gap-closure]
+[superseded by 03-UAT-REVERIFY.md — see that file for the current post-fix status]
 
 ## Tests
 
@@ -21,17 +22,18 @@ note: Detection + green boxes work; box overlay toggles on. (Separate observatio
 
 ### 2. Alt+drag create + move + resize + delete + Esc
 expected: Amber (#f5a623) dashed preview during drag; amber border + 3px selected stroke + tinted fill + 4 corner handles (8x8 viewport px); fluent move; corner resize clamps at ~8x8 scene px; Delete removes instantly with no dialog (D-12); Esc deselects.
-result: issue
+result: pass
 reported: "boxes cannot be resized either, clicking on the corner and dragging does nothing"
 severity: major
 diagnosed: true
 root_cause: "Corner resize hit-target is too small / mis-positioned. The CornerHandle is an 8x8 viewport-px square centered ON the box corner, so ~half of it sits outside the box (reads as background/pixmap -> no-op) and the inner half overlaps the BoxItem body (-> triggers a move, not a resize). A grid probe of `scene.itemAt` around the BR handle at 1:1 zoom returns CornerHandle only for a ~6x6 central region and BoxItem/pixmap for everything at +-6px offset. The dispatch logic (canvas.py:859-864) is correct in scene coords; the problem is that an 8px affordance centered on a corner is practically unhittable on real artwork at production zoom. GUI tests pass because they synthesize clicks at the exact computed handle centre. NOT a CR-01 regression."
 fix_direction: "Enlarge the effective hit area without enlarging the visual handle — e.g. give CornerHandle a larger invisible hit rect (a child QGraphicsRectItem with no pen/brush, or override shape() to return a ~16-20px rect), or apply a small-radius tolerance in the canvas hit-test (itemAt with a 3-4px margin / check handle brect explicitly before falling to BoxItem). Re-run UAT test 2 after fix."
 artifacts: [manga_ai_studio/gui/box_item.py (CornerHandle), manga_ai_studio/gui/canvas.py:853-876 (hit-test dispatch)]
+resolution: "RESOLVED. This issue (initially a too-small hit target) was addressed by 03-06 (enlarged invisible hit area), then a further gap-closure fix (brush cursor overlay swallowed the hit-test; see .planning/debug/resolved/box-resize-move.md) closed the remaining live-app resize failure. Re-verified in 03-UAT-REVERIFY.md test 1 (pass). User live UAT 2026-08-04 confirmed."
 
 ### 3. Unified undo ordering (Ctrl+Z x3) + status feedback
 expected: On a page with a mask stroke + a box move + an inpaint, Ctrl+Z three times reverses ops in chronological order (inpaint -> box move -> mask edit); status bar flashes "Undo: {op}" for ~3s each.
-result: issue
+result: pass
 reported: "First Ctrl+Z inpainting undone. Second Ctrl+Z brush comes back. Third Ctrl+Z ALL boxes from automatic detection disappear including the one I moved."
 severity: major
 diagnosed: true
@@ -39,10 +41,11 @@ root_cause: "The unified-timeline ORDERING is actually correct (image -> boxes -
 fix_direction: "Two-part fix. (1) Make detection a NON-undoable seeding event: in _build_detected_boxes, suppress the boxes_modified push hook around the detection set_boxes (it already has a _suppress_boxes_push guard for the restore path — extend it to the detection apply), so detection establishes the baseline WITHOUT pushing an empty entry; then the first user box edit pushes against that baseline. This mirrors how mask strokes are individually undoable but the initial mask presence is not. (2) Re-verify the cross-store stamp ordering against the user's mental model (inpaint > box-move > mask-stroke) — it matched here, but confirm status-bar labels say 'Undo: box move' etc. so the ordering is legible. Re-run UAT test 3 after fix."
 artifacts: [manga_ai_studio/gui/main_window.py (_build_detected_boxes, _on_boxes_modified), manga_ai_studio/gui/canvas.py (set_boxes emit)]
 verification: "Reproduced via throwaway probe simulating detect->move->inpaint then undo x3 with history.undo(); undo#3 returned a 0-box snapshot (the empty pre-detection entry), confirming the empty-push."
+resolution: "RESOLVED by 03-07 (detection is a non-undoable baseline; empty pre-detection push removed). Re-verified in 03-UAT-REVERIFY.md test 2 (pass). User live UAT 2026-08-04 confirmed."
 
 ### 4. Per-page persistence round-trip + Ctrl+Z recover deleted box
 expected: Detect boxes on page 1; Alt+drag a user box; delete a detected box. Switch to page 2, back to page 1. All box edits survive. Then delete a box and Ctrl+Z to confirm it recovers (D-12 safety).
-result: issue
+result: pass
 reported: "Pass on box EXISTENCE surviving the round-trip, BUT moving a box resets it to its original location — including drawn (user) boxes, not just detected ones. So positions don't persist; only presence does."
 severity: major
 diagnosed: partial
@@ -50,12 +53,13 @@ root_cause: "SUSPECTED, not yet live-confirmed (probe fixture tripped on on_page
 fix_direction: "Diagnose in gap-closure: add a real probe that moves a BoxItem via the live move-commit path (not setRect directly), triggers on_page_selected round-trip, and inspects both the persisted ImageFile.boxes positions AND the restored canvas positions. Likely fix is on the snapshot-read side (ensure boxes_snapshot always materializes from live rect, never from a stored PageBox) OR the move-commit side (ensure the before-snapshot is push-only and never written back to canvas)."
 artifacts: [manga_ai_studio/gui/main_window.py (on_page_selected Step 1b/4b), manga_ai_studio/gui/canvas.py (boxes_snapshot, move-commit), manga_ai_studio/gui/box_item.py (current_box)]
 note_on_second_half: "The 'Ctrl+Z recovers a deleted box' half overlaps with Test 3's undo defect and was not separately verified."
+resolution: "RESOLVED. The move-persistence half was closed by the post-gap-closure cursor-overlay fix (the brush cursor swallowed the box hit-test so _moving_box never armed -> moved position never snapshotted; see .planning/debug/resolved/box-resize-move.md). The Ctrl+Z-recover-deleted-box half is covered by Test 3's resolution (03-07) plus existing tests. Re-verified in 03-UAT-REVERIFY.md test 4 (pass). User live UAT 2026-08-04 confirmed."
 
 ## Summary
 
 total: 4
-passed: 1
-issues: 3
+passed: 4
+issues: 0
 pending: 0
 skipped: 0
 
