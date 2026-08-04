@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 03
-current_phase_name: text-box-detection-interaction
-status: ready_to_verify
-stopped_at: "Phase 03: both open UAT bugs (resize re-test 1, move-persistence re-test 4) FIXED and CONFIRMED by user live UAT 2026-08-04. Root cause: brush cursor overlay (z=1000) swallowed the box hit-test in mousePressEvent, so neither _moving_box nor _resizing_box ever armed. Fix: new _box_item_at() filters scene hits to CornerHandle/BoxItem only (ignores cursor_item/preview_item); ItemIsMovable removed (canvas-owned setRect is now sole geometry channel). 263 tests pass incl. 2 new cursor-overlay regression tests. All 4 UAT re-verify symptoms now closed (detection-undo, mask-undo earlier; resize, move-persistence now). RCA in .planning/debug/resolved/box-resize-move.md. NEXT: /gsd-verify-phase 3 (or /gsd:code-review 3 then verify)."
-last_updated: "2026-08-04T03:40:00Z"
+current_phase: 4
+current_phase_name: OCR Recognition & Text Editing
+status: ready_to_plan
+stopped_at: "Phase 03 COMPLETE (2026-08-04): all 8 plans executed, 4/4 UAT pass (user live-confirmed), goal-verification passed, 263 tests green. Two post-gap-closure live-only bugs (box resize + move-persistence) fixed via single root cause (brush cursor overlay swallowed the hit-test) — RCA in .planning/debug/resolved/box-resize-move.md. SECURITY: secure-phase gate skipped by user decision — security surface already audited PASS inside 03-VERIFICATION.md (no eval/exec/pickle/subprocess; clean vendored files; ost guard present); no standalone 03-SECURITY.md produced. NEXT: /gsd-plan-phase 4 (OCR Recognition & Text Editing)."
+last_updated: "2026-08-04T04:10:00Z"
 last_activity: 2026-08-04
-last_activity_desc: Phase 03 box resize+move bugs fixed + UAT-confirmed; ready to verify
+last_activity_desc: Phase 03 complete, transitioned to Phase 4
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 19
   completed_plans: 19
-  percent: 40
+  percent: 60
 ---
 
 # Project State
@@ -24,22 +24,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 03 — text-box-detection-interaction
+**Current focus:** Phase 4 — OCR Recognition & Text Editing
 
 ## Current Position
 
-Phase: 03 (text-box-detection-interaction) — AWAITING LIVE UAT
-Plan: 8 of 8 (all executed) + post-plan bug fix (box resize/move cursor-overlay root cause)
-Status: All Phase 03 plans executed (8/8); gap-closure waves complete; 2 open UAT bugs from re-verification now FIXED (root cause: brush cursor overlay swallowed box hit-test). Awaiting user live-app UAT confirmation, then post-execution (code-review → verify_phase_goal → phase.complete).
-Last activity: 2026-08-04 — box resize/move bugs fixed; RCA in .planning/debug/resolved/box-resize-move.md
+Phase: 4 — OCR Recognition & Text Editing
+Plan: Not started
+Status: Phase 03 COMPLETE and transitioned. All 8 plans executed; 4/4 UAT pass (user live-confirmed 2026-08-04); goal-verification passed; 263 tests green. Post-gap-closure box resize/move bugs fixed (root cause: brush cursor overlay swallowed hit-test; RCA in .planning/debug/resolved/box-resize-move.md). Ready to plan Phase 4.
+Last activity: 2026-08-04 — Phase 03 complete, transitioned to Phase 4
 
-Progress: [██████████] 100%
+Progress: [█████░░░░░] 60% (3/5 phases)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 12
+- Total plans completed: 20
 - Average duration: 15 min
 - Total execution time: 0.25 hours
 
@@ -54,6 +54,7 @@ Progress: [██████████] 100%
 | 5. Project Persistence, Image Ops & Export | 0 | — | — |
 | 01 | 7 | - | - |
 | 02 | 4 | - | - |
+| 03 | 8 | - | - |
 
 **Recent Trend:**
 

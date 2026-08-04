@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Cleaning Workspace** - Open/navigate pages, detect masks, edit masks, run LaMa inpainting, undo/redo (PanelCleaner + MangaCleaner_GPU foundation) (completed 2026-07-21)
 - [x] **Phase 2: Cleaning Output & Batch** - Export cleaned pages as PNG/JPG and batch-process a chapter through cleaning (completed 2026-07-26)
-- [ ] **Phase 3: Text Box Detection & Interaction** - Detect text boxes as editable objects and select/move/resize/delete them
+- [x] **Phase 3: Text Box Detection & Interaction** - Detect text boxes as editable objects and select/move/resize/delete them (completed 2026-08-04)
 - [ ] **Phase 4: OCR Recognition & Text Editing** - Draw-to-OCR regions, correct recognized text, add manual translations
 - [ ] **Phase 5: Project Persistence, Image Ops & Export** - Save/resume .mas projects, basic image operations, export _ocr.json
 
@@ -195,7 +195,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
-| 3. Text Box Detection & Interaction | 8/8 | In Progress|  |
+| 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
 | 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
