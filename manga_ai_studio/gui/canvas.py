@@ -27,9 +27,11 @@ Security:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -861,7 +863,21 @@ class EditorCanvas(QGraphicsView):
             and event.button() == Qt.MouseButton.LeftButton
         ):
             scene_pos = self._scene_pos(event)
-            item = self._scene.itemAt(scene_pos, self.transform())
+            # Hit-test WITHOUT passing the view's zoom transform. Passing
+            # self.transform() here (the zoom) makes QGraphicsScene's BSP
+            # coarse pass return the parent BoxItem instead of the child
+            # CornerHandle at zoom >= ~3.5, which arms a MOVE where the user
+            # expects a RESIZE (UAT re-test 1 / debug box-resize-move). The
+            # handles use ItemIgnoresTransformations, so querying in scene
+            # coords with the IDENTITY transform returns the topmost item by
+            # z (handle z=150 > box z=100) correctly at every zoom.
+            # ``cursor_item`` and ``preview_item`` intentionally sit above
+            # boxes for rendering.  A raw ``itemAt`` therefore reports the
+            # brush cursor whenever it is following the mouse, preventing the
+            # box interaction from ever arming.  Search the stack for the
+            # first *interactive box* instead, preserving handle-over-body
+            # priority while ignoring visual-only overlays.
+            item = self._box_item_at(scene_pos)
             if isinstance(item, CornerHandle):
                 self._begin_resize(item, scene_pos)
                 event.accept()
@@ -961,11 +977,13 @@ class EditorCanvas(QGraphicsView):
             # --- Phase 3 box resize commit (clamp final rect to >= 8x8, D-06).
             if self._resizing_box is not None:
                 self._commit_resize()
+                self.viewport().releaseMouse()
                 event.accept()
                 return
             # --- Phase 3 box create commit (D-13; < 8x8 is a no-op, D-06).
             if self._creating_box:
                 self._commit_create(event)
+                self.viewport().releaseMouse()
                 event.accept()
                 return
             # --- Phase 3 box move commit (emit boxes_modified once on release).
@@ -976,10 +994,12 @@ class EditorCanvas(QGraphicsView):
             # move emits.
             if self._moving_box is not None:
                 before = self._boxes_interaction_start_snapshot
-                moved = self._moving_box.rect() != self._move_start_rect
+                _mb = self._moving_box
+                moved = _mb.rect() != self._move_start_rect
                 self._moving_box = None
                 if moved:
                     self.boxes_modified.emit(before)
+                self.viewport().releaseMouse()
                 event.accept()
                 return
 
@@ -1314,6 +1334,30 @@ class EditorCanvas(QGraphicsView):
                 return item
         return None
 
+    def _box_item_at(self, scene_pos: QPointF) -> CornerHandle | BoxItem | None:
+        """Return the topmost visible box handle or box at ``scene_pos``.
+
+        The scene also contains display-only items such as the brush cursor and
+        paint preview.  They are drawn above boxes, so using
+        :meth:`QGraphicsScene.itemAt` directly makes a hovered cursor swallow
+        a box press.  Iterating the z-ordered hits lets the box interaction
+        intentionally ignore those overlays.
+        """
+        candidates = self._scene.items(
+            scene_pos,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            QTransform(),
+        )
+        for candidate in candidates:
+            if not candidate.isVisible() or not candidate.isEnabled():
+                continue
+            if isinstance(candidate, CornerHandle):
+                return candidate
+            if isinstance(candidate, BoxItem):
+                return candidate
+        return None
+
     def _select_and_begin_move(self, item: BoxItem, scene_pos: QPointF) -> None:
         """Select a box (deselecting any other) and arm a move drag (D-08).
 
@@ -1337,6 +1381,10 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        # The viewport, not a graphics item, owns this drag.  This keeps the
+        # canvas receiving move/release events even when the pointer leaves the
+        # item (or its child handle) while dragging.
+        self.viewport().grabMouse()
 
     def _begin_resize(self, handle: CornerHandle, scene_pos: QPointF) -> None:
         """Arm a corner-resize drag (D-06). Stores the starting rect + corner."""
@@ -1349,6 +1397,7 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-resize snapshot (emitted on resize-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        self.viewport().grabMouse()
 
     def _begin_create_box(self, scene_pos: QPointF) -> None:
         """Arm an Alt+drag box-create (D-13). Stores the anchor + sets the flag."""
@@ -1356,6 +1405,7 @@ class EditorCanvas(QGraphicsView):
         self._create_anchor = scene_pos
         # CR-01 fix: capture the PRE-create snapshot (emitted on create-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        self.viewport().grabMouse()
         # Swap the preview_item pen to the amber create-preview colour for the
         # duration of the drag (UI-SPEC §12e). Restored on release.
         self.preview_item.setPen(

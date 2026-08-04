@@ -369,6 +369,40 @@ def test_move_box_drag(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_box_drag_ignores_brush_cursor_overlay(qtbot) -> None:
+    """The topmost brush cursor must not swallow a press on a box body."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _add_user_box(canvas, Box(20, 20, 80, 80))
+
+    # Real pointer tracking places cursor_item at the press point.  It has a
+    # higher z-value than the box, which used to make scene.itemAt() return the
+    # cursor instead of the box and leave the interaction unarmed.
+    canvas.mouseMoveEvent(_move_at(canvas, 50, 50))
+    canvas.mousePressEvent(_press_at(canvas, 50, 50))
+    canvas.mouseMoveEvent(_move_at(canvas, 100, 100))
+    canvas.mouseReleaseEvent(_release_at(canvas, 100, 100))
+
+    assert item.rect().x() > 20
+
+
+@pytest.mark.gui
+def test_resize_drag_ignores_brush_cursor_overlay(qtbot) -> None:
+    """The brush cursor must not hide a selected corner handle from dispatch."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _add_user_box(canvas, Box(50, 50, 150, 150))
+    item.setSelected(True)
+
+    canvas.mouseMoveEvent(_move_at(canvas, 150, 150))
+    canvas.mousePressEvent(_press_at(canvas, 150, 150))
+    assert canvas._resizing_box is item
+    canvas.mouseMoveEvent(_move_at(canvas, 180, 180))
+    canvas.mouseReleaseEvent(_release_at(canvas, 180, 180))
+
+    assert item.rect().width() > 100
+    assert item.rect().height() > 100
+
+
+@pytest.mark.gui
 def test_resize_corner_clamps_to_min(qtbot) -> None:
     """Dragging a corner to collapse clamps the final rect to >= 8x8 scene px (D-06)."""
     canvas = _canvas_with_image_and_boxes(qtbot)
@@ -799,6 +833,65 @@ def test_corner_resize_via_real_qtest_events_changes_rect(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_corner_resize_via_real_events_works_at_high_zoom(qtbot) -> None:
+    """REGRESSION (UAT re-test 1, debug box-resize-move): a corner-handle drag
+    driven through REAL Qt event delivery must arm RESIZE (not MOVE) and change
+    the BoxItem's ``rect()`` at HIGH zoom (>= 3.5), not just at zoom 1.0.
+
+    Root cause reproduced via real-event delivery: the prior
+    ``mousePressEvent`` passed ``self.transform()`` (the view zoom) as the 2nd
+    argument to ``QGraphicsScene.itemAt(scene_pos, transform)``. At zoom >= ~3.5
+    that made Qt's BSP coarse pass return the parent ``BoxItem`` instead of the
+    child ``CornerHandle`` at the corner, so the press armed a MOVE
+    (``_select_and_begin_move``) where the user expected a RESIZE — dragging then
+    moved the box near the corner, perceived as "resize does nothing". This
+    passed at zoom 1.0 (which is why the sibling test above and the whole
+    260-green suite missed it) and only failed live, where users zoom in to
+    inspect/fix OCR boxes.
+
+    The fix: pass the IDENTITY transform (``QTransform()``) to ``itemAt`` so the
+    topmost item by z (handle z=150 > box z=100) wins at every zoom. This test
+    locks that contract at zoom 4.0 — it FAILS on the pre-fix code (armed MOVE)
+    and PASSES after. Compliant with the debug session's TRAP #4: it drives
+    ``QTest.mousePress/Move/Release`` on the viewport (real Qt event delivery),
+    NOT a direct ``_begin_resize``/``_advance_resize`` call.
+    """
+    from PySide6.QtGui import QTransform
+
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    # Zoom in to 4.0 (beyond the ~3.5 threshold where the bug manifested).
+    canvas.zoom_factor = 4.0
+    canvas.setTransform(QTransform().scale(4.0, 4.0))
+    QApplication.processEvents()
+    # Box (50,50)-(150,150); BR corner at scene (150,150).
+    item = _add_user_box(canvas, Box(50, 50, 150, 150))
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    rect_before = QRectF(item.rect())
+    # Drag the BR corner out to (180,180) -> box should grow to (50,50)-(180,180).
+    _drive_real_corner_resize(qtbot, canvas, item, (150.0, 150.0), (180.0, 180.0))
+
+    # The resize MUST have armed (not a move). If itemAt returned the parent
+    # BoxItem, _moving_box would be set instead and rect() would be unchanged
+    # (the drag would be a no-op move of a few px near the corner).
+    assert canvas._resizing_box is None and canvas._moving_box is None, (
+        "drag completed: both flags should be cleared on release"
+    )
+    rect_after = QRectF(item.rect())
+    assert rect_after != rect_before, (
+        "A real corner-handle drag at zoom 4.0 must change the BoxItem rect() — "
+        "if this fails, scene.itemAt is returning the parent BoxItem instead of "
+        "the CornerHandle at high zoom (UAT re-test 1). Check that mousePressEvent "
+        "passes the IDENTITY transform to itemAt, not self.transform()."
+    )
+    assert int(rect_after.x()) == 50 and int(rect_after.y()) == 50, (
+        "the opposite (TL) corner must stay anchored during a BR resize at zoom"
+    )
+    assert rect_after.width() > rect_before.width() and rect_after.height() > rect_before.height()
+
+
+@pytest.mark.gui
 def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
     """REGRESSION (UAT re-test 4): a box moved via REAL Qt event delivery
     (``QTest`` press/move/release on the viewport — NOT a direct ``setRect``)
@@ -865,4 +958,3 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
         "(20,20,80,80), the move was visible on screen (pos+rect) but the snapshot "
         "materialized the stale rect() — the ItemIsMovable root cause."
     )
-

@@ -240,12 +240,15 @@ class BoxItem(QGraphicsRectItem):
     a hue tint fill when selected (UI-SPEC §12c). The four corner resize
     handles (§12b) are visible ONLY on the selected box (D-08 single-select).
 
-    Flags ``ItemIsSelectable | ItemIsMovable | ItemSendsGeometryChanges`` give
-    native Qt selection/move + the geometry-change hook the canvas uses to
-    commit box moves to the BOXES undo stack (plan 03-05). Qt's default dashed
-    selection outline is suppressed (UI-SPEC §12a "disable Qt's default dashed
-    selection outline") — the origin-coloured solid border is the sole
-    selection signal plus the handles + tint.
+    ``ItemIsSelectable`` provides native selection.  Movement is deliberately
+    owned by :class:`EditorCanvas`: it updates ``rect()`` during a drag, which
+    is also the geometry materialized for persistence.  Do not set
+    ``ItemIsMovable`` here — Qt would instead update ``pos()`` independently
+    of ``rect()``, and can steal a corner-handle drag from the canvas resize
+    state machine. Qt's default dashed selection outline is suppressed
+    (UI-SPEC §12a "disable Qt's default dashed selection outline") — the
+    origin-coloured solid border is the sole selection signal plus the handles
+    + tint.
     """
 
     def __init__(self, pagebox: "PageBox", parent: QGraphicsItem | None = None) -> None:
@@ -260,7 +263,6 @@ class BoxItem(QGraphicsRectItem):
         # (UI-SPEC §Z-order).
         self.setZValue(100)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         # SizeAllCursor over the box body = the move affordance (UI-SPEC §12c).
         self.setCursor(Qt.CursorShape.SizeAllCursor)

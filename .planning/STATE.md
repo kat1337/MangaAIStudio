@@ -4,11 +4,11 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 03
 current_phase_name: text-box-detection-interaction
-status: verifying
-stopped_at: "Phase 03 gap-closure done (03-06/07/08): 2 of 4 UAT symptoms closed (detection-undo, mask-undo). 2 remain OPEN and UNDIAGNOSED (resize re-test 1, move-persistence re-test 4) — live-app-only, offscreen tests pass. Previous session's ItemIsMovable diagnosis was WRONG and reverted. HANDOFF: read .planning/phases/03-text-box-detection-interaction/.continue-here.md FIRST (it documents the traps that caused 2 wrong diagnoses). Do NOT diagnose from direct-handler probes. Resume: /gsd-execute-phase 3"
-last_updated: "2026-08-03T12:10:00Z"
-last_activity: 2026-08-03
-last_activity_desc: Phase 03 gap-closure + UAT re-verify; 2 symptoms open, handoff written
+status: ready_to_verify
+stopped_at: "Phase 03: both open UAT bugs (resize re-test 1, move-persistence re-test 4) FIXED and CONFIRMED by user live UAT 2026-08-04. Root cause: brush cursor overlay (z=1000) swallowed the box hit-test in mousePressEvent, so neither _moving_box nor _resizing_box ever armed. Fix: new _box_item_at() filters scene hits to CornerHandle/BoxItem only (ignores cursor_item/preview_item); ItemIsMovable removed (canvas-owned setRect is now sole geometry channel). 263 tests pass incl. 2 new cursor-overlay regression tests. All 4 UAT re-verify symptoms now closed (detection-undo, mask-undo earlier; resize, move-persistence now). RCA in .planning/debug/resolved/box-resize-move.md. NEXT: /gsd-verify-phase 3 (or /gsd:code-review 3 then verify)."
+last_updated: "2026-08-04T03:40:00Z"
+last_activity: 2026-08-04
+last_activity_desc: Phase 03 box resize+move bugs fixed + UAT-confirmed; ready to verify
 progress:
   total_phases: 5
   completed_phases: 2
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 ## Current Position
 
-Phase: 03 (text-box-detection-interaction) — EXECUTING
-Plan: 8 of 8
-Status: All Phase 03 plans executed (8/8); gap-closure waves complete. Awaiting post-execution (code-review → verify_phase_goal → phase.complete).
-Last activity: 2026-07-31 — Plan 03-08 (mask-undo before-state + WR-01) executed
+Phase: 03 (text-box-detection-interaction) — AWAITING LIVE UAT
+Plan: 8 of 8 (all executed) + post-plan bug fix (box resize/move cursor-overlay root cause)
+Status: All Phase 03 plans executed (8/8); gap-closure waves complete; 2 open UAT bugs from re-verification now FIXED (root cause: brush cursor overlay swallowed box hit-test). Awaiting user live-app UAT confirmation, then post-execution (code-review → verify_phase_goal → phase.complete).
+Last activity: 2026-08-04 — box resize/move bugs fixed; RCA in .planning/debug/resolved/box-resize-move.md
 
 Progress: [██████████] 100%
 
