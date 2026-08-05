@@ -259,6 +259,25 @@
 - OCR worker threading (reuse Worker + QThreadPool + _op_running) (D-03).
 - Whether `ocr_backend` config key needs a ProfileManager entry or stays adapter-internal in v1 (D-14).
 
+---
+
+## Typesetting styling controls (raised mid-discussion, deferred)
+
+**User's input (free-text):** "obviously the text editor for a manga editor will need font selection (per box, per selected boxes and per page), font style selector, font size selector, increase and decrease font size, font color, horizontal and vertical alignment, a text editor, we might also need some effects like outer glow, outline, etc but we can do those in a refinement phase"
+
+### Q.T1 — Defer, minimal-now, or expand Phase 4?
+
+| Option | Description | Selected |
+|--------|-------------|----------|
+| Defer to a typesetting phase (TRAN-02) | Full styling toolbar (font/style/size/color/alignment/effects) → TRAN-02 or Phase 5.5; Phase 4 overlay uses fixed defaults, no per-box controls | ✓ |
+| Minimal global styling now, rest later | Global font family + size +/- app-level (readability only); defer per-box color/alignment/effects | |
+| Expand Phase 4 — full styling toolbar now | Reverse Out-of-Scope; Phase 4 becomes a typesetting phase too (also reverses Phase 3 D-08 single-select for "per selected boxes") | |
+
+**User's choice:** Defer to a typesetting phase (TRAN-02).
+**Notes:** Consistent with PROJECT.md Out-of-Scope (authored by the user) and D-09/D-11 (Phase 4 overlay is review/correction, not output). The full feature list is preserved in CONTEXT.md Deferred Ideas for the typesetting phase to inherit: font selection (per-box / per-selected-boxes / per-page), font style, font size +/-, font color, H alignment, V alignment, effects (outer glow, outline, etc.). "Per selected boxes" additionally implies multi-select (Phase 3 D-08 single-select would need lifting in that phase). Decision recorded 2026-08-04.
+
+---
+
 ## Deferred Ideas
 
 - Machine translation integration (TRAN-01) — v2; seam is set_translation() + adapter shape.
