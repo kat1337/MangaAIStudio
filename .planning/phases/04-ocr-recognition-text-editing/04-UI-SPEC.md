@@ -1,7 +1,8 @@
 ---
 phase: 4
 slug: ocr-recognition-text-editing
-status: draft
+status: approved
+reviewed_at: 2026-08-04
 shadcn_initialized: false
 preset: none
 created: 2026-08-04
