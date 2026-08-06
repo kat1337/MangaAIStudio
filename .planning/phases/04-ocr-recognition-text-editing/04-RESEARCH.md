@@ -660,7 +660,7 @@ def _resolve_ocr_model_path(self) -> Path:
 
 **All other claims in this research are `[VERIFIED]` (codebase grep, PanelCleaner source, manga_ocr source, or pip registry) or `[CITED]` (official docs / Qt forums).** No user confirmation is needed for the verified claims; the A1-A4 assumptions are implementation-detail-level and resolvable during execution.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Vertical-text editing (D-06) — RESOLVED to fallback.**
    - What we know: Qt does NOT implement CSS `writing-mode: vertical-rl` in QTextEdit/QTextDocument; true CJK vertical editing requires a custom `QAbstractTextDocumentLayout` (non-trivial).

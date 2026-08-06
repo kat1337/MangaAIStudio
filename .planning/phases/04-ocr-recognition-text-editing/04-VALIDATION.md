@@ -1,8 +1,8 @@
 ---
 phase: 4
 slug: ocr-recognition-text-editing
-status: draft
-nyquist_compliant: false
+status: approved
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-05
 ---
@@ -43,9 +43,23 @@ created: 2026-08-05
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| _to be filled from PLAN.md tasks_ | | | | | | | | | |
+| 4-01-T1 | 01 | 1 | TEXT-04/05 | T-4-01 | PageBox.copy() detaches payload (no undo aliasing); set_recognized_text_edited centralizes the payload-None guard | unit | `python -m pytest tests/test_core/test_box_model.py -x -q` | ❌ W0 | ⬜ pending |
+| 4-01-T2 | 01 | 1 | TEXT-04/05 | T-4-02 | boxes_snapshot() round-trips edited/bubble_no/manual_override (no silent edit loss) | unit | `python -m pytest tests/test_box_snapshot_fields.py tests/test_payload_aliasing.py tests/test_core/test_history_boxes.py -x -q` | ❌ W0 | ⬜ pending |
+| 4-02-T1 | 02 | 1 | TEXT-05 | T-4-03 | parser validates `[N]:` format; rejects malformed input without crashing | unit | `python -m pytest tests/test_core/test_translation_parser.py -x -q` | ❌ W0 | ⬜ pending |
+| 4-02-T2 | 02 | 1 | TEXT-05 | T-4-04 | reading_order preserves manual overrides on re-auto (no silent override) | unit | `python -m pytest tests/test_core/test_reading_order.py -x -q` | ❌ W0 | ⬜ pending |
+| 4-03-T1 | 03 | 1 | TEXT-02 | T-4-05 | MangaOcr singleton load-once; no repeated model fetch | unit | `python -c "from panelcleaner.ocr.ocr_mangaocr import MangaOcr; assert MangaOcr._instance is None; print('ok')"` | ❌ W0 | ⬜ pending |
+| 4-03-T2 | 03 | 1 | TEXT-02 | T-4-06 | TorchOCRModel numpy→PIL→str; skips gracefully if model not cached | unit | `python -m pytest tests/test_core/test_torch_ocr_model.py tests/test_core/test_adapters.py -x -q` | ❌ W0 | ⬜ pending |
+| 4-04-T1 | 04 | 2 | TEXT-04/05 | T-4-07 | text overlay z=120/badge z=140 — no visual collision with handles | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "text_overlay or badge or current_focus"` | ✅ | ⬜ pending |
+| 4-04-T2 | 04 | 2 | TEXT-04/05 | T-4-08 | Toggle Text Overlay (T) independent of M/Shift+M; Inspector commits via set_recognized_text_edited | gui | `python -m pytest tests/test_gui_boxes.py tests/test_gui_canvas.py -x -q` | ✅ | ⬜ pending |
+| 4-05-T1 | 05 | 3 | TEXT-04 | T-4-09 | inline editor recognized-focus commit sets edited=True via set_recognized_text_edited | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "inline_editor"` | ✅ | ⬜ pending |
+| 4-05-T2 | 05 | 3 | TEXT-04 | T-4-10 | canvas mousePressEvent guard checks inline-editor-active FIRST (no focus-drop DoS) | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "double_click or inline or commit_on_click_away or esc_cancel"` | ✅ | ⬜ pending |
+| 4-06-T1 | 06 | 4 | TEXT-02 | T-4-11/12 | re-OCR confirms on edited=True (D-04); Worker+_op_running prevents concurrent heavy model calls | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "ocr or reocr"` | ✅ | ⬜ pending |
+| 4-06-T2 | 06 | 4 | TEXT-02 | T-4-13/14 | auto-OCR on _commit_create (D-01); Ctrl+R OCR All; CR-11 model-path cache-check | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "text_menu or auto_ocr or ctrl_r"` | ✅ | ⬜ pending |
+| 4-07-T1 | 07 | 5 | TEXT-05 | T-4-15 | LoadTranslationsDialog parser-apply reports unmatched numbers (no silent drop) | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "load_translations or parser_apply"` | ✅ | ⬜ pending |
+| 4-07-T2 | 07 | 5 | TEXT-05 | T-4-16/17 | Auto-Number preserve-manual; page-global numbering (panels ignored) | gui | `python -m pytest tests/test_gui_boxes.py -x -q -k "auto_number or reading_order_apply or preserve_manual"` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*File Exists: ❌ W0 = created in Wave 0 (Plan 01/02/03); ✅ = extends existing `tests/test_gui_boxes.py` / `tests/test_gui_canvas.py`*
 
 ---
 
@@ -77,11 +91,11 @@ Per RESEARCH.md Pitfalls 1 & 8, the two load-bearing persistence gaps (`canvas.b
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies (14/14 tasks verified above; Wave 1 plans create their test files in Wave 0)
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify (every task has a targeted pytest run)
+- [x] Wave 0 covers all MISSING references (Plan 01/02/03 create `test_box_model`/`test_box_snapshot_fields`/`test_payload_aliasing`/`test_history_boxes`/`test_translation_parser`/`test_reading_order`/`test_torch_ocr_model`/`test_adapters` in Wave 1 before later waves consume them)
+- [x] No watch-mode flags (all verify commands are one-shot `-x -q` runs)
+- [x] Feedback latency < 30s (targeted `-k` filtered pytest runs; no OCR model load in unit tests)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved 2026-08-05
