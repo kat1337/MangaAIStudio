@@ -152,11 +152,31 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: TBD
+**Plans**: 7 plans across 5 waves
 
 Plans:
 
-- [ ] TBD (defined during `/gsd:plan-phase 4`)
+**Wave 1** (parallel — headless foundation: PageBox model fields + Pitfall 1/8 regression tests; translation parser + reading-order algorithm; OCR adapter + vendored MangaOcr)
+
+- [ ] 04-01-PLAN.md — PageBox Phase 4 fields + setters + copy() + boxes_snapshot fix + Pitfall 1/8 regression tests (TEXT-04, TEXT-05)
+- [ ] 04-02-PLAN.md — translation_parser.py + reading_order.py pure-Python modules (XY-Cut RTL/LTR + preserve-manual) (TEXT-05)
+- [ ] 04-03-PLAN.md — TorchOCRModel adapter + vendored MangaOcr singleton + backend_factory("ocr") fix (TEXT-02)
+
+**Wave 2** *(blocked on 01)*
+
+- [ ] 04-04-PLAN.md — BoxItem text overlay (z=120) + bubble badge (z=140) + InspectorPanel dock + Toggle Text Overlay (T) (TEXT-04, TEXT-05)
+
+**Wave 3** *(blocked on 04)*
+
+- [ ] 04-05-PLAN.md — InlineEditor (QGraphicsProxyWidget+QTextEdit) + double-click dispatch + commit/cancel + F2 (TEXT-04)
+
+**Wave 4** *(blocked on 03 + 05)*
+
+- [ ] 04-06-PLAN.md — OCR dispatcher (Worker+_op_running+progress) + Text menu (Run OCR / OCR All Ctrl+R) + auto-OCR on draw (D-01) + D-04 gate (TEXT-02)
+
+**Wave 5** *(blocked on 02 + 06)*
+
+- [ ] 04-07-PLAN.md — LoadTranslationsDialog (paste + file-import) + parser apply + Auto-Number menu (RTL/LTR) (TEXT-05)
 
 **UI hint**: yes
 
@@ -196,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 0/TBD | Not started | - |
+| 4. OCR Recognition & Text Editing | 0/7 | Not started | - |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---
