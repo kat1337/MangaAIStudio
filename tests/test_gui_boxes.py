@@ -1428,6 +1428,86 @@ def test_inspector_origin_label_hue_colored(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_inspector_unchanged_focus_cycle_is_noop(qtbot) -> None:
+    """WR-01: focus-out commits with NO value change are silent no-ops — no
+    recognized_edited/translation_changed/bubble_no_changed emission (which
+    would flip edited=True on an unedited box, pin manual_override on a box
+    that never had a bubble number, and push a no-op BOXES snapshot)."""
+    panel = _make_inspector(qtbot)
+    captured: dict[str, list] = {"r": [], "t": [], "b": []}
+    panel.connect_commit_handlers(
+        on_recognized=captured["r"].append,
+        on_translation=captured["t"].append,
+        on_bubble=captured["b"].append,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = None  # the spin displays 1 for None (the spin default)
+    panel.load_box(pb)
+
+    # Click in + click away with zero typing on every field.
+    panel._commit_recognized()
+    panel._commit_translation()
+    panel.bubble_spin.editingFinished.emit()
+    assert captured["r"] == []
+    assert captured["t"] == []
+    assert captured["b"] == []
+
+    # The same unchanged focus cycle on a box WITH a bubble number is a no-op too.
+    pb.bubble_no = 3
+    panel.load_box(pb)
+    panel.bubble_spin.editingFinished.emit()
+    assert captured["b"] == []
+
+
+@pytest.mark.gui
+def test_inspector_bubble_changed_commit_still_emits(qtbot) -> None:
+    """WR-01: a REAL bubble-value change still commits — only unchanged focus
+    cycles are no-ops (a manual bubble # must still pin manual_override)."""
+    panel = _make_inspector(qtbot)
+    captured: list[int] = []
+    panel.connect_commit_handlers(
+        on_recognized=lambda _t: None,
+        on_translation=lambda _t: None,
+        on_bubble=captured.append,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = None  # displays 1; changing it to 7 is a real manual edit
+    panel.load_box(pb)
+    panel.bubble_spin.setValue(7)
+    panel.bubble_spin.editingFinished.emit()
+    assert captured == [7]
+
+
+@pytest.mark.gui
+def test_inspector_unchanged_commit_is_noop_end_to_end(qtbot, tmp_path) -> None:
+    """WR-01 end-to-end: an Inspector focus cycle with no edit must NOT flip
+    edited=True, pin manual_override, or push a BOXES undo entry — the D-04
+    confirm-prompt / D-16 preserve-manual / no-op-undo consequences."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 50, 60)])[0]
+    item.pagebox.set_recognized_text("hello")
+    item.setSelected(True)
+    QApplication.processEvents()
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    # The panel displays the box (as the selection follower would)…
+    window.inspector_panel.load_box(item.pagebox)
+    # …and the user clicks in + away without typing.
+    window.inspector_panel._commit_recognized()
+    assert emitted == [], "an unchanged commit must not push a BOXES snapshot"
+    assert item.pagebox.edited is False, "an unchanged commit must not flip D-04"
+
+    # Same for the bubble spinbox: no value change -> no manual_override pin.
+    assert item.pagebox.bubble_no is None
+    window.inspector_panel.bubble_spin.editingFinished.emit()
+    assert emitted == []
+    assert item.pagebox.manual_override is False
+
+
+@pytest.mark.gui
 def test_inspector_commit_undo_restores_pre_edit_text(qtbot, tmp_path) -> None:
     """CR-01 regression: an Inspector commit must push a PRE-edit snapshot with
     DETACHED payloads — undo restores the pre-edit text, not the post-edit text

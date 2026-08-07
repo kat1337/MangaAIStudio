@@ -198,6 +198,13 @@ class InspectorPanel(QWidget):
         root.addStretch(1)
         self.setStyleSheet(_INSPECTOR_QSS)
 
+        # WR-01: the values the fields displayed at load_box time — a commit
+        # whose value is unchanged is a no-op (see _emit_*_if_changed). The
+        # InlineEditor's ``_entry_text`` pattern (inline_editor.py:211).
+        self._loaded_bubble = 1
+        self._loaded_recognized = ""
+        self._loaded_translation = ""
+
         # Start in the empty state (no box selected).
         self.clear()
 
@@ -215,6 +222,7 @@ class InspectorPanel(QWidget):
         was = self.bubble_spin.blockSignals(True)
         self.bubble_spin.setValue(bubble)
         self.bubble_spin.blockSignals(was)
+        self._loaded_bubble = self.bubble_spin.value()  # WR-01 (spinbox guard)
 
         # Origin — hue-coloured label text (UI-SPEC §18).
         origin = pagebox.origin
@@ -234,6 +242,10 @@ class InspectorPanel(QWidget):
         was_r = self.recognized_edit.blockSignals(True)
         self.recognized_edit.setPlainText(recognized)
         self.recognized_edit.blockSignals(was_r)
+        # WR-01: remember the displayed value (read back from the widget so
+        # Qt text normalization cannot create a phantom diff) — a focus-out
+        # commit that leaves it unchanged is a no-op.
+        self._loaded_recognized = self.recognized_edit.toPlainText()
 
         # Translation.
         translation = ""
@@ -243,6 +255,7 @@ class InspectorPanel(QWidget):
         was_t = self.translation_edit.blockSignals(True)
         self.translation_edit.setPlainText(translation)
         self.translation_edit.blockSignals(was_t)
+        self._loaded_translation = self.translation_edit.toPlainText()
 
         # Language + vertical.
         language = "unknown"
@@ -263,6 +276,11 @@ class InspectorPanel(QWidget):
         """Show the empty-state copy and disable all fields (no box selected)."""
         self.empty_label.setVisible(True)
         self._set_fields_enabled(False)
+        # WR-01: reset the loaded-value memory so a late focus-out commit after
+        # a clear cannot fire (fields are disabled anyway — belt-and-suspenders).
+        self._loaded_bubble = 1
+        self._loaded_recognized = ""
+        self._loaded_translation = ""
         # Clear the field values too so a stale selection does not linger.
         was = self.bubble_spin.blockSignals(True)
         self.bubble_spin.setValue(1)
@@ -307,15 +325,43 @@ class InspectorPanel(QWidget):
         ``editingFinished`` / ``toggled``.
         """
         self.recognized_edit.committed.connect(
-            lambda: on_recognized(self.recognized_edit.toPlainText())
+            lambda: self._emit_recognized_if_changed(on_recognized)
         )
         self.translation_edit.committed.connect(
-            lambda: on_translation(self.translation_edit.toPlainText())
+            lambda: self._emit_translation_if_changed(on_translation)
         )
         self.bubble_spin.editingFinished.connect(
-            lambda: on_bubble(self.bubble_spin.value())
+            lambda: self._emit_bubble_if_changed(on_bubble)
         )
         self.vertical_check.toggled.connect(on_vertical)
+
+    # -------------------------------------------------- no-op commit guards
+    # WR-01: a focus-out / editingFinished commit whose field value equals the
+    # value loaded at load_box time is a NO-OP — it must not flip the D-04
+    # edited flag, pin ``manual_override``, or push a no-op BOXES snapshot
+    # (the InlineEditor's ``changed = new_text != self._entry_text`` pattern).
+    def _emit_recognized_if_changed(self, on_recognized) -> None:
+        """Forward the recognized field's commit text only if it changed since load_box."""
+        text = self.recognized_edit.toPlainText()
+        if text != self._loaded_recognized:
+            on_recognized(text)
+
+    def _emit_translation_if_changed(self, on_translation) -> None:
+        """Forward the translation field's commit text only if it changed since load_box."""
+        text = self.translation_edit.toPlainText()
+        if text != self._loaded_translation:
+            on_translation(text)
+
+    def _emit_bubble_if_changed(self, on_bubble) -> None:
+        """Forward the bubble-spin commit only if the value changed since load_box.
+
+        The spinbox displays ``1`` for ``bubble_no=None``, so an unchanged
+        focus cycle must not write bubble 1 / ``manual_override=True`` (D-16
+        preserve-manual engaged by accident).
+        """
+        number = self.bubble_spin.value()
+        if number != self._loaded_bubble:
+            on_bubble(number)
 
     # Direct commit hooks the tests can drive (the real commit path is the
     # focus-loss / Ctrl+Return / editingFinished signal wired above; these
