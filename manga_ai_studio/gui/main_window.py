@@ -28,6 +28,7 @@ Security:
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -2205,6 +2206,411 @@ class MainWindow(QMainWindow):
         self._op_running = False
         self.progress_bar.hide()
         self._refresh_action_states()
+
+    # ------------------------------------------------------------ ocr (plan 06)
+    def _ocr_backend(self) -> str:
+        """Return the configured OCR backend (D-14), default 'torch'.
+
+        Same shape as :meth:`_detection_backend`: the backend is an
+        application-level concern; the profile carries an optional
+        ``ocr_backend`` attribute. Default torch -> TorchOCRModel
+        (factory.py ocr/torch branch). The ONNX branch raises
+        ``NotImplementedError`` in the factory (D-14 designed-in hook,
+        wired for the future).
+        """
+        try:
+            profile = self.profile_manager.config.current_profile
+            return getattr(profile, "ocr_backend", "torch")
+        except AttributeError:
+            return "torch"
+
+    def _resolve_ocr_model_path(self) -> Path:
+        """Return the manga-ocr HF cache dir, cache-checking before any fetch.
+
+        manga-ocr resolves its own model from the HF cache
+        (``models--kha-white--manga-ocr-base``) via the vendored MangaOcr
+        singleton's ``initialize_model()``, so this returns the cache
+        DIRECTORY (not a single weights file). Delegates to
+        ``panelcleaner.model_downloader.get_ocr_model_directory`` /
+        ``is_ocr_downloaded`` (model_downloader.py:251-268, already vendored).
+
+        CR-11 (cache-check): ``is_ocr_downloaded()`` short-circuits when the
+        model is present — the ~450MB first-run download is NOT re-fetched on
+        every session (T-4-13). The actual fetch (when the cache is empty)
+        happens inside ``TorchOCRModel.load`` -> ``MangaOcr.initialize_model()``,
+        which runs INSIDE the Worker thread — off the GUI thread
+        (RESEARCH Pitfall 6, T-01-07).
+        """
+        from panelcleaner.model_downloader import (
+            get_ocr_model_directory,
+            is_ocr_downloaded,
+        )
+
+        cache_dir = get_ocr_model_directory()
+        # CR-11: short-circuit — do NOT re-download ~450MB when cached.
+        if is_ocr_downloaded():
+            return cache_dir
+        # First run: the cache dir is still the model's home; the MangaOcr
+        # singleton's initialize_model() (called by TorchOCRModel.load inside
+        # the worker) performs the actual HF fetch off the GUI thread.
+        return cache_dir
+
+    def run_ocr_selected(self) -> None:
+        """Run manga-ocr on the single selected box (Text -> Run OCR, D-01).
+
+        Mirrors :meth:`detect_text`: the ``Worker(QRunnable)`` +
+        ``_op_running`` gate + status-bar progress pattern (RESEARCH Pattern
+        2, T-01-07). The D-04 re-OCR gate fires when the selected box's
+        recognized text was hand-edited (``edited=True``): silent overwrite
+        for raw OCR output, confirm dialog otherwise (Pitfall 4).
+        """
+        if self._op_running:
+            return
+        box_item = self.canvas._selected_box()
+        if box_item is None:
+            return
+        # D-04 gate: confirm before overwriting a hand-edited recognition.
+        if box_item.pagebox.has_recognized_text() and box_item.pagebox.edited:
+            if not self._confirm_reocr():
+                return
+        self._dispatch_ocr_for_box(box_item)
+
+    def _dispatch_ocr_for_box(self, box_item) -> None:
+        """Dispatch the single-box OCR worker (shared by Run OCR + auto-OCR D-01).
+
+        Resolves the adapter via the factory (D-14; torch is imported lazily
+        inside ``TorchOCRModel.load`` — no heavy import here), builds the
+        Worker on :meth:`_run_ocr_task` passing the box's vendored frozen
+        ``Box`` (a plain object — safe to cross threads, never a Qt object;
+        RESEARCH Pitfall 3), and starts it on the global QThreadPool. Sets
+        the first-run "Loading OCR model…" UX (Pitfall 6) before the worker
+        starts the ~450MB download.
+        """
+        path = self.file_table.current_path()
+        if path is None:
+            return
+        model = backend_factory("ocr", self._ocr_backend())
+
+        worker = Worker(self._run_ocr_task, path, box_item.pagebox.box, model)
+        worker.signals.result.connect(self._on_ocr_finished)
+        worker.signals.error.connect(self._on_ocr_error)
+        worker.signals.finished.connect(self._on_ocr_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        # Indeterminate progress for single-box OCR (no %-subdivisions —
+        # UI-SPEC §Copywriting).
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.show()
+        box_index = self.canvas._box_items.index(box_item) + 1
+        self.status_bar_left.setText(f"Recognizing text\u2026 box {box_index}")
+        # Pitfall 6: the first-run ~450MB download shows the loading UX BEFORE
+        # the worker starts it (the fetch itself runs off the GUI thread).
+        from panelcleaner.model_downloader import is_ocr_downloaded
+
+        if not is_ocr_downloaded():
+            self.status_bar_left.setText("Loading OCR model\u2026")
+        QThreadPool.globalInstance().start(worker)
+
+    def _run_ocr_task(
+        self,
+        image_path: Path,
+        box_xyxy,
+        model,
+        progress_callback=None,
+        abort_flag=None,
+    ) -> dict:
+        """Worker task: crop the box region, run manga-ocr, return the text.
+
+        Runs on a QThreadPool thread — touches only numpy/Python and the
+        adapter (T-01-07). Never touches Qt here. ``box_xyxy`` is the box's
+        vendored frozen ``Box``; the region crop is ``.copy()``-detached
+        (Pitfall 2). Returns ``{"text": str, "box_id": id(box_xyxy)}`` — the
+        box_id lets :meth:`_on_ocr_finished` find the right BoxItem (the
+        frozen Box is the SAME object on both sides, so its identity is
+        stable across the thread boundary).
+
+        ``progress_callback``/``abort_flag`` are auto-injected by ``Worker``
+        (worker_thread.py:97-124).
+        """
+        import cv2  # lazy import — keeps the main thread import-light
+        import numpy as np
+
+        try:
+            image = cv2.imdecode(
+                np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+        except (OSError, ValueError) as exc:
+            raise FileNotFoundError(f"Could not read image: {image_path}") from exc
+        if image is None:
+            raise FileNotFoundError(f"Could not read image: {image_path}")
+        x1, y1, x2, y2 = box_xyxy.as_tuple
+        # Pitfall 2: clean copy of the cropped region (detached from the page
+        # buffer before it crosses into the model).
+        region = image[y1:y2, x1:x2].copy()
+        model_path = self._resolve_ocr_model_path()
+        model.load(model_path, device="auto")  # singleton — load-once per session
+        return {"text": model.recognize(region), "box_id": id(box_xyxy)}
+
+    def run_ocr_all(self) -> None:
+        """Run manga-ocr on every text-empty box on the page (Text -> OCR All, D-03).
+
+        Mirrors :meth:`detect_text` + the Phase 2 batch progress pattern: one
+        Worker, one model load (Pitfall 3), sequential per-box recognition
+        with determinate progress 0..100. The D-04 batch gate fires when any
+        box on the page carries hand-edited text (the count is named in the
+        dialog); Cancel aborts the whole batch.
+        """
+        if self._op_running:
+            return
+        empty_boxes = [
+            it
+            for it in self.canvas._box_items
+            if not it.pagebox.has_recognized_text()
+        ]
+        if not empty_boxes:
+            return
+        # D-04 batch gate: edited boxes on the page -> confirm with the count.
+        edited_count = sum(
+            1
+            for it in self.canvas._box_items
+            if it.pagebox.has_recognized_text() and it.pagebox.edited
+        )
+        if edited_count and not self._confirm_reocr_all(edited_count):
+            return
+
+        path = self.file_table.current_path()
+        if path is None:
+            return
+        model = backend_factory("ocr", self._ocr_backend())
+        worker = Worker(
+            self._run_ocr_all_task,
+            path,
+            [it.pagebox.box for it in empty_boxes],
+            [id(it.pagebox) for it in empty_boxes],
+            model,
+        )
+        worker.signals.progress.connect(self._on_ocr_progress)
+        worker.signals.result.connect(self._on_ocr_all_finished)
+        worker.signals.error.connect(self._on_ocr_error)
+        worker.signals.finished.connect(self._on_ocr_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText(f"OCR All\u2026 0/{len(empty_boxes)}")
+        # Pitfall 6: first-run loading UX before the worker starts.
+        from panelcleaner.model_downloader import is_ocr_downloaded
+
+        if not is_ocr_downloaded():
+            self.status_bar_left.setText("Loading OCR model\u2026")
+        QThreadPool.globalInstance().start(worker)
+
+    def _run_ocr_all_task(
+        self,
+        image_path: Path,
+        box_xyxys,
+        box_ids,
+        model,
+        progress_callback=None,
+        abort_flag=None,
+    ) -> list:
+        """Worker task: one model load, sequential per-box OCR over the page (D-03).
+
+        Runs on a QThreadPool thread (T-01-07). ONE ``model.load`` for the
+        whole batch (Pitfall 3), abort-checked BETWEEN boxes (Phase 2 D-09
+        SharableFlag pattern — never mid-box), progress emitted per box with
+        the UI-SPEC "OCR All… {done}/{total} · box N" label. Returns a list
+        of ``{"box_id": int, "text": str}`` results.
+        """
+        import cv2  # lazy import — keeps the main thread import-light
+        import numpy as np
+
+        image = cv2.imdecode(
+            np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR
+        )
+        if image is None:
+            raise FileNotFoundError(f"Could not read image: {image_path}")
+        model_path = self._resolve_ocr_model_path()
+        model.load(model_path, device="auto")  # ONE load for the batch (Pitfall 3)
+
+        results: list[dict] = []
+        total = len(box_xyxys)
+        for i, (xyxy, bid) in enumerate(zip(box_xyxys, box_ids)):
+            if abort_flag is not None and abort_flag.get():
+                break  # D-09: abort between boxes, never mid-box
+            x1, y1, x2, y2 = xyxy.as_tuple
+            region = image[y1:y2, x1:x2].copy()  # Pitfall 2 clean copy
+            text = model.recognize(region)
+            results.append({"box_id": bid, "text": text})
+            if progress_callback is not None:
+                percent = (i + 1) * 100 // total if total else 100
+                progress_callback.emit((percent, f"{i + 1}/{total} \u00b7 box {i + 1}"))
+        return results
+
+    def _on_ocr_progress(self, payload) -> None:
+        """Update the status bar + progress bar during OCR All (D-03).
+
+        Mirrors :meth:`_on_batch_progress`: the worker emits ``(percent,
+        label)`` per box; the label carries the UI-SPEC
+        "{done}/{total} · box N" shape.
+        """
+        if isinstance(payload, tuple) and len(payload) == 2:
+            percent, label = payload
+        else:
+            return
+        self.progress_bar.setValue(int(percent))
+        self.status_bar_left.setText(f"OCR All\u2026 {label}")
+
+    def _on_ocr_finished(self, result) -> None:
+        """Write the recognized text back to the box (main thread only, T-01-07).
+
+        Finds the BoxItem by ``box_id`` (the frozen Box identity the worker
+        returned), writes ``set_recognized_text`` (the Plan 01 OCR-write
+        setter — ``edited=False``, D-04 silent-overwrite semantics),
+        refreshes the text overlay + badge, and pushes a CR-01 before-state
+        BOXES snapshot.
+
+        The before snapshot is captured BEFORE the write and each payload is
+        shallow-detached (``copy.copy``) so the push-time materialization
+        sees the true pre-OCR text (Pitfall 8 push-side — the 04-05 fix
+        pattern; without the detach, undo would restore the post-OCR text).
+        """
+        box_id = result.get("box_id")
+        item = next(
+            (it for it in self.canvas._box_items if id(it.pagebox.box) == box_id),
+            None,
+        )
+        if item is None:
+            logger.warning("OCR finished for a box that no longer exists")
+            return
+        # CR-01: capture the PRE-OCR snapshot + detach payloads (Pitfall 8).
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        item.pagebox.set_recognized_text(result["text"])  # edited=False (D-04)
+        item.refresh_text_overlay()
+        item.refresh_badge()
+        # boxes_modified -> _on_boxes_modified pushes the BEFORE snapshot.
+        self.canvas.boxes_modified.emit(before)
+        # Transient completion status (reverts to the box-count line ~3 s).
+        self._show_transient_status("OCR complete \u00b7 1 box recognized")
+
+    def _on_ocr_all_finished(self, results) -> None:
+        """Write the batch results back to their boxes (main thread only, D-03).
+
+        ONE CR-01 before-state BOXES snapshot for the whole batch (UI-SPEC
+        §20 batch-undo pattern), captured BEFORE any write with payloads
+        detached (Pitfall 8). Results whose box vanished mid-run are skipped.
+        """
+        if not results:
+            self._show_transient_status("OCR complete \u00b7 0 boxes recognized")
+            return
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        recognized = 0
+        for result in results:
+            item = next(
+                (
+                    it
+                    for it in self.canvas._box_items
+                    if id(it.pagebox) == result["box_id"]
+                ),
+                None,
+            )
+            if item is None:
+                continue
+            item.pagebox.set_recognized_text(result["text"])  # edited=False (D-04)
+            item.refresh_text_overlay()
+            item.refresh_badge()
+            recognized += 1
+        if recognized:
+            self.canvas.boxes_modified.emit(before)
+        self._show_transient_status(f"OCR complete \u00b7 {recognized} boxes recognized")
+
+    def _on_ocr_error(self, worker_error) -> None:
+        """Show the model-load error dialog + persistent #7a1f1f error chip.
+
+        Mirrors :meth:`_on_detection_error` (T-01-08): the full traceback
+        goes to loguru; the QMessageBox shows only user-friendly copy
+        (UI-SPEC §Copywriting OCR model-load error). ``_op_running`` is
+        cleared by :meth:`_on_ocr_cleanup` (``finished`` always fires —
+        Pitfall 7).
+        """
+        logger.error(f"OCR failed: {worker_error}")
+        self._show_error_chip("OCR model error")
+        QMessageBox.critical(
+            self,
+            "Couldn't load the OCR model.",
+            "The manga-ocr model files couldn't be loaded or downloaded."
+            " Check your network connection (first run downloads ~450 MB)"
+            " and see the log for details.",
+        )
+        self.status_bar_left.setText("OCR failed")
+
+    def _on_ocr_cleanup(self, _args) -> None:
+        """Reset the async-op flag + progress UI after the worker finishes.
+
+        Connected to ``finished``, which ``Worker.run``'s ``finally`` ALWAYS
+        emits (Pitfall 7), so ``_op_running`` clears even after an
+        error/abort. The completion status set in the finished handler is
+        left intact — the transient revert timer restores the box-count line.
+        """
+        self._op_running = False
+        self.progress_bar.hide()
+        self._refresh_action_states()
+
+    def _confirm_reocr(self) -> bool:
+        """Show the D-04 re-OCR confirmation (UI-SPEC §Copywriting).
+
+        Mirrors :meth:`_confirm_replace_boxes` verbatim in structure.
+        Returns True only on Re-run OCR; False on Cancel. Caller guard: only
+        invoked when the selected box's recognized text is hand-edited
+        (``edited=True``); raw OCR output is overwritten silently (D-04).
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Run OCR")
+        box.setText(
+            "This box has text you edited. Running OCR will overwrite your"
+            " edit with a fresh recognition. Undo is available via Ctrl+Z."
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        rerun_btn = box.addButton("Re-run OCR", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(rerun_btn)
+        box.exec()
+        return box.clickedButton() is rerun_btn
+
+    def _confirm_reocr_all(self, count: int) -> bool:
+        """Show the D-04 batch re-OCR confirmation with the edited-box count.
+
+        Mirrors :meth:`_confirm_reocr`; the body names the count (UI-SPEC
+        §Copywriting D-04 batch gate). Returns True only on Re-run OCR on
+        All; False on Cancel.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Run OCR")
+        box.setText(
+            f"{count} box(es) on this page have text you edited. Running OCR"
+            " will overwrite those edits. Undo is available via Ctrl+Z."
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        rerun_btn = box.addButton(
+            "Re-run OCR on All", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.setDefaultButton(rerun_btn)
+        box.exec()
+        return box.clickedButton() is rerun_btn
 
     def _on_show_original_toggled(self, show: bool) -> None:
         """View -> Show Original (P): toggle the before/after preview.
