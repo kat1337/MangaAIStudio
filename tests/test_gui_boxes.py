@@ -958,3 +958,253 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
         "(20,20,80,80), the move was visible on screen (pos+rect) but the snapshot "
         "materialized the stale rect() — the ItemIsMovable root cause."
     )
+
+
+# ===========================================================================
+# Plan 04-04 Task 1 — BoxItem text overlay (z=120) + bubble badge (z=140)
+# ===========================================================================
+#
+# Phase 4 "boxes become display objects" (D-09): each BoxItem gains a persistent
+# translucent outlined text overlay (QGraphicsTextItem child, z=120) showing the
+# current-focus text (translation when present, else recognized — D-10) and a
+# bubble-number badge (QGraphicsRectItem + digit, z=140, ItemIgnoresTransformations,
+# constant viewport-px). The overlay is PLAIN text (ASVS V5 — no setHtml on OCR
+# output) styled via QTextCharFormat.setTextOutline (RESEARCH Pattern 3, single
+# API). set_text_overlay_visible(False) is the independent visibility layer the
+# Toggle Text Overlay action (T, D-12) drives — independent of the box-layer
+# toggle (Shift+M) and the mask toggle (M).
+
+# Module constants the implementation must add (UI-SPEC §Z-order). Importing
+# them by name proves they exist; the import fails before Task 1 GREEN.
+from manga_ai_studio.gui.box_item import (  # noqa: E402
+    _BADGE_Z,
+    _TEXT_OVERLAY_Z,
+)
+
+
+def _pagebox_with_text(recognized: str = "", translation: str = "") -> PageBox:
+    """Build a DETECTED PageBox carrying recognized text and/or a translation.
+
+    Uses the centralized setters (set_recognized_text / set_translation) so the
+    payload-None guard + .text/.translation slots are exercised — the same path
+    the Inspector + inline editor take (Plan 04/05).
+    """
+    pb = PageBox(box=Box(20, 20, 220, 120), origin=DETECTED)
+    if recognized:
+        pb.set_recognized_text(recognized)
+    if translation:
+        pb.set_translation(translation)
+    return pb
+
+
+@pytest.mark.gui
+def test_text_overlay_z_constant_is_120() -> None:
+    """The text overlay z-order constant is 120 (UI-SPEC §Z-order, RESEARCH Pitfall 7)."""
+    assert _TEXT_OVERLAY_Z == 120
+
+
+@pytest.mark.gui
+def test_badge_z_constant_is_140() -> None:
+    """The bubble-badge z-order constant is 140 (above overlay z=120, below handles z=150)."""
+    assert _BADGE_Z == 140
+
+
+@pytest.mark.gui
+def test_text_overlay_child_exists_and_hidden_by_default(qtbot) -> None:
+    """A BoxItem carries a _text_overlay QGraphicsTextItem child (z=120), hidden by default."""
+    from PySide6.QtWidgets import QGraphicsTextItem
+
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    # refresh_text_overlay is what shows it; a fresh box with text should show it.
+    item.refresh_text_overlay()
+    assert hasattr(item, "_text_overlay")
+    assert isinstance(item._text_overlay, QGraphicsTextItem)
+    assert item._text_overlay.zValue() == 120
+
+
+@pytest.mark.gui
+def test_text_overlay_shows_recognized_when_no_translation(qtbot) -> None:
+    """A box with recognized text 'hello' and no translation renders 'hello' (D-10)."""
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.isVisible() is True
+    assert item._text_overlay.toPlainText() == "hello"
+
+
+@pytest.mark.gui
+def test_text_overlay_current_focus_rule_translation_wins(qtbot) -> None:
+    """The same box with translation 'hola' renders 'hola' (D-10 current-focus: translation wins)."""
+    pb = _pagebox_with_text(recognized="hello", translation="hola")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.toPlainText() == "hola"
+
+
+@pytest.mark.gui
+def test_text_overlay_hidden_when_no_recognized_text(qtbot) -> None:
+    """A box with no recognized text renders no text child (overlay hidden)."""
+    pb = PageBox(box=Box(20, 20, 100, 80), origin=DETECTED)  # payload=None
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.isVisible() is False
+
+
+@pytest.mark.gui
+def test_text_overlay_document_is_plain_not_rich(qtbot) -> None:
+    """The overlay document is PLAIN text (ASVS V5 — never setHtml on OCR output, T-4-07)."""
+    pb = _pagebox_with_text(recognized="<script>alert(1)</script>")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    # Plain text: toPlainText echoes the literal string; no rich-text flag set.
+    assert item._text_overlay.toPlainText() == "<script>alert(1)</script>"
+    # QTextDocument.isModified not relevant; the contract is the API used.
+    # setPlainText does NOT enable rich text. The document's default is plain.
+    assert item._text_overlay.document().isEmpty() is False
+
+
+@pytest.mark.gui
+def test_text_overlay_uses_outlined_text_format(qtbot) -> None:
+    """The overlay glyphs carry a setTextOutline pen (RESEARCH Pattern 3 single API)."""
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    cursor = item._text_overlay.textCursor()
+    cursor.select(__import__("PySide6").QtGui.QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    # The outline pen is set (2px dark matte per UI-SPEC §Color text-overlay outline).
+    pen = fmt.textOutline()
+    assert pen.style() != Qt.PenStyle.NoPen
+    assert pen.widthF() >= 1.0
+
+
+@pytest.mark.gui
+def test_set_text_overlay_visible_false_hides_only_text(qtbot) -> None:
+    """set_text_overlay_visible(False) hides the text child but the box border stays visible.
+
+    This is the independent visibility layer D-12 contracts: the text toggle
+    affects ONLY the text children, not the box border or handles.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.isVisible() is True
+    # The box itself is visible (it is in a scene).
+    assert item.isVisible() is True
+
+    item.set_text_overlay_visible(False)
+    assert item._text_overlay.isVisible() is False
+    # The box border + handles are unaffected (box still visible).
+    assert item.isVisible() is True
+
+
+@pytest.mark.gui
+def test_set_text_overlay_visible_true_reshows_text(qtbot) -> None:
+    """Toggling back to visible re-shows the text child (round-trip)."""
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.set_text_overlay_visible(False)
+    assert item._text_overlay.isVisible() is False
+    item.set_text_overlay_visible(True)
+    assert item._text_overlay.isVisible() is True
+
+
+@pytest.mark.gui
+def test_refresh_text_overlay_rerenders_after_text_change(qtbot) -> None:
+    """After a set_translation call, refresh_text_overlay re-renders the current-focus text."""
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.toPlainText() == "hello"
+    # Now set a translation — current focus flips to translation.
+    pb.set_translation("hola")
+    item.refresh_text_overlay()
+    assert item._text_overlay.toPlainText() == "hola"
+
+
+# --- bubble badge (z=140, ItemIgnoresTransformations, TL-outside) ---
+
+
+@pytest.mark.gui
+def test_badge_hidden_when_bubble_no_is_none(qtbot) -> None:
+    """A box with bubble_no=None renders no badge (hidden by default)."""
+    pb = _pagebox_with_text(recognized="hello")
+    assert pb.bubble_no is None
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+    assert item._badge.isVisible() is False
+
+
+@pytest.mark.gui
+def test_badge_shows_bubble_no_when_set(qtbot) -> None:
+    """The badge shows the pagebox.bubble_no when set; positioned TL-outside the box."""
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 3
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+    assert item._badge.isVisible() is True
+    # The badge is positioned TL-outside: its scene x < box left, y < box top.
+    badge_pos = item._badge.scenePos()
+    box_left = item.rect().left()
+    box_top = item.rect().top()
+    assert badge_pos.x() < box_left, (
+        f"badge x {badge_pos.x()} must be LEFT of the box (TL-outside, UI-SPEC §17); "
+        f"box left is {box_left}"
+    )
+    assert badge_pos.y() < box_top, (
+        f"badge y {badge_pos.y()} must be ABOVE the box (TL-outside, UI-SPEC §17); "
+        f"box top is {box_top}"
+    )
+
+
+@pytest.mark.gui
+def test_badge_ignores_transformations(qtbot) -> None:
+    """The badge (and its digit) use ItemIgnoresTransformations (constant viewport-px)."""
+    from PySide6.QtWidgets import QGraphicsItem
+
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 1
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+    assert item._badge.flags() & QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
+    # The digit child also ignores transformations.
+    digit = item._badge_digit
+    assert digit.flags() & QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
+
+
+@pytest.mark.gui
+def test_badge_manual_override_amber_border(qtbot) -> None:
+    """A manual_override badge gets a 2px amber (#f5a623) border; auto badges get matte (D-16)."""
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 5
+    pb.manual_override = True
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+    pen = item._badge.pen()
+    assert pen.color().name().lower() == "#f5a623", (
+        f"manual_override badge pen must be amber #f5a623; got {pen.color().name()}"
+    )
+    assert pen.widthF() >= 1.5  # 2px
+
+    # Auto badge (manual_override False) gets the matte outline #0b0b0e.
+    pb2 = _pagebox_with_text(recognized="hi")
+    pb2.bubble_no = 2
+    pb2.manual_override = False
+    _scene2, item2 = _scene_with_box(pb2)
+    item2.refresh_badge()
+    pen2 = item2._badge.pen()
+    assert pen2.color().name().lower() == "#0b0b0e", (
+        f"auto badge pen must be matte #0b0b0e; got {pen2.color().name()}"
+    )
+
+
+@pytest.mark.gui
+def test_badge_digit_shows_bubble_number(qtbot) -> None:
+    """The badge's digit child shows str(bubble_no)."""
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 42
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+    assert item._badge_digit.toPlainText() == "42"
