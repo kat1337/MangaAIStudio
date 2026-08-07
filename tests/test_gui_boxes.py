@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QTransform  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QGraphicsScene,
@@ -36,6 +36,7 @@ from panelcleaner.structures import Box  # noqa: E402
 
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle  # noqa: E402
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
+from manga_ai_studio.gui.inline_editor import InlineEditor  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 
 
@@ -1405,3 +1406,336 @@ def test_inspector_origin_label_hue_colored(qtbot) -> None:
     panel.load_box(pb_usr)
     usr_ss = panel.origin_label.styleSheet()
     assert "f5a623" in usr_ss.lower() or "amber" in usr_ss.lower()
+
+
+# ===========================================================================
+# Task 1 — InlineEditor (QGraphicsProxyWidget + QTextEdit) + BoxItem edit-mode
+# hooks (plan 04-05 RED gate). Tests reference the plan-04-05 contract before
+# the implementation exists: the module import above fails at collection, the
+# RED gate.
+# ===========================================================================
+
+
+def _editor_box(canvas: EditorCanvas, text: str = "hello", origin: str = USER) -> BoxItem:
+    """Add a text-carrying box to the canvas layer and return the item.
+
+    The text is written via the OCR-write setter (``set_recognized_text``,
+    edited=False) so D-04 tests can assert the manual-edit path flips it.
+    """
+    item = _add_user_box(canvas, Box(30, 30, 130, 130))
+    item.pagebox.set_recognized_text(text)
+    return item
+
+
+@pytest.mark.gui
+def test_inline_editor_proxy_created_on_scene_z1100_hidden(qtbot) -> None:
+    """The InlineEditor owns a QGraphicsProxyWidget parented to the SCENE (not
+    the box — UI-SPEC §15 anti-pattern), z=1100 (above the cursor z=1000), hidden."""
+    from PySide6.QtWidgets import QGraphicsProxyWidget
+
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    editor = InlineEditor(canvas)
+    assert isinstance(editor._proxy, QGraphicsProxyWidget)
+    assert editor._proxy.scene() is canvas.scene()
+    assert editor._proxy.zValue() == 1100
+    assert editor._proxy.isVisible() is False
+    assert editor.is_active() is False
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_shows_proxy_populated_and_positioned(qtbot) -> None:
+    """enter(box_item) shows the proxy at the box rect inset 2px, populated with
+    the current-focus text (recognized when no translation — D-08)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="こんにちは")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    assert editor.is_active() is True
+    assert editor._proxy.isVisible() is True
+    assert editor._focus_field == "recognized"
+    assert editor._text_edit.toPlainText() == "こんにちは"
+    rect = item.sceneBoundingRect()
+    tl = editor._proxy.sceneBoundingRect().topLeft()
+    assert abs(tl.x() - (rect.left() + 2)) < 0.5
+    assert abs(tl.y() - (rect.top() + 2)) < 0.5
+    assert editor._proxy.sceneBoundingRect().width() == pytest.approx(rect.width() - 4, abs=1.0)
+
+
+@pytest.mark.gui
+def test_inline_editor_focus_rule_translation_wins(qtbot) -> None:
+    """D-08 current-focus rule: once a translation exists, the editor edits the
+    TRANSLATION, not the recognized text."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="recognized text")
+    item.pagebox.set_translation("translated text")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    assert editor._focus_field == "translation"
+    assert editor._text_edit.toPlainText() == "translated text"
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_empty_box_opens_empty(qtbot) -> None:
+    """A box with no text (payload None) still opens the editor with empty text
+    (the payload-None guard keeps the edit session safe — checker W1)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _add_user_box(canvas, Box(30, 30, 130, 130))  # payload None
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    assert editor.is_active() is True
+    assert editor._focus_field == "recognized"
+    assert editor._text_edit.toPlainText() == ""
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_commits_previous_box_first(qtbot) -> None:
+    """One editor instance at a time (§15): entering a DIFFERENT box commits the
+    previous edit first (safer than discarding the user's work)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    a = _editor_box(canvas, text="before", origin=USER)
+    b = _add_user_box(canvas, Box(60, 60, 160, 160))
+    b.pagebox.set_recognized_text("b")
+    editor = InlineEditor(canvas)
+    editor.enter(a)
+    editor._text_edit.setPlainText("after")
+    editor.enter(b)
+    assert editor._active_box_item is b
+    assert a.pagebox.payload.text == "after"
+    assert a.pagebox.edited is True  # the auto-commit of A used the manual-edit setter
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_reenabling_same_box_keeps_uncommitted_text(qtbot) -> None:
+    """Re-entering the SAME box just re-focuses — uncommitted text is preserved."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("typed but not committed")
+    editor.enter(item)
+    assert editor._text_edit.toPlainText() == "typed but not committed"
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_sets_box_edit_mode(qtbot) -> None:
+    """While the editor is active the box's move/resize interaction is disabled
+    (D-07) — enter() flips the BoxItem edit-mode flag."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="hello")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    assert item._edit_mode is True
+    editor.commit()
+    assert item._edit_mode is False
+
+
+@pytest.mark.gui
+def test_inline_editor_commit_translation_writes_set_translation(qtbot) -> None:
+    """Enter commits the focus field: translation focus -> pagebox.set_translation
+    (the D-13 MT seam). The edited flag is NOT touched by a translation commit."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="recognized")
+    item.pagebox.set_translation("old translation")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("new translation")
+    editor.commit()
+    assert item.pagebox.payload.translation == "new translation"
+    assert item.pagebox.edited is False  # translation commit does not set D-04
+    assert editor.is_active() is False
+    assert editor._proxy.isVisible() is False
+    assert item._edit_mode is False
+
+
+@pytest.mark.gui
+def test_inline_editor_commit_recognized_sets_edited_true(qtbot) -> None:
+    """Recognized-focus commit -> pagebox.set_recognized_text_edited (D-04):
+    writes payload.text AND sets edited=True so a re-OCR must confirm (T-4-09)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="old text")
+    assert item.pagebox.edited is False  # OCR-write path
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("corrected text")
+    editor.commit()
+    assert item.pagebox.payload.text == "corrected text"
+    assert item.pagebox.edited is True
+
+
+@pytest.mark.gui
+def test_inline_editor_recognized_commit_routes_through_edited_setter(qtbot, monkeypatch) -> None:
+    """The recognized-focus commit calls the CENTRALIZED manual-edit setter
+    (Plan 01) — never set_recognized_text (OCR path) and never a direct
+    payload.text write (bypasses the payload-None guard)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="old")
+    calls: list[str] = []
+    orig = item.pagebox.set_recognized_text_edited
+    monkeypatch.setattr(item.pagebox, "set_recognized_text_edited", lambda t: calls.append(t) or orig(t))
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("edited text")
+    editor.commit()
+    assert calls == ["edited text"]
+    assert item.pagebox.payload.text == "edited text"
+    assert item.pagebox.edited is True
+
+
+@pytest.mark.gui
+def test_inline_editor_commit_emits_boxes_modified_with_before_state(qtbot) -> None:
+    """A real edit pushes a BOXES snapshot with the PRE-edit text (CR-01 pre-state
+    contract) — undo restores the pre-edit text, not the post-edit text (Pitfall 8)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("after")
+    editor.commit()
+    assert len(captured) == 1
+    before = captured[0]
+    assert len(before) == 1
+    assert before[0].payload.text == "before"  # snapshot-time text, NOT "after"
+    assert item.pagebox.payload.text == "after"
+
+
+@pytest.mark.gui
+def test_inline_editor_commit_noop_when_unchanged(qtbot) -> None:
+    """Committing without edits is a silent no-op: no boxes_modified push, just hide."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="unchanged")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor.commit()
+    assert len(captured) == 0
+    assert editor.is_active() is False
+    assert item.pagebox.payload.text == "unchanged"
+
+
+@pytest.mark.gui
+def test_inline_editor_cancel_discards_no_emit(qtbot) -> None:
+    """Esc/cancel discards edits since entry: no model write, no snapshot push (D-05)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("discarded")
+    editor.cancel()
+    assert len(captured) == 0
+    assert editor.is_active() is False
+    assert item.pagebox.payload.text == "before"
+    assert item._edit_mode is False
+
+
+@pytest.mark.gui
+def test_inline_editor_enter_key_commits(qtbot) -> None:
+    """Bare Enter (no modifier) commits the edit (UI-SPEC §15)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("via enter")
+    key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    editor._text_edit.keyPressEvent(key)
+    assert item.pagebox.payload.text == "via enter"
+    assert editor.is_active() is False
+
+
+@pytest.mark.gui
+def test_inline_editor_shift_enter_inserts_newline(qtbot) -> None:
+    """Shift+Enter inserts a newline (standard QTextEdit convention) — does NOT commit."""
+    from PySide6.QtGui import QTextCursor
+
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.moveCursor(QTextCursor.MoveOperation.End)
+    key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    editor._text_edit.keyPressEvent(key)
+    assert editor._text_edit.toPlainText() == "before\n"
+    assert editor.is_active() is True  # still editing
+
+
+@pytest.mark.gui
+def test_inline_editor_esc_key_cancels(qtbot) -> None:
+    """Esc inside the editor cancels: no snapshot push, text unchanged (D-05)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("discard me")
+    esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+    editor._text_edit.keyPressEvent(esc)
+    assert len(captured) == 0
+    assert editor.is_active() is False
+    assert item.pagebox.payload.text == "before"
+
+
+@pytest.mark.gui
+def test_inline_editor_commit_refreshes_text_overlay(qtbot) -> None:
+    """After a commit the BoxItem text overlay re-renders the new text (the
+    overlay shows the current-focus text — the canvas reflects the edit at once)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("after")
+    editor.commit()
+    assert item._text_overlay.toPlainText() == "after"
+
+
+@pytest.mark.gui
+def test_inline_editor_proxy_reused_across_sessions(qtbot) -> None:
+    """Only ONE proxy exists: enter/commit/enter reuses the same instance (UI-SPEC §15)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    a = _editor_box(canvas, text="a")
+    b = _add_user_box(canvas, Box(60, 60, 160, 160))
+    b.pagebox.set_recognized_text("b")
+    editor = InlineEditor(canvas)
+    proxy = editor._proxy
+    editor.enter(a)
+    editor.commit()
+    editor.enter(b)
+    assert editor._proxy is proxy
+
+
+@pytest.mark.gui
+def test_boxitem_enter_exit_edit_mode_wrappers(qtbot) -> None:
+    """BoxItem exposes enter_edit_mode/exit_edit_mode/set_edit_mode — the hooks
+    the canvas/InlineEditor use to disable move/resize while editing (D-07)."""
+    scene = QGraphicsScene()
+    pb = PageBox(box=Box(0, 0, 50, 50), origin=USER)
+    item = BoxItem(pb)
+    scene.addItem(item)
+    assert hasattr(item, "enter_edit_mode")
+    assert hasattr(item, "exit_edit_mode")
+    assert item._edit_mode is False
+    item.enter_edit_mode()
+    assert item._edit_mode is True
+    item.exit_edit_mode()
+    assert item._edit_mode is False
+
+
+@pytest.mark.gui
+def test_boxitem_set_edit_mode_toggles_handle_interactivity(qtbot) -> None:
+    """set_edit_mode(True) makes the corner handles non-interactive (they stay
+    VISIBLE — the box is still selected — but cannot arm a resize, §15)."""
+    scene = QGraphicsScene()
+    pb = PageBox(box=Box(0, 0, 50, 50), origin=USER)
+    item = BoxItem(pb)
+    scene.addItem(item)
+    rest = {c: h.acceptedMouseButtons() for c, h in item.handles.items()}
+    item.set_edit_mode(True)
+    for h in item.handles.values():
+        assert h.acceptedMouseButtons() == Qt.MouseButton.NoButton
+    item.set_edit_mode(False)
+    for c, h in item.handles.items():
+        assert h.acceptedMouseButtons() == rest[c]
