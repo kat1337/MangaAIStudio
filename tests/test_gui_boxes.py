@@ -300,6 +300,23 @@ def _release_at(canvas: EditorCanvas, sx: float, sy: float) -> QMouseEvent:
     )
 
 
+def _dblclick_at(canvas: EditorCanvas, sx: float, sy: float) -> QMouseEvent:
+    """Build a left-button DOUBLE-click whose viewport coords map to scene (sx, sy).
+
+    Delivered directly to ``canvas.mouseDoubleClickEvent`` (synthesizing Qt's
+    full press-release-press-release-dblclick sequence is flaky; the handler
+    is the contract under test).
+    """
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
 def _add_user_box(canvas: EditorCanvas, box: Box) -> BoxItem:
     """Add a single user-origin box to the canvas layer and return the item."""
     canvas.set_boxes(user_pageboxes=[PageBox(box=box, origin=USER)], detected_pageboxes=[])
@@ -1739,3 +1756,157 @@ def test_boxitem_set_edit_mode_toggles_handle_interactivity(qtbot) -> None:
     item.set_edit_mode(False)
     for c, h in item.handles.items():
         assert h.acceptedMouseButtons() == rest[c]
+
+
+# ===========================================================================
+# Task 2 — canvas double-click dispatch + inline-editor-active guard
+# (plan 04-05 RED gate). Tests reference canvas._inline_editor + the
+# mouseDoubleClickEvent/guard contract before the canvas changes exist.
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_canvas_double_click_box_opens_inline_editor(qtbot) -> None:
+    """Double-click over a BoxItem (box layer visible) opens the inline editor
+    with the box's current-focus text (D-05)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="hello")
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    assert editor.is_active() is True
+    assert editor._active_box_item is item
+    assert editor._text_edit.toPlainText() == "hello"
+    assert item.isSelected() is True  # double-click also selects (UI-SPEC §15)
+
+
+@pytest.mark.gui
+def test_canvas_double_click_empty_canvas_noop(qtbot) -> None:
+    """Double-click over empty canvas does NOT open the editor."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    _editor_box(canvas, text="hello")  # box at 30..130; click far away
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 180, 180))
+    assert canvas._inline_editor.is_active() is False
+
+
+@pytest.mark.gui
+def test_canvas_double_click_hidden_box_layer_noop(qtbot) -> None:
+    """Double-click with the box layer hidden does NOT open the editor (Pitfall 5:
+    a hidden layer skips box interaction entirely)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    _editor_box(canvas, text="hello")
+    canvas.set_box_overlay_visible(False)
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    assert canvas._inline_editor.is_active() is False
+
+
+@pytest.mark.gui
+def test_canvas_click_away_commits_inline_editor(qtbot) -> None:
+    """Click-away (a press OUTSIDE the editor proxy) commits the edit + consumes
+    the event — no move/resize/select dispatch runs (RESEARCH Pitfall 3, §15)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    assert editor.is_active() is True
+    editor._text_edit.setPlainText("after")
+    # Press at empty canvas (180,180 is outside the box rect 30..130).
+    canvas.mousePressEvent(_press_at(canvas, 180, 180))
+    assert editor.is_active() is False
+    assert item.pagebox.payload.text == "after"
+    assert item.pagebox.edited is True  # D-04 manual-edit path
+    assert len(captured) == 1  # one BOXES push from the commit
+    # The event was consumed — the click did NOT deselect the box.
+    assert item.isSelected() is True
+
+
+@pytest.mark.gui
+def test_canvas_click_inside_editor_does_not_commit(qtbot) -> None:
+    """A press INSIDE the editor proxy goes to the widget (super()) — the edit
+    session stays open, the box does not move (D-07)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    canvas.mousePressEvent(_press_at(canvas, 70, 70))  # inside the proxy
+    assert editor.is_active() is True
+    assert item.pagebox.payload.text == "before"
+    assert len(captured) == 0
+    assert canvas._moving_box is None  # no move armed
+
+
+@pytest.mark.gui
+def test_canvas_esc_cancels_inline_editor_keeps_box_selected(qtbot) -> None:
+    """Esc while editing cancels (no snapshot push) AND does NOT fall through to
+    box-deselect — the box stays selected (UI-SPEC §Shortcuts priority)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    captured: list[list] = []
+    canvas.boxes_modified.connect(captured.append)
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    editor._text_edit.setPlainText("changed")
+    esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+    canvas.keyPressEvent(esc)
+    assert editor.is_active() is False
+    assert len(captured) == 0
+    assert item.pagebox.payload.text == "before"
+    assert item.isSelected() is True  # NOT deselected (editor-scoped Esc)
+
+
+@pytest.mark.gui
+def test_canvas_edit_mode_drag_inside_editor_does_not_move_box(qtbot) -> None:
+    """A drag that starts inside the editor selects text in the QTextEdit — the
+    box does NOT move (D-07: edit mode disables move/resize)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="hello")
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    start_rect = QRectF(item.rect())
+    canvas.mousePressEvent(_press_at(canvas, 60, 60))  # inside proxy
+    canvas.mouseMoveEvent(_move_at(canvas, 90, 60))
+    canvas.mouseReleaseEvent(_release_at(canvas, 90, 60))
+    assert item.rect() == start_rect  # box did NOT move
+    assert editor.is_active() is True  # still editing
+
+
+@pytest.mark.gui
+def test_canvas_f2_opens_inline_editor_on_selected_box(qtbot) -> None:
+    """F2 with a box selected opens the inline editor (UI-SPEC §Shortcuts — the
+    keyboard alternative to double-click)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="hello")
+    canvas.mousePressEvent(_press_at(canvas, 60, 60))  # select
+    assert item.isSelected() is True
+    f2 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_F2, Qt.KeyboardModifier.NoModifier)
+    canvas.keyPressEvent(f2)
+    assert canvas._inline_editor.is_active() is True
+    assert canvas._inline_editor._active_box_item is item
+
+
+@pytest.mark.gui
+def test_canvas_f2_without_selection_noop(qtbot) -> None:
+    """F2 with no box selected does nothing (no editor opens)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    f2 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_F2, Qt.KeyboardModifier.NoModifier)
+    canvas.keyPressEvent(f2)
+    assert canvas._inline_editor.is_active() is False
+
+
+@pytest.mark.gui
+def test_canvas_set_boxes_commits_active_inline_editor(qtbot) -> None:
+    """Rebuilding the box layer (page switch / detection / restore) commits any
+    active edit first — a stale editor never dangles over a removed box."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="before")
+    canvas.mouseDoubleClickEvent(_dblclick_at(canvas, 60, 60))
+    editor = canvas._inline_editor
+    assert editor.is_active() is True
+    editor._text_edit.setPlainText("after")
+    canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[])
+    assert editor.is_active() is False
+    assert item.pagebox.payload.text == "after"
+    assert item.pagebox.edited is True
