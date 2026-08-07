@@ -2867,7 +2867,13 @@ class MainWindow(QMainWindow):
             # per-page (reset_history on page switch).
             try:
                 applied, unmatched = apply_translations(
-                    matches, self.image_files[page_index].boxes, page_no=page_index
+                    # WR-04: ImageFile.boxes defaults to None until the page is
+                    # visited (on_page_selected populates it) — pass [] so a
+                    # never-visited target page reports the clean no-match copy
+                    # instead of crashing on 'NoneType' not iterable.
+                    matches,
+                    self.image_files[page_index].boxes or [],
+                    page_no=page_index,
                 )
             except Exception as exc:
                 logger.error(f"Translation apply failed: {exc}")

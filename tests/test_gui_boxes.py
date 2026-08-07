@@ -2756,6 +2756,45 @@ def test_apply_translations_no_matches_copy(qtbot, tmp_path, monkeypatch) -> Non
 
 
 @pytest.mark.gui
+def test_apply_translations_never_visited_page_no_crash(qtbot, tmp_path, monkeypatch) -> None:
+    """WR-04: Load Translations onto a never-visited page (ImageFile.boxes is
+    None until on_page_selected populates it) must show the clean no-match
+    report, not crash into the spurious error dialog ('NoneType' not iterable)."""
+    from PIL import Image as PILImage
+
+    page_a = tmp_path / "page_a.png"
+    page_b = tmp_path / "page_b.png"
+    PILImage.new("RGB", (120, 120), color=(200, 200, 200)).save(page_a)
+    PILImage.new("RGB", (120, 120), color=(180, 180, 180)).save(page_b)
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    # Load the two-page folder: page 1 (index 0) auto-selects; page 2's
+    # ImageFile.boxes stays None (the WR-04 crash precondition).
+    window._load_folder(tmp_path)
+    assert len(window.image_files) == 2
+    assert window._current_page_index() == 0
+    assert window.image_files[1].boxes is None
+
+    reports: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda parent, title, body: reports.append((title, body))),
+    )
+    crashed: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        staticmethod(lambda *a: crashed.append(a)),
+    )
+    window._apply_translations("[1]: hola", 1)  # target page 2 (index 1)
+    assert crashed == [], "a never-visited target page must not hit the error dialog"
+    assert reports, "the no-match report must be shown instead of the error dialog"
+    assert "No lines matched any bubble number on page 2." in reports[0][1]
+
+
+@pytest.mark.gui
 def test_apply_translations_emits_one_boxes_modified(qtbot, tmp_path, monkeypatch) -> None:
     """UI-SPEC §20: the batch apply pushes ONE BOXES snapshot (batch undo
     entry) whose payloads carry the PRE-apply translation state."""
