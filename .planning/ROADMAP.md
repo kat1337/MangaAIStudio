@@ -152,7 +152,7 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 7/7 plans executed
+**Plans**: 8/8 plans executed (7 original + 1 UAT gap closure)
 
 Plans:
 
@@ -177,6 +177,7 @@ Plans:
 **Wave 5** *(blocked on 02 + 06)*
 
 - [x] 04-07-PLAN.md — LoadTranslationsDialog (paste + file-import) + parser apply + Auto-Number menu (RTL/LTR) (TEXT-05)
+- [x] 04-08-PLAN.md — *(UAT test 1 gap closure)* Overlay geometry tracking on move/resize (RC-1) + zoom font clamp [10,28] viewport px + 2-viewport-px outline (RC-2/RC-3) (TEXT-04)
 
 **UI hint**: yes
 
