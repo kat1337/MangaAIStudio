@@ -67,6 +67,7 @@ from manga_ai_studio.core.mask_editor import (
     paint_mask_stroke,
 )
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, origin_hue
+from manga_ai_studio.gui.inline_editor import InlineEditor
 
 
 # Maximum zoom factor (image_viewer.py:233 clamps at 100).
@@ -198,6 +199,15 @@ class EditorCanvas(QGraphicsView):
         self.empty_box_hint.setFont(hint_font)
         self.empty_box_hint.setZValue(EMPTY_BOX_HINT_Z)
         self._scene.addItem(self.empty_box_hint)
+
+        # Plan 04-05: the inline text editor (UI-SPEC §15, D-05/D-07/D-08). A
+        # transient QGraphicsProxyWidget(QTextEdit) overlay owned by the canvas
+        # — the single editor instance reused across edit sessions. Constructed
+        # AFTER setScene so its proxy can be parented to the scene (the §15
+        # anti-pattern: parent to the SCENE, never to the BoxItem). The
+        # mouse-press dispatch guard at the top of mousePressEvent is the
+        # click-away commit mechanism (RESEARCH Pitfall 3).
+        self._inline_editor = InlineEditor(self)
 
         # Phase 3 box-interaction state. _resizing_box / _moving_box /
         # _creating_box are the press-time flags; _resize_corner tracks which
@@ -841,7 +851,13 @@ class EditorCanvas(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         """Route mouse input to pan, box interaction, or the active mask tool.
 
-        Dispatch order (UI-SPEC §12d):
+        Dispatch order (UI-SPEC §12d + §15):
+        0. **Inline-editor guard** (RESEARCH Pitfall 3, §15) — FIRST branch.
+           While the inline editor is active, a click INSIDE the proxy goes to
+           the widget (``super()`` forwards it to the QTextEdit); a click
+           OUTSIDE the proxy commits the edit (click-away) and the event is
+           consumed either way — no move/resize/select can start while editing
+           (D-07).
         1. Pan (middle button OR Space+left) — highest priority, unchanged.
         2. Box hit-test (only when the box layer is visible) — a left-click on a
            corner handle begins a resize; on a box body selects + begins a move;
@@ -851,6 +867,20 @@ class EditorCanvas(QGraphicsView):
         3. Mask tool (left-click + active mask tool) — unchanged.
         4. Base QGraphicsView (item selection, scrollbar click, etc.).
         """
+        # --- Inline-editor guard (RESEARCH Pitfall 3): MUST precede ALL other
+        # dispatch. Do not rely on Qt focus-out signaling alone (QGraphicsProxy-
+        # Widget focus/IME quirks) — the guard decides commit vs. pass-through
+        # by the proxy-scene-rect hit-test.
+        if self._inline_editor.is_active():
+            if self._inline_editor.proxy_scene_rect().contains(self._scene_pos(event)):
+                # Click INSIDE the editor -> let the QTextEdit handle it.
+                super().mousePressEvent(event)
+            else:
+                # Click OUTSIDE -> click-away commit (same path as Enter, §15).
+                self._inline_editor.commit()
+            event.accept()
+            return
+
         middle = event.button() == Qt.MouseButton.MiddleButton
         space_left = self._space_held and event.button() == Qt.MouseButton.LeftButton
         if middle or space_left:
@@ -910,6 +940,36 @@ class EditorCanvas(QGraphicsView):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        """Open the inline editor on a double-clicked box (D-05, UI-SPEC §15).
+
+        NONE existed before plan 04-05 — Phase 3's D-07 contract is preserved:
+        single-click = select/move, double-click = edit entry. A double-click
+        over a BoxItem (box layer visible) selects it and opens the inline
+        editor; over empty canvas (or with the box layer hidden) it falls
+        through to the base class. While the editor is already active the
+        double-click goes to the proxy widget (word-select inside the
+        QTextEdit) — never a re-entry.
+        """
+        if self._inline_editor.is_active():
+            super().mouseDoubleClickEvent(event)
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.box_layer.isVisible()
+        ):
+            item = self._box_item_at(self._scene_pos(event))
+            if isinstance(item, BoxItem):
+                # Select the box (UI-SPEC §15 — the box stays selected while
+                # editing so the user can immediately re-edit or move it after
+                # commit) then open the editor on it.
+                self._deselect_box()
+                item.setSelected(True)
+                self._inline_editor.enter(item)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         """Pan when panning; advance the active stroke; else track the cursor.
@@ -1099,8 +1159,24 @@ class EditorCanvas(QGraphicsView):
                 event.accept()
                 return
         if event.key() == Qt.Key.Key_Escape:
+            # UI-SPEC §Shortcuts Esc priority: cancel the inline edit FIRST
+            # (highest priority — the box stays selected, §15); then Phase 3
+            # deselect; Phase 2 batch-cancel lives in MainWindow.
+            if self._inline_editor.is_active():
+                self._inline_editor.cancel()
+                event.accept()
+                return
             if self._selected_box() is not None:
                 self._deselect_box()
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_F2:
+            # UI-SPEC §Shortcuts: F2 = the keyboard alternative to double-click
+            # ("rename/edit in place" convention). Opens the editor on the
+            # selected box; no-op when nothing is selected or already editing.
+            selected = self._selected_box()
+            if selected is not None and not self._inline_editor.is_active():
+                self._inline_editor.enter(selected)
                 event.accept()
                 return
 
@@ -1200,6 +1276,11 @@ class EditorCanvas(QGraphicsView):
         Qt selection on the child — see deviation note in set_box_overlay_visible).
         ``box_layer`` stays as the logical-visibility flag the dispatch checks.
         """
+        # Plan 04-05: commit any active inline edit BEFORE rebuilding the layer
+        # (page switch / detection / restore all rebuild here) — a stale editor
+        # must never dangle over a removed box. Mirrors how the brush stroke
+        # commits on page switch.
+        self._commit_inline_editor_if_active()
         # CR-01 fix: capture the PRE-mutation snapshot (the state to restore to
         # on undo) BEFORE clearing the layer. set_boxes is used by detection,
         # restore, and page-switch (all suppress the push hook via the
@@ -1365,6 +1446,17 @@ class EditorCanvas(QGraphicsView):
             item._sync_handles()
 
     # --------------------------------------------------- box interaction helpers
+    def _commit_inline_editor_if_active(self) -> None:
+        """Commit the active inline edit (no-op when none is active).
+
+        Called at the top of every path that rebuilds the box layer
+        (:meth:`set_boxes` — page switch / detection / restore) so a stale
+        editor never dangles over a removed box; mirrors how the brush stroke
+        commits on page switch.
+        """
+        if self._inline_editor.is_active():
+            self._inline_editor.commit()
+
     def _deselect_box(self) -> None:
         """Deselect the currently selected box, if any (UI-SPEC §12c deselect)."""
         for item in self._box_items:
