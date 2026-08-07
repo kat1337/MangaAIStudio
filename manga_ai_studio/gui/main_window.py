@@ -467,9 +467,33 @@ class MainWindow(QMainWindow):
         # (refreshed in _refresh_action_states).
         self.action_ocr_all.setEnabled(False)
 
+        text_menu = self.menuBar().addMenu("&Text")
+
+        # Auto-Number submenu (D-15/D-16): assign page-global bubble numbers
+        # 1..N in reading order via reading_order.assign_bubble_numbers (the
+        # Plan 02 XY-Cut algorithm — no algorithm logic here).
+        self.auto_number_menu = text_menu.addMenu("Auto-Number")
+        self.action_auto_number_rtl = QAction("RTL (Manga)", self)
+        self.action_auto_number_rtl.setStatusTip(
+            "Number all boxes 1..N in right-to-left, top-to-bottom reading"
+            " order (manga default)."
+        )
+        self.action_auto_number_rtl.triggered.connect(self._auto_number_rtl)
+        self.action_auto_number_ltr = QAction("LTR (Manhwa)", self)
+        self.action_auto_number_ltr.setStatusTip(
+            "Number all boxes 1..N in left-to-right, top-to-bottom reading"
+            " order (manhwa)."
+        )
+        self.action_auto_number_ltr.triggered.connect(self._auto_number_ltr)
+        # Enabled iff >= 1 box exists AND no async op is running (refreshed in
+        # _refresh_action_states — mirrors action_ocr_all gating).
+        self.action_auto_number_rtl.setEnabled(False)
+        self.action_auto_number_ltr.setEnabled(False)
+        self.auto_number_menu.addAction(self.action_auto_number_rtl)
+        self.auto_number_menu.addAction(self.action_auto_number_ltr)
+
         # Load Translations (D-17): paste/import a typesetting-tool-format
-        # translation list and match it to bubble numbers. Plan 07 adds the
-        # Auto-Number submenu between these two groups.
+        # translation list and match it to bubble numbers.
         self.action_load_translations = QAction("Load Translations\u2026", self)
         self.action_load_translations.setStatusTip(
             "Paste or import a typesetting-tool-format translation list and"
@@ -480,9 +504,10 @@ class MainWindow(QMainWindow):
         # _refresh_action_states).
         self.action_load_translations.setEnabled(False)
 
-        text_menu = self.menuBar().addMenu("&Text")
         text_menu.addAction(self.action_run_ocr)
         text_menu.addAction(self.action_ocr_all)
+        text_menu.addSeparator()
+        text_menu.addMenu(self.auto_number_menu)
         text_menu.addSeparator()
         text_menu.addAction(self.action_load_translations)
 
@@ -757,10 +782,16 @@ class MainWindow(QMainWindow):
             page_open and self.canvas.box_count() > 0 and not self._op_running
         )
         # Plan 07: Load Translations needs only an open page + no running op
-        # (a page with no boxes reports the no-matches copy; Auto-Number needs
-        # >= 1 box — Task 2 adds its actions).
+        # (a page with no boxes reports the no-matches copy); Auto-Number
+        # needs >= 1 box (mirrors action_ocr_all gating).
         self.action_load_translations.setEnabled(
             page_open and not self._op_running
+        )
+        self.action_auto_number_rtl.setEnabled(
+            page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
+        self.action_auto_number_ltr.setEnabled(
+            page_open and self.canvas.box_count() > 0 and not self._op_running
         )
 
     def _current_page_index(self) -> int | None:
@@ -2700,6 +2731,45 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(rerun_btn)
         box.exec()
         return box.clickedButton() is rerun_btn
+
+    def _auto_number(self, rtl: bool) -> None:
+        """Assign page-global bubble numbers 1..N in reading order (D-15/D-16).
+
+        Delegates to the Plan 02 ``reading_order.assign_bubble_numbers``
+        (XY-Cut — no algorithm logic in the GUI). The preserve-manual conflict
+        policy lives in the algorithm: ``manual_override`` boxes keep their
+        number + flag and the auto sequence leaves a gap (T-4-17). Every
+        BoxItem badge refreshes (new numbers + manual-override amber borders);
+        the whole op pushes ONE batch BOXES snapshot (UI-SPEC §20) and shows
+        the "Numbered {n} boxes (RTL/TB)." / "(LTR/TB)." transient. An empty
+        page is a no-op.
+        """
+        from manga_ai_studio.core.reading_order import assign_bubble_numbers
+
+        boxes = [it.pagebox for it in self.canvas._box_items]
+        if not boxes:
+            return
+        # CR-01 before-state: the snapshot materializes fresh PageBoxes, so
+        # its bubble_no fields are detached from the live boxes by
+        # construction (no payload mutation here — no Pitfall-8 detach needed).
+        before = self.canvas.boxes_snapshot()
+        count = assign_bubble_numbers(boxes, rtl=rtl)
+        if count:
+            for it in self.canvas._box_items:
+                it.refresh_badge()
+            # ONE batch BOXES entry -> _on_boxes_modified pushes it.
+            self.canvas.boxes_modified.emit(before)
+        self._show_transient_status(
+            f"Numbered {count} boxes ({'RTL/TB' if rtl else 'LTR/TB'})."
+        )
+
+    def _auto_number_rtl(self) -> None:
+        """Text -> Auto-Number -> RTL (Manga): right-to-left reading order."""
+        self._auto_number(rtl=True)
+
+    def _auto_number_ltr(self) -> None:
+        """Text -> Auto-Number -> LTR (Manhwa): left-to-right reading order."""
+        self._auto_number(rtl=False)
 
     # ------------------------------------------------ load translations (plan 07)
     def _open_load_translations(self) -> None:
