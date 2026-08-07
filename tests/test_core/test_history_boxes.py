@@ -283,6 +283,51 @@ def test_boxes_snapshot_is_detached() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 — text-edit undo restores PRE-edit state (plan 04-01 Task 2)
+#
+# RESEARCH Pitfall 8 (payload aliasing): once PageBox carries a TextBlock
+# payload with mutable ``.text`` / ``.translation``, the BOXES undo stack
+# MUST detach the payload at push/pop so a live in-place text edit does not
+# reach the snapshot. ``_materialize_snapshot`` calls
+# ``item.copy() if hasattr(item, "copy")`` — and PageBox.copy() (plan 04-01
+# Task 1) detaches the payload via ``copy.copy(payload)``. This is the
+# history-layer regression guard (the payload-aliasing test file holds the
+# push-side companion).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_pop_boxes_undo_restores_text_edit_state() -> None:
+    """Undo of a text edit restores the PRE-edit text, not the current text.
+
+    A PageBox carrying a TextBlock payload (Phase 4) is pushed; the live
+    payload.text is then mutated in place; undo must return a pagebox whose
+    payload.text is the snapshot-time value. This only works because
+    ``PageBox.copy()`` detaches the payload — without it, the snapshot and
+    the live object share one TextBlock and undo restores the SAME (mutated)
+    text.
+    """
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    history = HistoryManager(limit=20)
+    pb = PageBox(box=Box(10, 20, 110, 220), origin=DETECTED)
+    pb.set_recognized_text("before")  # payload constructed, text="before"
+    history.push_boxes_state([pb])
+
+    # Simulate a live in-place text edit (mutates the SAME payload object).
+    pb.payload.text = "after"
+
+    restored = history.pop_boxes_undo(current_boxes=[pb])
+    assert restored is not None
+    assert len(restored) == 1
+    restored_pb = restored[0]
+    # Undo restores the snapshot-time text.
+    assert restored_pb.payload is not None
+    assert restored_pb.payload.text == "before"
+
+
+# ---------------------------------------------------------------------------
 # clear() — all six lists (Pitfall 4 + D-10)
 # ---------------------------------------------------------------------------
 

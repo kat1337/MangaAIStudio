@@ -1272,6 +1272,14 @@ class EditorCanvas(QGraphicsView):
         03-02's ``push_boxes_state`` stores and plan 03-05's restore path
         consumes (it reads ``.origin`` / ``.payload`` via attribute access, so
         PageBox — not a bare tuple — is required).
+
+        Phase 4 (RESEARCH Pitfall 1): the snapshot now reads the live
+        ``pagebox``'s ``edited`` / ``bubble_no`` / ``manual_override`` too.
+        Without this the BOXES undo stack + page-switch persistence seam would
+        silently drop the ``edited`` flag (re-OCR gate), bubble number, and
+        manual-override state. ``payload.text`` / ``payload.translation`` ride
+        on the payload reference (detached at the history boundary by
+        ``PageBox.copy()`` — Pitfall 8).
         """
         snapshots: list[PageBox] = []
         for item in self._box_items:
@@ -1281,6 +1289,9 @@ class EditorCanvas(QGraphicsView):
                     box=fresh_box,
                     origin=item.pagebox.origin,
                     payload=item.pagebox.payload,
+                    edited=item.pagebox.edited,
+                    bubble_no=item.pagebox.bubble_no,
+                    manual_override=item.pagebox.manual_override,
                 )
             )
         return snapshots
