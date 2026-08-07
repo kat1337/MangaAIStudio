@@ -2326,14 +2326,17 @@ def test_text_menu_has_run_ocr_and_ocr_all_entries(qtbot, tmp_path) -> None:
     """UI-SPEC §Surface 1: the Text menu (between View and Tools) carries
     Run OCR + OCR All Boxes (Ctrl+R)."""
     window = _window_with_page(qtbot, tmp_path)
-    menus = [a.text() for a in window.menuBar().actions() if a.menu() is not None]
+    # Hold strong references to the menubar actions: QAction wrappers from
+    # actions() are temporary, and dropping the wrapper can take the child
+    # QMenu's wrapper with it (PySide6 wrapper-lifetime).
+    actions = window.menuBar().actions()
+    menus = [a.text() for a in actions if a.menu() is not None]
     assert "&Text" in menus
     # Recommended order File / Edit / View / Text / Tools / Help.
     assert menus.index("&Text") == menus.index("&View") + 1
     assert menus.index("&Text") == menus.index("&Tools") - 1
-    text_menu = next(
-        a.menu() for a in window.menuBar().actions() if a.text() == "&Text"
-    )
+    text_action = next(a for a in actions if a.text() == "&Text")
+    text_menu = text_action.menu()
     texts = [a.text() for a in text_menu.actions()]
     assert "Run OCR" in texts
     assert "OCR All Boxes" in texts
@@ -2373,13 +2376,28 @@ def test_action_ocr_all_enabled_with_boxes(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_ctrl_r_shortcut_triggers_ocr_all(qtbot, tmp_path, monkeypatch) -> None:
-    """UI-SPEC §Shortcuts: Ctrl+R fires run_ocr_all."""
+    """UI-SPEC §Shortcuts: the OCR All action carries Ctrl+R and triggering
+    it runs the real run_ocr_all dispatch (fills a text-empty box).
+
+    Triggering the QAction is the same path Qt's shortcut system uses
+    (action shortcuts emit ``triggered``); asserting the full dispatch (not
+    an instance-monkeypatched method — signal connections capture the bound
+    method at connect time) proves the wiring end-to-end."""
     window = _window_with_page(qtbot, tmp_path)
-    called: list[str] = []
-    monkeypatch.setattr(window, "run_ocr_all", lambda: called.append("run_ocr_all"))
+    _add_user_box_window(window, Box(10, 10, 60, 60))
+    fake = _FakeOCRModel("新")
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: fake,
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
     assert window.action_ocr_all.shortcut().toString() == "Ctrl+R"
+    window._refresh_action_states()  # the action must be enabled to trigger
+    assert window.action_ocr_all.isEnabled() is True
     window.action_ocr_all.trigger()
-    assert called == ["run_ocr_all"]
+    assert window._op_running is True  # the action dispatched the worker
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert window.canvas._box_items[0].pagebox.payload.text == "新"
 
 
 @pytest.mark.gui

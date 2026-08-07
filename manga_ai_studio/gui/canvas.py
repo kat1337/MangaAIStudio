@@ -153,6 +153,13 @@ class EditorCanvas(QGraphicsView):
     # it"). Each emit site captures boxes_snapshot() BEFORE the mutation and
     # passes it here.
     boxes_modified = Signal(list)
+    # Plan 04-06 (D-01): emitted when a user box is created on Alt+drag
+    # draw-release (``_commit_create``), carrying the new BoxItem. MainWindow
+    # subscribes and dispatches the OCR worker — the manga-ocr model call
+    # itself NEVER runs on the GUI thread (RESEARCH Pitfall 6, T-01-07). A
+    # box below the 8x8 create threshold never emits (the Phase 3 no-op
+    # returns before this signal — UI-SPEC §14).
+    ocr_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1652,6 +1659,11 @@ class EditorCanvas(QGraphicsView):
         self._deselect_box()
         item.setSelected(True)
         self._refresh_empty_box_hint()
+        # D-01 auto-OCR seam: the box arrives with recognized text. The
+        # signal lets MainWindow dispatch the OCR Worker off the GUI thread
+        # (the < 8x8 no-op above already returned — a real box always emits;
+        # RESEARCH Pitfall 6, T-01-07).
+        self.ocr_requested.emit(item)
         # CR-01 fix: emit the PRE-create snapshot (captured at _begin_create_box),
         # i.e. the layer WITHOUT the new box — what undo restores to.
         self.boxes_modified.emit(self._boxes_interaction_start_snapshot)

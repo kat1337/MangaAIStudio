@@ -92,6 +92,11 @@ class MainWindow(QMainWindow):
         # Central canvas.
         self.canvas = EditorCanvas(self)
         self.setCentralWidget(self.canvas)
+        # D-01 auto-OCR hook (plan 06): a user box created on Alt+drag
+        # draw-release emits canvas.ocr_requested; MainWindow dispatches the
+        # OCR worker. Connected right after construction (the canvas's
+        # class-scope signal exists before any event can fire).
+        self.canvas.ocr_requested.connect(self._on_canvas_ocr_requested)
 
         # Track loaded pages + the index of the currently-shown page.
         self.image_files: list[ImageFile] = []
@@ -243,6 +248,7 @@ class MainWindow(QMainWindow):
         self._build_file_menu()
         self._build_edit_menu()
         self._build_view_menu()
+        self._build_text_menu()
         self._build_tools_menu()
         self._build_help_menu()
 
@@ -429,6 +435,39 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_toggle_sidebar)
         view_menu.addAction(self.action_toggle_tools)
         view_menu.addAction(self.action_toggle_inspector)
+
+    def _build_text_menu(self) -> None:
+        """Build the Text menu (UI-SPEC §Surface 1 — between View and Tools).
+
+        Plan 06 ships Run OCR + OCR All Boxes (Ctrl+R). Plan 07 adds the
+        Auto-Number submenu + Load Translations to this menu (the order
+        File/Edit/View/Text/Tools/Help groups the text/OCR actions).
+        """
+        # Run OCR (D-01): recognize text in the single selected box.
+        self.action_run_ocr = QAction("Run OCR", self)
+        self.action_run_ocr.setStatusTip(
+            "Recognize text in the selected box with manga-ocr."
+        )
+        self.action_run_ocr.triggered.connect(self.run_ocr_selected)
+        # Enabled iff exactly one box is selected AND no async op is running
+        # (refreshed in _refresh_action_states).
+        self.action_run_ocr.setEnabled(False)
+
+        # OCR All Boxes (D-03): fill every text-empty box on the page (Ctrl+R).
+        self.action_ocr_all = QAction("OCR All Boxes", self)
+        self.action_ocr_all.setShortcut(QKeySequence("Ctrl+R"))
+        self.action_ocr_all.setStatusTip(
+            "Recognize text in every text box on this page (Ctrl+R). Boxes"
+            " you've already edited are kept unless you confirm."
+        )
+        self.action_ocr_all.triggered.connect(self.run_ocr_all)
+        # Enabled iff >= 1 box exists on the page AND no async op is running
+        # (refreshed in _refresh_action_states).
+        self.action_ocr_all.setEnabled(False)
+
+        text_menu = self.menuBar().addMenu("&Text")
+        text_menu.addAction(self.action_run_ocr)
+        text_menu.addAction(self.action_ocr_all)
 
     def _build_tools_menu(self) -> None:
         # Detect Text (D) — wired in plan 03 (async CTD detection).
@@ -687,6 +726,19 @@ class MainWindow(QMainWindow):
             folder_open and not self._op_running
         )
         self.action_cancel_batch.setEnabled(self._batch_active)
+
+        # Plan 06 OCR actions. Run OCR is enabled iff exactly one box is
+        # selected AND no async op is running (D-01 — mirrors detect_text's
+        # `page_open and not self._op_running` plus the one-box-selected
+        # check); OCR All Boxes iff >= 1 box exists AND no async op is
+        # running (D-03).
+        box_selected = self.canvas._selected_box() is not None
+        self.action_run_ocr.setEnabled(
+            page_open and box_selected and not self._op_running
+        )
+        self.action_ocr_all.setEnabled(
+            page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
 
     def _current_page_index(self) -> int | None:
         """Return the 0-indexed position of the path shown in the canvas."""
@@ -2273,6 +2325,20 @@ class MainWindow(QMainWindow):
         if box_item.pagebox.has_recognized_text() and box_item.pagebox.edited:
             if not self._confirm_reocr():
                 return
+        self._dispatch_ocr_for_box(box_item)
+
+    def _on_canvas_ocr_requested(self, box_item) -> None:
+        """D-01 auto-OCR hook: a freshly-drawn user box triggers single-box OCR.
+
+        Subscribed to ``canvas.ocr_requested`` (emitted by ``_commit_create``
+        on Alt+drag draw-release). The D-04 gate does NOT apply here — a
+        freshly-created box has no text (``edited=False``), so silent
+        overwrite semantics are correct. Gated on ``_op_running``: if another
+        op (e.g. a detection) is running, the auto-OCR is skipped silently to
+        avoid worker pileup on rapid draws (T-4-14).
+        """
+        if self._op_running:
+            return
         self._dispatch_ocr_for_box(box_item)
 
     def _dispatch_ocr_for_box(self, box_item) -> None:
