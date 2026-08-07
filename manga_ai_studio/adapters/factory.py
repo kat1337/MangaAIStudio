@@ -48,7 +48,18 @@ def backend_factory(kind: str, backend: str) -> DetectionModel | OCRModel | Inpa
         raise ValueError(f"Unknown backend: {kind}/{backend}")
 
     if kind == "ocr":
-        raise NotImplementedError("OCR adapter lands in Phase 4")
+        if backend == "torch":
+            # Lazy import: manga-ocr/transformers are only needed when an OCR
+            # model is actually constructed, not when the factory is imported
+            # (D-07). Plan 04-03 implements TorchOCRModel.
+            from manga_ai_studio.adapters.torch_impl import TorchOCRModel
+
+            return TorchOCRModel()
+        if backend == "onnx":
+            # D-14 hook: designed-in, not built-out. ONNXOCRModel lands in a
+            # future phase.
+            raise NotImplementedError("ONNX OCR backend lands in a future phase")
+        raise ValueError(f"Unknown backend: {kind}/{backend}")
 
     if kind == "inpainting":
         if backend == "torch":

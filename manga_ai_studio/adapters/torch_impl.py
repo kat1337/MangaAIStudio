@@ -42,9 +42,9 @@ from panelcleaner.comic_text_detector.inference import TextDetector
 from panelcleaner.comic_text_detector.utils.textmask import REFINEMASK_ANNOTATION
 
 # local adapter contract (D-01 ABCs).
-from manga_ai_studio.adapters.base import DetectionModel, InpaintModel
+from manga_ai_studio.adapters.base import DetectionModel, InpaintModel, OCRModel
 
-__all__ = ["TorchCTDModel", "TorchLamaModel"]
+__all__ = ["TorchCTDModel", "TorchLamaModel", "TorchOCRModel"]
 
 
 class TorchCTDModel(DetectionModel):
@@ -277,4 +277,110 @@ class TorchLamaModel(InpaintModel):
             "backend": "torch",
             "model": "big-lama",
             "model_path": str(self.model_path),
+        }
+
+
+class TorchOCRModel(OCRModel):
+    """Manga-OCR PyTorch OCR backend (D-01/D-14; TEXT-02).
+
+    Wraps the vendored ``panelcleaner.ocr.ocr_mangaocr.MangaOcr`` singleton
+    behind the :class:`OCRModel` ABC, mirroring the :class:`TorchLamaModel`
+    shape (lazy-import in :meth:`load`, numpy->PIL round-trip in
+    :meth:`recognize`, plain ``str`` return, "Model not loaded" guard) —
+    RESEARCH Pattern 1.
+
+    The heavy ``manga_ocr`` import is paid **lazily inside** :meth:`load` (via
+    the vendored MangaOcr wrapper, which itself imports ``manga_ocr`` at its
+    module top). The wrapper is the singleton (load-once per session) so
+    repeated ``load()`` calls reuse one model instance (T-4-06 DoS mitigation:
+    no repeated ~450MB downloads).
+
+    ``recognize`` converts the incoming numpy region to a ``PIL.Image`` with
+    ``mode="RGB"`` before delegating, because manga-ocr's ``__call__`` accepts
+    ``PIL.Image.Image`` (NOT numpy) — Pitfall 2. manga-ocr internally coerces
+    to grayscale then back to RGB, so the input color mode is not load-bearing,
+    but RGB is the safe default.
+
+    The ``model_path`` arg is accepted for ABC symmetry and stored, but
+    manga-ocr resolves its own model from the HF cache
+    (``kha-white/manga-ocr-base``) via ``initialize_model()`` — it is
+    informational here, not a file the adapter opens (the GUI worker
+    cache-checks via ``panelcleaner.model_downloader.is_ocr_downloaded()``
+    before triggering ``initialize_model()``, CR-11 pattern — Plan 06).
+    """
+
+    def __init__(self, config=None) -> None:
+        self.config = config
+        self.model = None
+        self.model_path = None
+
+    def load(self, model_path: Path, device: str = "cpu") -> None:
+        """Load the manga-ocr model via the vendored MangaOcr singleton.
+
+        The MangaOcr wrapper is imported lazily here (D-07) so this module is
+        importable without the ``manga_ocr`` / ``transformers`` heavy deps.
+        ``MangaOcr()`` returns the singleton; ``initialize_model()`` constructs
+        the real ``MangaOcrModel`` on first call (triggering the first-run HF
+        download inside the worker thread — Plan 06 enforces off-GUI-thread,
+        T-01-07; Pitfall 6).
+
+        ``model_path`` is informational for manga-ocr (the model resolves from
+        the HF cache) but kept for ABC symmetry and stored on the instance.
+
+        Args:
+            model_path: accepted for ABC symmetry; stored, not opened.
+            device: accepted for ABC compatibility; manga-ocr manages its own
+                device.
+        """
+        # Lazy import (D-07): keep the module importable without manga_ocr.
+        from panelcleaner.ocr.ocr_mangaocr import MangaOcr  # noqa: WPS433
+
+        self.model = MangaOcr()  # singleton — load-once per session
+        self.model.initialize_model()  # triggers the first-run HF download
+        self.model_path = model_path
+
+    def recognize(self, image: np.ndarray) -> str:
+        """Recognize text in ``image`` and return the recognized string.
+
+        Pitfall 2: manga-ocr's ``__call__`` accepts ``PIL.Image.Image``, NOT
+        numpy. The incoming numpy region is converted via
+        ``Image.fromarray(image, mode="RGB")`` (mirror ``TorchLamaModel.inpaint``
+        lines 245-246) before delegating to the singleton.
+
+        Args:
+            image: RGB image array ``(H, W, 3)`` uint8 — a page-region crop.
+
+        Returns:
+            The recognized text as a plain Python ``str``.
+        """
+        if self.model is None:
+            raise RuntimeError("Model not loaded — call load() before recognize().")
+
+        # numpy -> PIL (manga-ocr accepts PIL.Image, NOT numpy — Pitfall 2).
+        pil_image = Image.fromarray(image, mode="RGB")
+        return self.model(pil_image)  # -> str
+
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Return ``image`` unchanged — manga-ocr handles preprocessing
+        internally (it coerces to grayscale then back to RGB)."""
+        return image
+
+    def postprocess(self, model_output) -> str:
+        """Return ``model_output`` unchanged — recognize() already returns a str."""
+        return model_output
+
+    def configure(self, **kwargs) -> None:
+        """Store runtime overrides.
+
+        Phase 4 uses manga-ocr's defaults. The kwargs are accepted for ABC
+        compatibility and stored for a future override.
+        """
+        self._config_kwargs = kwargs
+
+    def get_info(self) -> dict:
+        """Return model metadata (backend, model id, model path)."""
+        return {
+            "backend": "torch",
+            "model": "manga-ocr/kha-white/manga-ocr-base",
+            "model_path": str(self.model_path) if self.model_path is not None else None,
         }

@@ -36,3 +36,32 @@ def test_onnx_stub_raises() -> None:
     inp = OnnxInpaintModel()
     with pytest.raises(NotImplementedError):
         inp.load(Path("x"))
+
+
+@pytest.mark.unit
+def test_ocr_factory_returns_torch_ocr_model() -> None:
+    """backend_factory('ocr', 'torch') returns a TorchOCRModel (D-14).
+
+    The factory's 'ocr' branch is resolved (no longer raises
+    NotImplementedError). The lazy import keeps the factory importable without
+    manga_ocr (D-07); construction does not load the model.
+    """
+    from manga_ai_studio.adapters.factory import backend_factory
+    from manga_ai_studio.adapters.torch_impl import TorchOCRModel
+
+    model = backend_factory("ocr", "torch")
+    assert isinstance(model, TorchOCRModel)
+    assert model.model is None  # constructed but not loaded
+
+
+@pytest.mark.unit
+def test_ocr_factory_onnx_not_implemented() -> None:
+    """backend_factory('ocr', 'onnx') raises NotImplementedError (D-14 hook).
+
+    The ONNX OCR backend is designed-in (the branch exists) but not built-out
+    in Phase 4 — a future phase provides ONNXOCRModel.
+    """
+    from manga_ai_studio.adapters.factory import backend_factory
+
+    with pytest.raises(NotImplementedError, match="ONNX OCR backend"):
+        backend_factory("ocr", "onnx")

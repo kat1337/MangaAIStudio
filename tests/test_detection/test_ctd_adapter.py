@@ -97,10 +97,22 @@ def test_factory_unknown_raises() -> None:
 
 
 @pytest.mark.unit
-def test_factory_ocr_not_implemented() -> None:
-    """OCR adapter is contracted but lands in Phase 4."""
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        backend_factory("ocr", "torch")
+def test_factory_ocr_torch_returns_ocr_model() -> None:
+    """backend_factory('ocr', 'torch') returns a TorchOCRModel (plan 04-03).
+
+    Updated from the plan-03 stub (which raised NotImplementedError) — plan
+    04-03 implements TorchOCRModel. The factory must now resolve the torch
+    backend to a real adapter instance. The ONNX branch still raises
+    NotImplementedError (D-14 designed-in hook, not built-out in v1).
+    """
+    from manga_ai_studio.adapters.torch_impl import TorchOCRModel
+
+    model = backend_factory("ocr", "torch")
+    assert isinstance(model, TorchOCRModel)
+    assert model.model is None  # constructed but not loaded
+
+    with pytest.raises(NotImplementedError, match="ONNX OCR backend"):
+        backend_factory("ocr", "onnx")
 
 
 @pytest.mark.unit
