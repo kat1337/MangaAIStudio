@@ -152,7 +152,7 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 3/7 plans executed
+**Plans**: 4/7 plans executed
 
 Plans:
 
@@ -164,7 +164,7 @@ Plans:
 
 **Wave 2** *(blocked on 01)*
 
-- [ ] 04-04-PLAN.md — BoxItem text overlay (z=120) + bubble badge (z=140) + InspectorPanel dock + Toggle Text Overlay (T) (TEXT-04, TEXT-05)
+- [x] 04-04-PLAN.md — BoxItem text overlay (z=120) + bubble badge (z=140) + InspectorPanel dock + Toggle Text Overlay (T) (TEXT-04, TEXT-05)
 
 **Wave 3** *(blocked on 04)*
 
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 3/7 | In Progress|  |
+| 4. OCR Recognition & Text Editing | 4/7 | In Progress|  |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---
