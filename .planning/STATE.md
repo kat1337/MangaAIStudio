@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: executing
-stopped_at: Completed 04-02-PLAN.md (translation parser + reading-order algorithm)
-last_updated: "2026-08-07T04:17:24.953Z"
+stopped_at: "Completed 04-03-PLAN.md (OCR adapter: vendored MangaOcr + TorchOCRModel + factory fix)"
+last_updated: "2026-08-07T04:29:47.248Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 26
-  completed_plans: 21
+  completed_plans: 22
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
-Plan: 3 of 7
+Plan: 4 of 7
 Status: Ready to execute
 Last activity: 2026-08-07 — Phase 04 execution started
 
@@ -82,6 +82,7 @@ Progress: [████████░░] 81% (3/4 phases, 21/26 plans)
 | Phase 03 P08 | ~22 min | 2 tasks | 3 files |
 | Phase 04 P01 | 18 min | 2 tasks | 6 files |
 | Phase 04 P02 | 5 min | 2 tasks | 4 files |
+| Phase 04 P03 | 7 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -148,6 +149,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-01: centralized payload-None guard in private _ensure_payload() so Inspector + inline-editor manual edits on never-OCR'd user boxes are safe (checker W1); set_recognized_text_edited is the single manual-edit entry point Plans 04/05 call
 - [Phase ?]: 04-02: translation parser treats Page-marker lines as structural (skipped silently, not counted) while SFX + malformed lines count as skipped; apply_translations first-box-wins per bubble_no; None-bubble boxes never candidates; parser never raises (ASVS V5/V7, T-4-03)
 - [Phase ?]: 04-02: reading_order column tolerance = median inter-center-x gap floored to 40px (RESEARCH Pattern 4 gap-based default, not median-box-width A2); assign_bubble_numbers reads box.box.center; manual_override boxes keep bubble_no + flag (D-16 preserve-manual, T-4-04)
+- [Phase ?]: 04-03: vendored MangaOcr singleton wrapper near-verbatim into panelcleaner/ocr/ocr_mangaocr.py (pcleaner.→panelcleaner. re-path, GPL v3 preserved); kept langs() staticmethod as designed-in D-14 hook
+- [Phase ?]: 04-03: TorchOCRModel mirrors TorchLamaModel (lazy load, numpy→PIL recognize via Image.fromarray mode='RGB', str return, Model-not-loaded guard); load() does NOT validate model_path as file because manga-ocr resolves from HF cache via initialize_model() — GUI worker cache-checks via is_ocr_downloaded() (Plan 06)
+- [Phase ?]: 04-03: backend_factory('ocr','torch')→TorchOCRModel resolved (stub removed); onnx branch raises NotImplementedError (D-14 designed-in hook); from manga_ocr import kept at vendored module top because the wrapper is itself lazy-imported by TorchOCRModel.load (D-07)
 
 ### Pending Todos
 
@@ -174,8 +178,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T04:17:13.000Z
-Stopped at: Completed 04-02-PLAN.md (translation parser + reading-order algorithm)
+Last session: 2026-08-07T04:29:47.233Z
+Stopped at: Completed 04-03-PLAN.md (OCR adapter: vendored MangaOcr + TorchOCRModel + factory fix)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
