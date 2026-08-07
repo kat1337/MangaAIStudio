@@ -60,6 +60,7 @@ from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode, mask_
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
+from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.tools_panel import ToolsPanel
 from manga_ai_studio.gui.worker_thread import Worker
 
@@ -220,6 +221,21 @@ class MainWindow(QMainWindow):
         self.dock_tools.setWidget(self.tools_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_tools)
 
+        # Inspector dock -> InspectorPanel (plan 04-04 Task 2, D-08). Tabbed
+        # with the Tools dock (UI-SPEC §18) so the two right-side docks share the
+        # right edge; the user toggles between them via the dock tab or drags to
+        # undock. The Inspector becomes active when a box is selected (the
+        # selection-follower below drives load_box on selection change).
+        self.dock_inspector = QDockWidget("Inspector", self)
+        self.dock_inspector.setObjectName("dock_inspector")
+        self.dock_inspector.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.inspector_panel = InspectorPanel()
+        self.dock_inspector.setWidget(self.inspector_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_inspector)
+        self.tabifyDockWidget(self.dock_tools, self.dock_inspector)
+
     # ---------------------------------------------------------------- menus
     def _build_menus(self) -> None:
         """Build the full menu bar (UI-SPEC surface 1)."""
@@ -359,6 +375,25 @@ class MainWindow(QMainWindow):
         )
         self.action_toggle_box_overlay.setEnabled(False)
 
+        # Toggle Text Overlay (T) — plan 04-04 D-12 third visibility layer.
+        # Sibling of Toggle Mask Overlay (M) and Toggle Box Overlay (Shift+M);
+        # the three overlays are independent. Checkable, default checked (D-09:
+        # boxes become display objects, text renders by default). Shortcut T is
+        # free (UI-SPEC §19 shortcut audit: M/Shift+M/B/R/L/E/V/D/C/P all taken,
+        # T unused) — placed immediately after Toggle Box Overlay (UI-SPEC §19).
+        self.action_toggle_text_overlay = QAction("Toggle Text Overlay", self)
+        self.action_toggle_text_overlay.setShortcut(QKeySequence("T"))
+        self.action_toggle_text_overlay.setCheckable(True)
+        self.action_toggle_text_overlay.setChecked(True)  # text renders by default
+        self.action_toggle_text_overlay.setStatusTip(
+            "Show or hide the recognized/translation text on the canvas (T)."
+            " Independent of mask (M) and box (Shift+M) overlays."
+        )
+        self.action_toggle_text_overlay.toggled.connect(
+            self._on_toggle_text_overlay_toggled
+        )
+        self.action_toggle_text_overlay.setEnabled(False)
+
         # Show Original (P) — wired in plan 05 (sticky before/after preview,
         # UI-SPEC surface 7). Checkable: toggling calls canvas.show_original.
         self.action_show_original = QAction("Show Original", self)
@@ -367,12 +402,17 @@ class MainWindow(QMainWindow):
         self.action_show_original.toggled.connect(self._on_show_original_toggled)
         self.action_show_original.setEnabled(False)
 
-        # Toggle Sidebar / Tools (the docks).
+        # Toggle Sidebar / Tools / Inspector (the docks).
         self.action_toggle_sidebar = QAction("Toggle Sidebar", self)
         self.action_toggle_sidebar.triggered.connect(self.dock_pages.toggleViewAction().trigger)
 
         self.action_toggle_tools = QAction("Toggle Tools", self)
         self.action_toggle_tools.triggered.connect(self.dock_tools.toggleViewAction().trigger)
+
+        self.action_toggle_inspector = QAction("Toggle Inspector", self)
+        self.action_toggle_inspector.triggered.connect(
+            self.dock_inspector.toggleViewAction().trigger
+        )
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.action_fit_to_window)
@@ -382,10 +422,12 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.action_toggle_mask_overlay)
         view_menu.addAction(self.action_toggle_box_overlay)
+        view_menu.addAction(self.action_toggle_text_overlay)
         view_menu.addAction(self.action_show_original)
         view_menu.addSeparator()
         view_menu.addAction(self.action_toggle_sidebar)
         view_menu.addAction(self.action_toggle_tools)
+        view_menu.addAction(self.action_toggle_inspector)
 
     def _build_tools_menu(self) -> None:
         # Detect Text (D) — wired in plan 03 (async CTD detection).
@@ -1036,6 +1078,19 @@ class MainWindow(QMainWindow):
         # Sibling of the mask hook — mirrors _on_mask_modified / _on_boxes_modified.
         self.canvas.boxes_modified.connect(self._on_boxes_modified)
 
+        # Plan 04-04 Inspector wiring (D-08). The Inspector is a FOLLOWER — it
+        # subscribes to the scene's selectionChanged so load_box fires on every
+        # selection change, and its field-commit signals route to the commit
+        # handlers that mutate the selected pagebox through the Plan 01 setters,
+        # push a BOXES snapshot, and refresh the on-canvas overlay.
+        self.canvas.scene().selectionChanged.connect(self._on_canvas_selection_changed)
+        self.inspector_panel.connect_commit_handlers(
+            on_recognized=self._on_inspector_recognized_committed,
+            on_translation=self._on_inspector_translation_committed,
+            on_bubble=self._on_inspector_bubble_committed,
+            on_vertical=self._on_inspector_vertical_committed,
+        )
+
         # Edit-menu actions -> the two unified handlers.
         self.action_undo.triggered.connect(self.on_undo)
         self.action_redo.triggered.connect(self.on_redo)
@@ -1149,6 +1204,103 @@ class MainWindow(QMainWindow):
             return
         self.history.push_boxes_state(before_snapshot)
         self._update_undo_redo_actions()
+
+    # ----------------------------------------------------- plan 04-04 Inspector
+    def _on_canvas_selection_changed(self) -> None:
+        """Inspector selection-follower (D-08): load the selected box, or clear.
+
+        Subscribed to the scene's ``selectionChanged``. When a box is selected,
+        the Inspector populates from its pagebox; when the selection is cleared
+        (Esc / delete / page-switch) it shows the empty-state copy. The
+        Inspector never drives canvas selection — it is a property-editor
+        follower (UI-SPEC §18).
+        """
+        item = self.canvas._selected_box()
+        if item is None:
+            self.inspector_panel.clear()
+        else:
+            self.inspector_panel.load_box(item.pagebox)
+
+    def _inspector_commit_pre(self) -> "BoxItem | None":
+        """Capture the PRE-edit snapshot + the selected item for an Inspector commit.
+
+        Returns the selected BoxItem, or None if no box is selected (a stale
+        commit is dropped). Mirrors the box-side pre-edit push contract: the
+        BOXES stack pops the most-recent checkpoint first, so the pushed
+        snapshot must be the BEFORE state for a single-Ctrl+Z undo.
+        """
+        item = self.canvas._selected_box()
+        if item is None:
+            return None
+        self._boxes_interaction_start_snapshot = self.canvas.boxes_snapshot()
+        return item
+
+    def _inspector_commit_post(self, item: "BoxItem") -> None:
+        """Push the pre-edit snapshot, refresh the overlay + badge, re-load the panel.
+
+        Called after every Inspector field commit. Emits ``boxes_modified`` with
+        the BEFORE snapshot (captured in :meth:`_inspector_commit_pre`) so the
+        BOXES-stack push hook records the state to restore to on undo; refreshes
+        the BoxItem's text overlay + badge so the canvas reflects the edit
+        immediately; and re-loads the Inspector so its fields stay in sync.
+        """
+        item.refresh_text_overlay()
+        item.refresh_badge()
+        # boxes_modified -> _on_boxes_modified pushes the BEFORE snapshot.
+        self.canvas.boxes_modified.emit(self._boxes_interaction_start_snapshot)
+        self.inspector_panel.load_box(item.pagebox)
+
+    def _on_inspector_recognized_committed(self, text: str) -> None:
+        """Recognized-field commit -> set_recognized_text_edited (D-04, Plan 01 setter).
+
+        Routes the manual edit through the CENTRALIZED manual-edit setter (sets
+        ``edited=True`` so a re-OCR must prompt). NOT ``set_recognized_text``
+        (OCR-write, ``edited=False``) and NOT a direct ``payload.text`` write
+        (bypasses the payload-None guard). Safe on a never-OCR'd box (the
+        setter lazily constructs the payload).
+        """
+        item = self._inspector_commit_pre()
+        if item is None:
+            return
+        item.pagebox.set_recognized_text_edited(text)
+        self._inspector_commit_post(item)
+
+    def _on_inspector_translation_committed(self, text: str) -> None:
+        """Translation-field commit -> set_translation (the D-13 MT seam, Plan 01 setter)."""
+        item = self._inspector_commit_pre()
+        if item is None:
+            return
+        item.pagebox.set_translation(text)
+        self._inspector_commit_post(item)
+
+    def _on_inspector_bubble_committed(self, number: int) -> None:
+        """Bubble # commit -> write bubble_no + set manual_override=True (D-16).
+
+        A manual bubble-number sets the manual-override flag so a page-level
+        re-auto (Plan 04-07) preserves the user's hand-set number (the amber
+        badge border). The bounded QSpinBox (1..9999, T-4-08) guarantees the
+        value is in range before it reaches ``pagebox.bubble_no``.
+        """
+        item = self._inspector_commit_pre()
+        if item is None:
+            return
+        item.pagebox.bubble_no = number
+        item.pagebox.manual_override = True
+        self._inspector_commit_post(item)
+
+    def _on_inspector_vertical_committed(self, vertical: bool) -> None:
+        """Vertical checkbox -> write payload.vertical (export metadata, D-06).
+
+        The editor-mode flip itself is a v1 no-op (RESEARCH Pitfall 5); the
+        checkbox preserves the vertical flag for export and is the seam for the
+        future typesetting phase.
+        """
+        item = self._inspector_commit_pre()
+        if item is None:
+            return
+        if item.pagebox.payload is not None:
+            item.pagebox.payload.vertical = vertical
+        self._inspector_commit_post(item)
 
     # ----------------------------------------------------- unified undo/redo
     # Surface 13 (plan 03-05): the unified Ctrl+Z / Ctrl+Shift+Z pop the
@@ -1745,6 +1897,16 @@ class MainWindow(QMainWindow):
         canvas). The canvas call refreshes the empty-box-hint visibility.
         """
         self.canvas.set_box_overlay_visible(checked)
+
+    def _on_toggle_text_overlay_toggled(self, checked: bool) -> None:
+        """View -> Toggle Text Overlay (T) handler (D-12, plan 04-04).
+
+        Forwards to the canvas's text-overlay layer toggle — an INDEPENDENT
+        visibility layer from the box overlay (Shift+M) and the mask overlay
+        (M). Hiding the text layer hides ONLY the per-box text-overlay
+        children; the box borders + handles + badges stay visible.
+        """
+        self.canvas.set_text_overlay_visible_flag(checked)
 
     def _on_detection_error(self, worker_error) -> None:
         """Show the model-load error dialog + persistent #7a1f1f error chip.

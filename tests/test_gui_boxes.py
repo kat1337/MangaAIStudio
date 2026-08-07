@@ -1357,6 +1357,10 @@ def test_inspector_bubble_spin_emits_bubble_no_changed(qtbot) -> None:
     pb.bubble_no = 1
     panel.load_box(pb)
     panel.bubble_spin.setValue(9)
+    # editingFinished fires on focus-loss/Enter (the real commit path), NOT on
+    # a programmatic setValue (Qt by design). Emit it to simulate the focus-loss
+    # the real UI produces when the user tabs away from the spinbox.
+    panel.bubble_spin.editingFinished.emit()
     assert captured == [9]
 
 

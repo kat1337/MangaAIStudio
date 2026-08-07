@@ -203,6 +203,11 @@ class EditorCanvas(QGraphicsView):
         # _creating_box are the press-time flags; _resize_corner tracks which
         # handle is being dragged; _box_drag_anchor is the starting scene pos.
         self._box_overlay_visible = True
+        # Phase 4 text-overlay visibility (D-12 — the THIRD independent layer).
+        # Default True: D-09 upgrades boxes to display objects, so text renders
+        # by default once a box carries text. Independent of _box_overlay_visible
+        # (Shift+M) and the mask overlay (M).
+        self._text_overlay_visible = True
         self._resizing_box: BoxItem | None = None
         self._resize_corner: str = ""
         self._box_drag_anchor = QPointF()
@@ -1214,6 +1219,10 @@ class EditorCanvas(QGraphicsView):
             # state so a toggle BEFORE any boxes were added still hides them.
             item.setVisible(self._box_overlay_visible)
             item.setEnabled(self._box_overlay_visible)
+            # Phase 4 text-overlay layer (D-12): sync the per-box text-overlay
+            # child to the canvas's text-layer flag so a box added AFTER the
+            # text toggle was flipped respects the layer state.
+            item.set_text_overlay_visible(self._text_overlay_visible)
             self._box_items.append(item)
 
         self._refresh_empty_box_hint()
@@ -1240,6 +1249,30 @@ class EditorCanvas(QGraphicsView):
             item.setVisible(visible)
             item.setEnabled(visible)
         self._refresh_empty_box_hint()
+
+    def set_text_overlay_visible_flag(self, visible: bool) -> None:
+        """Set the text-overlay layer visibility (D-12 — the T toggle backing store).
+
+        Independent of :meth:`set_box_overlay_visible` (Shift+M) and the mask
+        overlay (M): hiding the text layer hides ONLY the per-box text-overlay
+        children, leaving the box borders + handles + badges visible. When the
+        box layer is later re-shown, the text layer keeps its own state (the two
+        toggles do not interact). Applies to every existing box AND any box added
+        afterwards (boxes construct their overlay respecting
+        :attr:`_text_overlay_visible` via :meth:`BoxItem.refresh_text_overlay`).
+        """
+        self._text_overlay_visible = visible
+        for item in self._box_items:
+            item.set_text_overlay_visible(visible)
+
+    def toggle_text_overlay(self) -> None:
+        """Flip the text-overlay layer visibility (View -> Toggle Text Overlay, T).
+
+        The D-12 third independent layer. The action is checkable + checked by
+        default; the action's toggled signal calls this method. Independent of
+        the box overlay (``Shift+M``) and the mask overlay (``M``).
+        """
+        self.set_text_overlay_visible_flag(not self._text_overlay_visible)
 
     def has_boxes(self) -> bool:
         """Return True iff at least one box exists on the layer."""
@@ -1519,6 +1552,10 @@ class EditorCanvas(QGraphicsView):
         self._scene.addItem(item)
         item.setVisible(self._box_overlay_visible)
         item.setEnabled(self._box_overlay_visible)
+        # Phase 4 text-overlay layer (D-12): a freshly-created user box has no
+        # text yet, but sync the flag for consistency (a later OCR write would
+        # show text under the current text-layer state).
+        item.set_text_overlay_visible(self._text_overlay_visible)
         self._box_items.append(item)
         self._deselect_box()
         item.setSelected(True)
