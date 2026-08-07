@@ -187,3 +187,194 @@ def test_imagefile_has_boxes_false_for_empty_list() -> None:
 
     f = ImageFile(path=Path("."), boxes=[])
     assert f.has_boxes() is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — PageBox text fields + setters + copy() (plan 04-01 Task 1)
+#
+# These tests pin the Phase 4 OCR/text-editing seam: the new peer fields
+# (edited / bubble_no / manual_override), the three text setters
+# (set_recognized_text / set_recognized_text_edited / set_translation), the
+# has_recognized_text predicate, and the .copy() that detaches the payload so
+# undo snapshots are not aliased (RESEARCH Pitfall 8). All headless.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_pagebox_phase4_field_defaults() -> None:
+    """The three Phase 4 peer fields default to their safe values: ``edited``
+    is ``False``, ``bubble_no`` is ``None``, ``manual_override`` is ``False``.
+    They are PEER fields (not derived) so they survive undo + page-switch when
+    carried by boxes_snapshot (Pitfall 1)."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    assert pb.edited is False
+    assert pb.bubble_no is None
+    assert pb.manual_override is False
+
+
+@pytest.mark.unit
+def test_set_recognized_text_resets_edited() -> None:
+    """``set_recognized_text`` is the OCR-write path: it writes ``payload.text``
+    as a str (RESEARCH Open Q 6) and resets ``edited = False``. A silent
+    re-OCR (D-04) applies to text written this way."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    pb.edited = True  # pretend a manual edit happened earlier
+    pb.set_recognized_text("こんにちは")
+
+    assert pb.payload.text == "こんにちは"
+    assert pb.edited is False
+
+
+@pytest.mark.unit
+def test_set_recognized_text_edited_sets_edited_true() -> None:
+    """``set_recognized_text_edited`` is the manual-edit path (D-04 confirm
+    gate): it writes ``payload.text`` as a str and sets ``edited = True`` so a
+    subsequent re-OCR must prompt the user."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    pb.set_recognized_text_edited("correction")
+
+    assert pb.payload.text == "correction"
+    assert pb.edited is True
+
+
+@pytest.mark.unit
+def test_set_recognized_text_creates_textblock_for_user_box() -> None:
+    """A user box has ``payload=None`` until OCR runs. Both setters must
+    lazily construct a ``TextBlock`` (xyxy from ``self.box``) before writing
+    ``.text`` — the payload-None guard is centralized in the setter so the
+    Inspector / manual edit on a never-OCR'd box is safe (checker W1)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(10, 20, 110, 220), origin=USER)
+    assert pb.payload is None
+
+    pb.set_recognized_text("ocr result")
+
+    # A TextBlock was constructed from the box's xyxy, then .text written.
+    assert pb.payload is not None
+    assert pb.payload.text == "ocr result"
+    # The constructed TextBlock carries the box's xyxy coords.
+    assert pb.payload.xyxy == [10, 20, 110, 220]
+
+
+@pytest.mark.unit
+def test_set_recognized_text_edited_creates_textblock_for_user_box() -> None:
+    """The payload-None guard fires on the MANUAL-edit path too — a user can
+    hand-type recognized text into a never-OCR'd box (Inspector recognized
+    field) without an AttributeError on ``None.text``."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(10, 20, 110, 220), origin=USER)
+    assert pb.payload is None
+
+    pb.set_recognized_text_edited("typed in")
+
+    assert pb.payload is not None
+    assert pb.payload.text == "typed in"
+    assert pb.payload.xyxy == [10, 20, 110, 220]
+    assert pb.edited is True
+
+
+@pytest.mark.unit
+def test_set_translation_writes_payload() -> None:
+    """``set_translation`` is the D-13 MT seam: it writes ``payload.translation``
+    (the TextBlock slot). For a payload-None box it constructs a TextBlock
+    first (same guard)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(5, 6, 15, 16), origin=USER)
+    assert pb.payload is None
+
+    pb.set_translation("hello")
+
+    assert pb.payload is not None
+    assert pb.payload.translation == "hello"
+    assert pb.payload.xyxy == [5, 6, 15, 16]
+
+
+@pytest.mark.unit
+def test_has_recognized_text() -> None:
+    """``has_recognized_text`` returns False for payload=None or empty .text,
+    True once text is written. Handles both str and list text shapes
+    (TextBlock.text may be either per textblock.py)."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    assert pb.has_recognized_text() is False  # payload None
+
+    pb.set_recognized_text("some text")
+    assert pb.has_recognized_text() is True
+
+    # Empty string -> no recognized text.
+    pb.payload.text = ""
+    assert pb.has_recognized_text() is False
+
+    # Empty list shape (TextBlock.text may be list per textblock.py).
+    pb.payload.text = []
+    assert pb.has_recognized_text() is False
+
+    # Non-empty list shape.
+    pb.payload.text = ["a", "b"]
+    assert pb.has_recognized_text() is True
+
+
+@pytest.mark.unit
+def test_pagebox_copy_detaches_payload() -> None:
+    """RESEARCH Pitfall 8 regression guard: ``PageBox.copy()`` returns a NEW
+    PageBox whose payload is a DIFFERENT object. Mutating the copy's
+    ``payload.text`` does NOT change the original — this is what makes undo of
+    a text edit restore the pre-edit text instead of the current text."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    pb.set_recognized_text("original")
+
+    clone = pb.copy()
+
+    assert clone is not pb
+    assert clone.payload is not pb.payload  # detached payload object
+    # Mutating the clone's payload.text must not touch the original.
+    clone.payload.text = "mutated"
+    assert pb.payload.text == "original"
+
+
+@pytest.mark.unit
+def test_pagebox_copy_preserves_fields() -> None:
+    """``copy()`` preserves box/origin/edited/bubble_no/manual_override (and
+    the payload text/translation values, just on a detached object)."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    pb.bubble_no = 7
+    pb.manual_override = True
+    # Use the manual-edit setter (sets edited=True) so the edited flag is
+    # preserved through copy (set_recognized_text would reset it to False).
+    pb.set_recognized_text_edited("txt")
+    pb.set_translation("tr")
+
+    clone = pb.copy()
+
+    assert clone.box == pb.box  # @frozen Box shares safely by reference
+    assert clone.origin == DETECTED
+    assert clone.edited is True
+    assert clone.bubble_no == 7
+    assert clone.manual_override is True
+    # Payload values carried, on a detached object.
+    assert clone.payload.text == "txt"
+    assert clone.payload.translation == "tr"
+    assert clone.payload is not pb.payload
