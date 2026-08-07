@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 4
-current_phase_name: OCR Recognition & Text Editing
+current_phase: 04
+current_phase_name: ocr-recognition-text-editing
 status: executing
-stopped_at: Phase 4 UI-SPEC approved
-last_updated: "2026-08-06T03:54:05.908Z"
-last_activity: 2026-08-04
-last_activity_desc: Phase 03 complete, transitioned to Phase 4
+stopped_at: Completed 04-01-PLAN.md (PageBox Phase 4 fields + undo snapshot seam)
+last_updated: "2026-08-07T04:08:30.358Z"
+last_activity: 2026-08-07
+last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 19
-  completed_plans: 19
-  percent: 60
+  total_plans: 26
+  completed_plans: 20
+  percent: 77
 ---
 
 # Project State
@@ -24,16 +24,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 4 — OCR Recognition & Text Editing
+**Current focus:** Phase 04 — ocr-recognition-text-editing
 
 ## Current Position
 
-Phase: 4 — OCR Recognition & Text Editing
-Plan: Not started
+Phase: 04 (ocr-recognition-text-editing) — EXECUTING
+Plan: 2 of 7
 Status: Ready to execute
-Last activity: 2026-08-04 — Phase 03 complete, transitioned to Phase 4
+Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [█████░░░░░] 60% (3/5 phases)
+Progress: [████████░░] 77% (3/5 phases, 20/26 plans)
 
 ## Performance Metrics
 
@@ -81,6 +81,7 @@ Progress: [█████░░░░░] 60% (3/5 phases)
 | Phase 03 P06 | 5 min | 2 tasks | 2 files |
 | Phase 03 P07 | 12 min | 2 tasks | 4 files |
 | Phase 03 P08 | ~22 min | 2 tasks | 3 files |
+| Phase 04 P01 | 18 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -143,6 +144,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 03-06: BOTH CornerHandle.shape() AND CornerHandle.boundingRect() must be overridden to enlarge the hit area — shape() alone is filtered out by itemAt's coarse boundingRect first-pass (probe-confirmed); boundingRect does NOT change the painted 8x8 handle (paint draws rect()). Visible handle stays 8x8 (UI-SPEC 12b preserved).
 - [Phase ?]: 03-07: detection is a NON-undoable baseline (Gap 3) — removed the explicit push_boxes_state(pre_detection_snapshot) at _build_detected_boxes Step 5; the Step 3 _suppress_boxes_push guard already suppresses the set_boxes emission, so detection produces NO boxes stack entry. A live probe confirmed Gap 4 (moved-position persistence) was a misdiagnosis — the read path already works; no production fix needed. WR-04 closed via move/resize delta-checks (create exempt per WARNING 5).
 - [Phase ?]: 03-08: mask push hook now pushes the BEFORE-state per stroke (tracked via self._pre_stroke_mask, defaulting to a clean baseline for the first stroke of a per-page session) — closes the one-behind defect (UAT test 3 addendum / FLOW-02 regression). A live probe proved the plan's literal Option 2 (seed [clean, after-state]) does NOT work: pop_mask_undo returns the stack TOP (the after-state), so applying it is a no-op — the correct fix pushes the BEFORE-state so the stack top at undo-time IS the state to restore to. Mirrors the IMAGE pre-edit push contract + plan 03-07's BOXES before-state discipline. WR-01 closed via null-current guards on all 4 per-type pops (pop_mask/image_undo/redo skip the redo-stash when current is None). Also found: the single-point _painted_mask draws zero opaque pixels on PySide6 6.x (false-pass generator) — new _opaque_stroked_mask/_paint_brush_stroke helpers use a real two-point segment.
+- [Phase ?]: 04-01: PageBox.copy uses dataclasses.replace + copy.copy(payload) (shallow TextBlock copy sufficient for Phase 4 top-level .text/.translation per RESEARCH A3; @frozen Box shares by reference per D-10) — closes Pitfall 8 payload aliasing
+- [Phase ?]: 04-01: centralized payload-None guard in private _ensure_payload() so Inspector + inline-editor manual edits on never-OCR'd user boxes are safe (checker W1); set_recognized_text_edited is the single manual-edit entry point Plans 04/05 call
 
 ### Pending Todos
 
@@ -169,8 +172,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-05T05:11:21.651Z
-Stopped at: Phase 4 UI-SPEC approved
-Resume file: .planning/phases/04-ocr-recognition-text-editing/04-UI-SPEC.md
+Last session: 2026-08-07T04:08:30.346Z
+Stopped at: Completed 04-01-PLAN.md (PageBox Phase 4 fields + undo snapshot seam)
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
