@@ -152,14 +152,14 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 1/7 plans executed
+**Plans**: 2/7 plans executed
 
 Plans:
 
 **Wave 1** (parallel — headless foundation: PageBox model fields + Pitfall 1/8 regression tests; translation parser + reading-order algorithm; OCR adapter + vendored MangaOcr)
 
 - [x] 04-01-PLAN.md — PageBox Phase 4 fields + setters + copy() + boxes_snapshot fix + Pitfall 1/8 regression tests (TEXT-04, TEXT-05)
-- [ ] 04-02-PLAN.md — translation_parser.py + reading_order.py pure-Python modules (XY-Cut RTL/LTR + preserve-manual) (TEXT-05)
+- [x] 04-02-PLAN.md — translation_parser.py + reading_order.py pure-Python modules (XY-Cut RTL/LTR + preserve-manual) (TEXT-05)
 - [ ] 04-03-PLAN.md — TorchOCRModel adapter + vendored MangaOcr singleton + backend_factory("ocr") fix (TEXT-02)
 
 **Wave 2** *(blocked on 01)*
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 1/7 | In Progress|  |
+| 4. OCR Recognition & Text Editing | 2/7 | In Progress|  |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---

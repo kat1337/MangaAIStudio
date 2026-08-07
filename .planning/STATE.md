@@ -5,16 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: executing
-stopped_at: Completed 04-01-PLAN.md (PageBox Phase 4 fields + undo snapshot seam)
-last_updated: "2026-08-07T04:08:30.358Z"
+stopped_at: Completed 04-02-PLAN.md (translation parser + reading-order algorithm)
+last_updated: "2026-08-07T04:17:24.953Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
-  total_phases: 5
+  total_phases: 4
   completed_phases: 3
   total_plans: 26
-  completed_plans: 20
-  percent: 77
+  completed_plans: 21
 ---
 
 # Project State
@@ -29,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [████████░░] 77% (3/5 phases, 20/26 plans)
+Progress: [████████░░] 81% (3/4 phases, 21/26 plans)
 
 ## Performance Metrics
 
@@ -82,6 +81,7 @@ Progress: [████████░░] 77% (3/5 phases, 20/26 plans)
 | Phase 03 P07 | 12 min | 2 tasks | 4 files |
 | Phase 03 P08 | ~22 min | 2 tasks | 3 files |
 | Phase 04 P01 | 18 min | 2 tasks | 6 files |
+| Phase 04 P02 | 5 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -146,6 +146,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 03-08: mask push hook now pushes the BEFORE-state per stroke (tracked via self._pre_stroke_mask, defaulting to a clean baseline for the first stroke of a per-page session) — closes the one-behind defect (UAT test 3 addendum / FLOW-02 regression). A live probe proved the plan's literal Option 2 (seed [clean, after-state]) does NOT work: pop_mask_undo returns the stack TOP (the after-state), so applying it is a no-op — the correct fix pushes the BEFORE-state so the stack top at undo-time IS the state to restore to. Mirrors the IMAGE pre-edit push contract + plan 03-07's BOXES before-state discipline. WR-01 closed via null-current guards on all 4 per-type pops (pop_mask/image_undo/redo skip the redo-stash when current is None). Also found: the single-point _painted_mask draws zero opaque pixels on PySide6 6.x (false-pass generator) — new _opaque_stroked_mask/_paint_brush_stroke helpers use a real two-point segment.
 - [Phase ?]: 04-01: PageBox.copy uses dataclasses.replace + copy.copy(payload) (shallow TextBlock copy sufficient for Phase 4 top-level .text/.translation per RESEARCH A3; @frozen Box shares by reference per D-10) — closes Pitfall 8 payload aliasing
 - [Phase ?]: 04-01: centralized payload-None guard in private _ensure_payload() so Inspector + inline-editor manual edits on never-OCR'd user boxes are safe (checker W1); set_recognized_text_edited is the single manual-edit entry point Plans 04/05 call
+- [Phase ?]: 04-02: translation parser treats Page-marker lines as structural (skipped silently, not counted) while SFX + malformed lines count as skipped; apply_translations first-box-wins per bubble_no; None-bubble boxes never candidates; parser never raises (ASVS V5/V7, T-4-03)
+- [Phase ?]: 04-02: reading_order column tolerance = median inter-center-x gap floored to 40px (RESEARCH Pattern 4 gap-based default, not median-box-width A2); assign_bubble_numbers reads box.box.center; manual_override boxes keep bubble_no + flag (D-16 preserve-manual, T-4-04)
 
 ### Pending Todos
 
@@ -172,8 +174,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T04:08:30.346Z
-Stopped at: Completed 04-01-PLAN.md (PageBox Phase 4 fields + undo snapshot seam)
+Last session: 2026-08-07T04:17:13.000Z
+Stopped at: Completed 04-02-PLAN.md (translation parser + reading-order algorithm)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
