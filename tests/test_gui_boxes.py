@@ -26,7 +26,9 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
+    QDialog,
     QGraphicsScene,
+    QMessageBox,
 )
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
@@ -1967,6 +1969,21 @@ def _add_user_box_window(window: MainWindow, box: Box) -> BoxItem:
     return window.canvas._box_items[0]
 
 
+def _seed_boxes_window(window: MainWindow, boxes: list) -> list:
+    """Seed N user boxes in ONE set_boxes call (no history push, plan 04-07).
+
+    set_boxes REBUILDS the layer, so repeated single-box calls would replace
+    the previous box; the multi-box variants (auto-number, batch translation
+    apply) need all boxes present in one layer.
+    """
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([PageBox(box=b, origin=USER) for b in boxes], [])
+    finally:
+        window._suppress_boxes_push = False
+    return list(window.canvas._box_items)
+
+
 @pytest.mark.gui
 def test_run_ocr_selected_dispatches_worker_not_inline(qtbot, tmp_path, monkeypatch) -> None:
     """run_ocr_selected dispatches a Worker (async — T-4-11) and writes the
@@ -2441,3 +2458,224 @@ def test_on_canvas_ocr_requested_skipped_when_op_running(qtbot, tmp_path, monkey
     window._on_canvas_ocr_requested(item)
     assert factory_calls == []
     assert window._op_running is True  # untouched
+
+
+# ===========================================================================
+# Plan 04-07 Task 1 — Load Translations dialog + apply (RED gate)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_load_translations_dialog_has_contracted_widgets(qtbot) -> None:
+    """D-17/UI-SPEC §20: the dialog carries a page QComboBox (current page
+    default), a mono QPlainTextEdit paste area with the contracted placeholder,
+    a 'Load from File…' button, and [Cancel] [Apply]."""
+    from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QPushButton
+
+    from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+
+    dlg = LoadTranslationsDialog(
+        parent=None, page_names=["page_a.png", "page_b.png"], current_page_index=1
+    )
+    qtbot.addWidget(dlg)
+    assert isinstance(dlg.page_combo, QComboBox)
+    assert dlg.page_combo.count() == 2
+    assert dlg.page_combo.currentIndex() == 1  # current page default
+    assert isinstance(dlg.paste_edit, QPlainTextEdit)
+    assert "Paste your translation list here" in dlg.paste_edit.placeholderText()
+    assert "[1]: first translated line" in dlg.paste_edit.placeholderText()
+    assert isinstance(dlg.load_file_btn, QPushButton)
+    assert dlg.load_file_btn.text() == "Load from File\u2026"
+    assert isinstance(dlg.apply_btn, QPushButton)
+    assert dlg.apply_btn.text() == "Apply"
+    assert isinstance(dlg.cancel_btn, QPushButton)
+    assert dlg.cancel_btn.text() == "Cancel"
+    assert dlg.windowTitle() == "Load Translations"
+    assert dlg.objectName() == "load_translations_dialog"
+    # Mono font for the line-oriented paste format (UI-SPEC typography).
+    assert dlg.paste_edit.font().family().lower() in ("consolas", "cascadia mono")
+
+
+@pytest.mark.gui
+def test_load_translations_dialog_apply_returns_text_and_page(qtbot) -> None:
+    """RESEARCH §Pitfall 3 separation: the dialog only COLLECTS (text,
+    page_index) via accept() — it never parses or mutates boxes."""
+    from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+
+    dlg = LoadTranslationsDialog(page_names=["a.png", "b.png"], current_page_index=0)
+    qtbot.addWidget(dlg)
+    dlg.paste_edit.setPlainText("[1]: hello\n[2]: world")
+    dlg.page_combo.setCurrentIndex(1)
+    dlg._on_apply()
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.get_text() == "[1]: hello\n[2]: world"
+    assert dlg.get_page_index() == 1
+
+
+@pytest.mark.gui
+def test_load_translations_dialog_load_file_populates_paste_area(qtbot, tmp_path, monkeypatch) -> None:
+    """D-17 file front-end: a *.txt selected via QFileDialog loads into the
+    paste area (UTF-8) so the user reviews before Apply."""
+    from PySide6.QtWidgets import QFileDialog
+
+    from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+
+    dlg = LoadTranslationsDialog(page_names=["a.png"])
+    qtbot.addWidget(dlg)
+    f = tmp_path / "translations.txt"
+    f.write_text("[1]: first\n[2]: second\n", encoding="utf-8")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(f), "Text files (*.txt)")),
+    )
+    dlg._on_load_file()
+    assert dlg.paste_edit.toPlainText() == "[1]: first\n[2]: second\n"
+
+
+@pytest.mark.gui
+def test_load_translations_dialog_load_file_error_dialog(qtbot, tmp_path, monkeypatch) -> None:
+    """T-4-16/UI-SPEC §Copywriting: an unreadable/non-UTF-8 file shows the
+    "Couldn't read '{filename}'." error dialog — no crash."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+
+    dlg = LoadTranslationsDialog(page_names=["a.png"])
+    qtbot.addWidget(dlg)
+    f = tmp_path / "corrupt.txt"
+    f.write_bytes(b"\xff\xfe\x00\x81garbage")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(f), "Text files (*.txt)")),
+    )
+    shown: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        staticmethod(lambda parent, title, body: shown.append((title, body))),
+    )
+    dlg._on_load_file()
+    assert shown, "the file-read error must surface a dialog"
+    assert "Couldn't read 'corrupt.txt'." in shown[0][0]
+    assert "The file may be corrupt or in an unsupported format." in shown[0][1]
+    assert dlg.paste_edit.toPlainText() == ""  # nothing loaded
+
+
+@pytest.mark.gui
+def test_apply_translations_fills_set_translation_on_matched_boxes(qtbot, tmp_path, monkeypatch) -> None:
+    """D-17: pasted "[1]: …\n[2]: …" + Apply fills set_translation on the
+    bubble-1 and bubble-2 boxes (the D-13 MT seam)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 50, 60), Box(10, 80, 50, 120), Box(80, 20, 120, 60)]
+    )
+    items[0].pagebox.bubble_no = 1
+    items[1].pagebox.bubble_no = 2
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    window._apply_translations("[1]: hello\n[2]: world", 0)
+    assert items[0].pagebox.payload.translation == "hello"
+    assert items[1].pagebox.payload.translation == "world"
+    assert items[2].pagebox.payload.translation is None  # unmatched box untouched
+
+
+@pytest.mark.gui
+def test_apply_translations_shows_report_dialog(qtbot, tmp_path, monkeypatch) -> None:
+    """D-15/D-17: after Apply the parser-result report shows the applied count."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(window, [Box(10, 20, 50, 60), Box(10, 80, 50, 120)])
+    items[0].pagebox.bubble_no = 1
+    items[1].pagebox.bubble_no = 2
+    reports: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda parent, title, body: reports.append((title, body))),
+    )
+    window._apply_translations("[1]: first\n[2]: second", 0)
+    assert reports, "the parser-result report must show on Apply"
+    assert reports[0][0] == "Load Translations"
+    assert "Applied 2 translation(s) to page 1." in reports[0][1]
+
+
+@pytest.mark.gui
+def test_apply_translations_reports_unmatched_and_skipped(qtbot, tmp_path, monkeypatch) -> None:
+    """UI-SPEC §Copywriting: unmatched bubble numbers + unparseable/SFX lines
+    are reported in ONE skipped total — no per-line modal, no crash (ASVS V5)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(window, [Box(10, 20, 50, 60)])
+    items[0].pagebox.bubble_no = 1
+    reports: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda parent, title, body: reports.append((title, body))),
+    )
+    # [99] unmatched bubble + [SFX -3] recognized-but-skipped = 2 skipped lines.
+    window._apply_translations("[1]: ok\n[99]: no match\n[SFX -3]: *boom*", 0)
+    assert reports, "the parser-result report must show on Apply"
+    assert "Applied 1 translation(s) to page 1." in reports[0][1]
+    assert "2 line(s) did not match a bubble number and were skipped." in reports[0][1]
+
+
+@pytest.mark.gui
+def test_apply_translations_no_matches_copy(qtbot, tmp_path, monkeypatch) -> None:
+    """UI-SPEC §Copywriting: zero applied -> the no-matches path copy."""
+    window = _window_with_page(qtbot, tmp_path)
+    _seed_boxes_window(window, [Box(10, 20, 50, 60)])  # no bubble numbers
+    reports: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda parent, title, body: reports.append((title, body))),
+    )
+    window._apply_translations("[42]: nothing matches", 0)
+    assert reports
+    assert "No lines matched any bubble number on page 1." in reports[0][1]
+    assert "Text \u2192 Auto-Number" in reports[0][1]
+
+
+@pytest.mark.gui
+def test_apply_translations_emits_one_boxes_modified(qtbot, tmp_path, monkeypatch) -> None:
+    """UI-SPEC §20: the batch apply pushes ONE BOXES snapshot (batch undo
+    entry) whose payloads carry the PRE-apply translation state."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window,
+        [Box(10, 20, 50, 60), Box(10, 80, 50, 120), Box(80, 20, 120, 60)],
+    )
+    for i, it in enumerate(items, start=1):
+        it.pagebox.bubble_no = i
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    window._apply_translations("[1]: a\n[2]: b\n[3]: c", 0)
+    assert len(emitted) == 1, "the batch apply must push exactly ONE BOXES entry"
+    # Before-state: no translation was written to the snapshot payloads.
+    assert all(pb.payload is None for pb in emitted[0])
+    assert all(it.pagebox.payload.translation is not None for it in items)
+
+
+@pytest.mark.gui
+def test_action_load_translations_enabled_with_page(qtbot, tmp_path) -> None:
+    """Text -> Load Translations… is enabled iff a page is open AND no async
+    op is running (refresh in _refresh_action_states)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._refresh_action_states()
+    assert window.action_load_translations.isEnabled() is True  # page open
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_load_translations.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_text_menu_has_load_translations_entry(qtbot, tmp_path) -> None:
+    """UI-SPEC §Surface 1: the Text menu carries 'Load Translations…'."""
+    window = _window_with_page(qtbot, tmp_path)
+    actions = window.menuBar().actions()
+    text_action = next(a for a in actions if a.text() == "&Text")
+    text_menu = text_action.menu()
+    texts = [a.text() for a in text_menu.actions()]
+    assert "Load Translations\u2026" in texts
+    assert window.action_load_translations.text() == "Load Translations\u2026"
