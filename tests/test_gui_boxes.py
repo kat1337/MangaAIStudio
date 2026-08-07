@@ -2680,3 +2680,170 @@ def test_text_menu_has_load_translations_entry(qtbot, tmp_path) -> None:
     texts = [a.text() for a in text_menu.actions()]
     assert "Load Translations\u2026" in texts
     assert window.action_load_translations.text() == "Load Translations\u2026"
+
+
+# ===========================================================================
+# Plan 04-07 Task 2 — Auto-Number RTL/LTR + preserve-manual (RED gate)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_auto_number_rtl_assigns_right_to_left(qtbot, tmp_path) -> None:
+    """D-15/D-16: Auto-Number RTL (Manga) assigns 1..N right-to-left,
+    top-to-bottom (XY-Cut column order — rightmost column first)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window,
+        [
+            Box(10, 20, 50, 60),  # left column, top (cx 30)
+            Box(10, 80, 50, 120),  # left column, bottom (cx 30)
+            Box(80, 20, 120, 60),  # right column, top (cx 100)
+            Box(80, 80, 120, 120),  # right column, bottom (cx 100)
+        ],
+    )
+    window._auto_number(rtl=True)
+    nums = [it.pagebox.bubble_no for it in items]
+    # Right column (cx 100) first: top->bottom 1, 2; then left column 3, 4.
+    assert nums == [3, 4, 1, 2]
+
+
+@pytest.mark.gui
+def test_auto_number_ltr_assigns_left_to_right(qtbot, tmp_path) -> None:
+    """D-15/D-16: Auto-Number LTR (Manhwa) assigns 1..N left-to-right,
+    top-to-bottom (leftmost column first)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window,
+        [
+            Box(10, 20, 50, 60),  # left column, top (cx 30)
+            Box(10, 80, 50, 120),  # left column, bottom (cx 30)
+            Box(80, 20, 120, 60),  # right column, top (cx 100)
+            Box(80, 80, 120, 120),  # right column, bottom (cx 100)
+        ],
+    )
+    window._auto_number(rtl=False)
+    nums = [it.pagebox.bubble_no for it in items]
+    assert nums == [1, 2, 3, 4]
+
+
+@pytest.mark.gui
+def test_auto_number_preserves_manual_override(qtbot, tmp_path) -> None:
+    """D-16 preserve-manual conflict policy: a manual_override box KEEPS its
+    bubble_no across re-auto (amber override flag intact); the auto sequence
+    leaves a gap where the manual number collides (T-4-17)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window,
+        [
+            Box(10, 20, 50, 60),  # left column, top (cx 30)
+            Box(10, 80, 50, 120),  # left column, bottom (cx 30)
+            Box(80, 20, 120, 60),  # right column, top (cx 100)
+        ],
+    )
+    items[2].pagebox.bubble_no = 5
+    items[2].pagebox.manual_override = True
+    window._auto_number(rtl=True)
+    # RTL: right column first — the manual box is skipped, then left column
+    # gets 1, 2 (the sequence leaves the gap at 5).
+    assert items[0].pagebox.bubble_no == 1
+    assert items[1].pagebox.bubble_no == 2
+    assert items[2].pagebox.bubble_no == 5  # preserved, not renumbered
+    assert items[2].pagebox.manual_override is True  # flag intact
+    assert items[0].pagebox.manual_override is False  # auto boxes stay auto
+
+
+@pytest.mark.gui
+def test_auto_number_emits_one_boxes_modified(qtbot, tmp_path) -> None:
+    """UI-SPEC §20: the page-level auto-number pushes ONE batch BOXES entry
+    whose snapshot carries the PRE-numbering bubble state."""
+    window = _window_with_page(qtbot, tmp_path)
+    _seed_boxes_window(
+        window,
+        [
+            Box(10, 20, 50, 60),
+            Box(10, 80, 50, 120),
+            Box(80, 20, 120, 60),
+            Box(80, 80, 120, 120),
+        ],
+    )
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    window._auto_number(rtl=True)
+    assert len(emitted) == 1, "the batch auto-number must push exactly ONE entry"
+    # Before-state: no bubble numbers assigned in the snapshot.
+    assert all(pb.bubble_no is None for pb in emitted[0])
+
+
+@pytest.mark.gui
+def test_auto_number_empty_page_noop(qtbot, tmp_path) -> None:
+    """An empty page (no boxes) is a no-op: no emit, no status change."""
+    window = _window_with_page(qtbot, tmp_path)
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    window._auto_number(rtl=True)
+    assert emitted == []
+    assert window.status_bar_left.text() == "No page open" or "boxes" not in window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_auto_number_refreshes_badges(qtbot, tmp_path) -> None:
+    """After auto-number every BoxItem badge shows its new number (D-15)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 50, 60), Box(10, 80, 50, 120)]
+    )
+    window._auto_number(rtl=True)
+    assert items[0]._badge_digit.toPlainText() == "1"
+    assert items[1]._badge_digit.toPlainText() == "2"
+    assert items[0]._badge.isVisible()
+    assert items[1]._badge.isVisible()
+
+
+@pytest.mark.gui
+def test_auto_number_shows_status_transient(qtbot, tmp_path) -> None:
+    """UI-SPEC §Copywriting: 'Numbered {n} boxes (RTL/TB).' / '(LTR/TB).'."""
+    window = _window_with_page(qtbot, tmp_path)
+    _seed_boxes_window(
+        window, [Box(10, 20, 50, 60), Box(10, 80, 50, 120)]
+    )
+    window._auto_number(rtl=True)
+    assert window.status_bar_left.text() == "Numbered 2 boxes (RTL/TB)."
+    window._auto_number(rtl=False)
+    assert window.status_bar_left.text() == "Numbered 2 boxes (LTR/TB)."
+
+
+@pytest.mark.gui
+def test_action_auto_number_enabled_only_with_boxes(qtbot, tmp_path) -> None:
+    """Auto-Number RTL/LTR are enabled iff >= 1 box AND no async op runs."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._refresh_action_states()
+    assert window.action_auto_number_rtl.isEnabled() is False  # no boxes
+    assert window.action_auto_number_ltr.isEnabled() is False
+    _add_user_box_window(window, Box(10, 10, 60, 60))
+    window._refresh_action_states()
+    assert window.action_auto_number_rtl.isEnabled() is True
+    assert window.action_auto_number_ltr.isEnabled() is True
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_auto_number_rtl.isEnabled() is False
+    assert window.action_auto_number_ltr.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_text_menu_has_auto_number_submenu(qtbot, tmp_path) -> None:
+    """UI-SPEC §Surface 1: Text -> Auto-Number -> RTL (Manga) / LTR (Manhwa)
+    submenu sits between the OCR actions and Load Translations…."""
+    window = _window_with_page(qtbot, tmp_path)
+    actions = window.menuBar().actions()
+    text_action = next(a for a in actions if a.text() == "&Text")
+    text_menu = text_action.menu()
+    texts = [a.text() for a in text_menu.actions()]
+    assert "Auto-Number" in texts
+    assert "Load Translations\u2026" in texts
+    # Auto-Number comes before Load Translations… in the menu.
+    assert texts.index("Auto-Number") < texts.index("Load Translations\u2026")
+    auto_action = next(a for a in text_menu.actions() if a.text() == "Auto-Number")
+    auto_menu = auto_action.menu()
+    sub = [a.text() for a in auto_menu.actions()]
+    assert "RTL (Manga)" in sub
+    assert "LTR (Manhwa)" in sub
