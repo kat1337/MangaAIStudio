@@ -1910,3 +1910,377 @@ def test_canvas_set_boxes_commits_active_inline_editor(qtbot) -> None:
     assert editor.is_active() is False
     assert item.pagebox.payload.text == "after"
     assert item.pagebox.edited is True
+
+
+# ===========================================================================
+# Plan 04-06 Task 1 — OCR dispatcher (Worker + _op_running + status-bar
+# progress + D-04 confirm gates + first-run UX) — TDD RED gate
+# ===========================================================================
+#
+# The dispatcher mirrors the detect_text / _run_detection_task /
+# _resolve_detection_model_path cluster (main_window.py). All tests use a
+# MOCKED model via monkeypatched backend_factory so the ~450MB manga-ocr
+# model is never downloaded in CI; the real-model integration test is
+# skip-gated on is_ocr_downloaded() (04-03 convention).
+
+
+class _FakeOCRModel:
+    """Duck-typed TorchOCRModel stand-in: records load/recognize calls and
+    returns a fixed recognition string (no torch / manga_ocr needed)."""
+
+    def __init__(self, text: str = "認識テキスト"):
+        self.text = text
+        self.load_calls: list = []
+        self.recognize_calls: list = []
+
+    def load(self, model_path, device="auto") -> None:
+        self.load_calls.append((model_path, device))
+
+    def recognize(self, image) -> str:
+        self.recognize_calls.append(image)
+        return self.text
+
+
+def _window_with_page(qtbot, tmp_path, size: int = 120) -> MainWindow:
+    """Build a shown MainWindow with one real PNG page loaded (mirrors
+    test_moved_box_via_real_events_persists_round_trip's setup)."""
+    from PIL import Image as PILImage
+
+    page = tmp_path / "page.png"
+    PILImage.new("RGB", (size, size), color=(200, 200, 200)).save(page)
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    window._load_folder(tmp_path)
+    window.show()
+    QApplication.processEvents()
+    return window
+
+
+def _add_user_box_window(window: MainWindow, box: Box) -> BoxItem:
+    """Seed one user box on the window's canvas without a history push."""
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([PageBox(box=box, origin=USER)], [])
+    finally:
+        window._suppress_boxes_push = False
+    return window.canvas._box_items[0]
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_dispatches_worker_not_inline(qtbot, tmp_path, monkeypatch) -> None:
+    """run_ocr_selected dispatches a Worker (async — T-4-11) and writes the
+    recognized text via set_recognized_text (edited=False) when it finishes."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.setSelected(True)
+    fake = _FakeOCRModel("認識")
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: fake,
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    window.run_ocr_selected()
+    # The worker was DISPATCHED, not called inline on the GUI thread (T-4-11).
+    assert window._op_running is True
+    assert fake.recognize_calls == []
+    assert "Recognizing text" in window.status_bar_left.text()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert fake.load_calls  # the worker loaded the model
+    assert item.pagebox.payload.text == "認識"
+    assert item.pagebox.edited is False  # OCR-write path (D-04)
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_emits_boxes_modified_with_before_state(qtbot, tmp_path, monkeypatch) -> None:
+    """OCR finish pushes a BOXES snapshot whose payload is the PRE-OCR text
+    (CR-01 before-state + Pitfall-8 detach), not the overwritten text."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.pagebox.set_recognized_text("旧")  # raw OCR text (edited=False)
+    item.setSelected(True)
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: _FakeOCRModel("新"),
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    window.run_ocr_selected()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert item.pagebox.payload.text == "新"
+    assert emitted, "OCR finish must emit boxes_modified (BOXES undo push)"
+    before = emitted[0]
+    assert len(before) == 1
+    assert before[0].payload.text == "旧"  # undo restores the pre-OCR text
+
+
+@pytest.mark.gui
+def test_reocr_confirms_when_edited(qtbot, tmp_path, monkeypatch) -> None:
+    """D-04 gate: an edited=True box + Cancel -> no OCR runs, text unchanged."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.pagebox.set_recognized_text_edited("手編集")  # edited=True
+    item.setSelected(True)
+    confirmed: list[bool] = []
+
+    def _cancel() -> bool:
+        confirmed.append(True)
+        return False
+
+    monkeypatch.setattr(window, "_confirm_reocr", _cancel)
+    factory_calls: list[str] = []
+
+    def _fake_factory(kind, backend):
+        factory_calls.append(kind)
+        return _FakeOCRModel()
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _fake_factory)
+    window.run_ocr_selected()
+    assert confirmed == [True]  # the D-04 dialog was shown
+    assert factory_calls == []  # Cancel -> no worker, no model resolution
+    assert window._op_running is False
+    assert item.pagebox.payload.text == "手編集"  # untouched
+
+
+@pytest.mark.gui
+def test_reocr_silent_when_raw(qtbot, tmp_path, monkeypatch) -> None:
+    """D-04 gate: an edited=False box is overwritten SILENTLY (no dialog)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.pagebox.set_recognized_text("raw")
+    item.setSelected(True)
+
+    def _must_not_confirm() -> bool:
+        raise AssertionError("D-04 dialog must NOT fire for edited=False text")
+
+    monkeypatch.setattr(window, "_confirm_reocr", _must_not_confirm)
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: _FakeOCRModel("新"),
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    window.run_ocr_selected()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert item.pagebox.payload.text == "新"
+    assert item.pagebox.edited is False
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_gated_when_op_running(qtbot, tmp_path, monkeypatch) -> None:
+    """T-4-14: no second dispatch while another async op runs."""
+    window = _window_with_page(qtbot, tmp_path)
+    _add_user_box_window(window, Box(10, 10, 60, 60))
+    window.canvas._box_items[0].setSelected(True)
+    window._op_running = True
+
+    def _must_not_factory(kind, backend):
+        raise AssertionError("backend_factory must not be called while _op_running")
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _must_not_factory)
+    window.run_ocr_selected()  # must be a no-op
+    assert window._op_running is True  # untouched
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_noop_without_selection(qtbot, tmp_path, monkeypatch) -> None:
+    """Run OCR requires exactly one selected box (D-01)."""
+    window = _window_with_page(qtbot, tmp_path)
+    _add_user_box_window(window, Box(10, 10, 60, 60))  # exists but NOT selected
+
+    def _must_not_factory(kind, backend):
+        raise AssertionError("backend_factory must not be called without a selection")
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _must_not_factory)
+    window.run_ocr_selected()
+    assert window._op_running is False
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_shows_loading_ocr_model_on_first_run(qtbot, tmp_path, monkeypatch) -> None:
+    """Pitfall 6: an uncached model shows the 'Loading OCR model…' first-run
+    UX (indeterminate progress) before the worker starts the ~450MB download."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.setSelected(True)
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: False)
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: _FakeOCRModel("x"),
+    )
+    window.run_ocr_selected()
+    assert "Loading OCR model" in window.status_bar_left.text()
+    assert window.progress_bar.maximum() == 0  # indeterminate range (0, 0)
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+
+@pytest.mark.gui
+def test_run_ocr_all_fills_empty_boxes(qtbot, tmp_path, monkeypatch) -> None:
+    """D-03: OCR All fills every text-empty box; boxes that already carry
+    text are untouched (one model load, sequential per-box)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes(
+            [
+                PageBox(box=Box(10, 10, 40, 40), origin=USER),
+                PageBox(box=Box(50, 10, 90, 40), origin=USER),
+                PageBox(box=Box(10, 50, 40, 90), origin=USER),
+            ],
+            [],
+        )
+    finally:
+        window._suppress_boxes_push = False
+    with_text, empty_a, empty_b = window.canvas._box_items
+    with_text.pagebox.set_recognized_text("既存")
+    fake = _FakeOCRModel("新テキスト")
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: fake,
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    window.run_ocr_all()
+    assert window._op_running is True
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert fake.load_calls  # exactly one model load for the whole batch
+    assert empty_a.pagebox.payload.text == "新テキスト"
+    assert empty_b.pagebox.payload.text == "新テキスト"
+    assert with_text.pagebox.payload.text == "既存"  # untouched (D-03 fill-only)
+    assert "2 boxes recognized" in window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_run_ocr_all_gate_confirms_when_edited_boxes_exist(qtbot, tmp_path, monkeypatch) -> None:
+    """D-04 batch gate: edited boxes on the page -> confirm with the count;
+    Cancel aborts the whole batch."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes(
+            [
+                PageBox(box=Box(10, 10, 40, 40), origin=USER),
+                PageBox(box=Box(50, 10, 90, 40), origin=USER),
+            ],
+            [],
+        )
+    finally:
+        window._suppress_boxes_push = False
+    edited_item, empty_item = window.canvas._box_items
+    edited_item.pagebox.set_recognized_text_edited("手編集")
+    counts: list[int] = []
+
+    def _cancel(count: int) -> bool:
+        counts.append(count)
+        return False
+
+    monkeypatch.setattr(window, "_confirm_reocr_all", _cancel)
+    factory_calls: list[str] = []
+
+    def _fake_factory(kind, backend):
+        factory_calls.append(kind)
+        return _FakeOCRModel()
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _fake_factory)
+    window.run_ocr_all()
+    assert counts == [1]  # the batch gate names the edited-box count
+    assert factory_calls == []
+    assert window._op_running is False
+    assert empty_item.pagebox.payload is None  # nothing was filled
+
+
+@pytest.mark.gui
+def test_run_ocr_all_noop_when_no_empty_boxes(qtbot, tmp_path, monkeypatch) -> None:
+    """D-03: a page whose every box already has text -> no dispatch."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.pagebox.set_recognized_text("already")
+
+    def _must_not_factory(kind, backend):
+        raise AssertionError("no dispatch expected when every box has text")
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _must_not_factory)
+    window.run_ocr_all()
+    assert window._op_running is False
+
+
+@pytest.mark.gui
+def test_run_ocr_all_gated_when_op_running(qtbot, tmp_path, monkeypatch) -> None:
+    """T-4-14: OCR All is gated by _op_running like every other model op."""
+    window = _window_with_page(qtbot, tmp_path)
+    _add_user_box_window(window, Box(10, 10, 60, 60))
+    window._op_running = True
+
+    def _must_not_factory(kind, backend):
+        raise AssertionError("backend_factory must not be called while _op_running")
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _must_not_factory)
+    window.run_ocr_all()
+    assert window._op_running is True
+
+
+@pytest.mark.gui
+def test_resolve_ocr_model_path_cache_checks(qtbot, tmp_path, monkeypatch) -> None:
+    """T-4-13 (CR-11): _resolve_ocr_model_path consults is_ocr_downloaded
+    before returning the HF cache dir (no re-download per session)."""
+    window = _window_with_page(qtbot, tmp_path)
+    checks: list[str] = []
+    monkeypatch.setattr(
+        "panelcleaner.model_downloader.get_ocr_model_directory",
+        lambda: Path("C:/fake/hf/models--kha-white--manga-ocr-base"),
+    )
+    monkeypatch.setattr(
+        "panelcleaner.model_downloader.is_ocr_downloaded",
+        lambda: (checks.append("is_ocr_downloaded") or True),
+    )
+    resolved = window._resolve_ocr_model_path()
+    assert resolved == Path("C:/fake/hf/models--kha-white--manga-ocr-base")
+    assert checks == ["is_ocr_downloaded"]
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_error_shows_chip_and_dialog(qtbot, tmp_path, monkeypatch) -> None:
+    """_on_ocr_error: worker failure -> #7a1f1f chip + friendly dialog
+    (T-01-08 mirror); _op_running clears via the always-fires cleanup."""
+    from PySide6.QtWidgets import QMessageBox
+
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    item.setSelected(True)
+
+    class _BoomModel(_FakeOCRModel):
+        def load(self, model_path, device="auto") -> None:
+            raise RuntimeError("simulated model load failure")
+
+    dialogs: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda parent, title, text: dialogs.append(f"{title}|{text}"),
+    )
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: _BoomModel(),
+    )
+    window.run_ocr_selected()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert window.error_chip.isVisible()
+    assert window.error_chip.text() == "OCR model error"
+    assert dialogs and dialogs[0].startswith("Couldn't load the OCR model.")
+
+
+@pytest.mark.gui
+def test_run_ocr_selected_real_model_end_to_end(qtbot, tmp_path) -> None:
+    """INTEGRATION MARKER (skip-gated): with the manga-ocr HF cache populated,
+    run the REAL model through the full dispatcher. CI forces no ~450MB
+    download: skipped when is_ocr_downloaded() is False (04-03 convention)."""
+    from panelcleaner.model_downloader import is_ocr_downloaded
+
+    if not is_ocr_downloaded():
+        pytest.skip("manga-ocr model not cached — no ~450MB download in CI")
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(20, 20, 100, 100))
+    item.setSelected(True)
+    window.run_ocr_selected()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=120000)
+    assert isinstance(item.pagebox.payload.text, str)
+    assert item.pagebox.edited is False
