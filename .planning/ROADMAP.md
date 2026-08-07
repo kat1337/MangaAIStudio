@@ -152,7 +152,7 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 4/7 plans executed
+**Plans**: 5/7 plans executed
 
 Plans:
 
@@ -168,7 +168,7 @@ Plans:
 
 **Wave 3** *(blocked on 04)*
 
-- [ ] 04-05-PLAN.md — InlineEditor (QGraphicsProxyWidget+QTextEdit) + double-click dispatch + commit/cancel + F2 (TEXT-04)
+- [x] 04-05-PLAN.md — InlineEditor (QGraphicsProxyWidget+QTextEdit) + double-click dispatch + commit/cancel + F2 (TEXT-04)
 
 **Wave 4** *(blocked on 03 + 05)*
 
@@ -216,7 +216,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 4/7 | In Progress|  |
+| 4. OCR Recognition & Text Editing | 5/7 | In Progress|  |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: executing
-stopped_at: "Phase 04 Wave 2 complete (4/7 plans done: 04-01..04-04). Next: Wave 3 = plan 04-05 (inline text editor). Resume with /gsd-execute-phase 4 — pause-after-each-wave cadence, 3 waves remaining."
-last_updated: "2026-08-07T19:55:00.000Z"
+stopped_at: "Completed 04-05-PLAN.md (inline text editor: QGraphicsProxyWidget + QTextEdit, canvas double-click + guard)"
+last_updated: "2026-08-07T20:13:17.982Z"
 last_activity: 2026-08-07
-last_activity_desc: Phase 04 Wave 2 complete; pausing for quota control before Wave 3
+last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 26
-  completed_plans: 23
+  completed_plans: 24
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [█████████░] 88% (3/4 phases, 21/26 plans)
+Progress: [█████████░] 92% (3/4 phases, 21/26 plans)
 
 ## Performance Metrics
 
@@ -88,6 +88,7 @@ Progress: [█████████░] 88% (3/4 phases, 21/26 plans)
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 04 P04 | 17 min | 2 tasks | 6 files |
+| Phase 04 P05 | 497 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -159,6 +160,7 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-03: backend_factory('ocr','torch')→TorchOCRModel resolved (stub removed); onnx branch raises NotImplementedError (D-14 designed-in hook); from manga_ocr import kept at vendored module top because the wrapper is itself lazy-imported by TorchOCRModel.load (D-07)
 - [Phase ?]: 04-04: BoxItem text overlay is a QGraphicsTextItem CHILD of the BoxItem (inherits box visibility) — D-12 three-layer contract falls out naturally (Shift+M hides whole box incl text via setVisible; T hides ONLY the text child via its own _text_overlay_visible flag); outlined text via single-API QTextCharFormat.setTextOutline+setForeground merged over the Document (RESEARCH Pattern 3, no multi-pass QPainter)
 - [Phase ?]: 04-04: InspectorPanel is a pure FOLLOWER (subscribes to scene.selectionChanged; commits route through MainWindow callbacks; never mutates a PageBox directly); recognized commits go through set_recognized_text_edited (Plan 01 setter, D-04 edited=True) NOT set_recognized_text/direct payload.text write; bubble # bounded 1..9999 (T-4-08) + sets manual_override=True (D-16); Task 3 checkpoint auto-approved under auto_advance+end-of-phase verify mode
+- [Phase ?]: 04-05: InlineEditor commit captures the CR-01 before-snapshot and detaches each payload via copy.copy BEFORE the in-place setter mutation — _materialize_snapshot copies at push-time (after the mutation); without the detach, undo would restore the post-edit text (Pitfall 8 push-side, avoided where the 04-04 Inspector path still has the latent aliasing — deferred)
 
 ### Pending Todos
 
@@ -185,8 +187,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T19:48:51.119Z
-Stopped at: Completed 04-04-PLAN.md (BoxItem text overlay + bubble badge + Inspector dock)
+Last session: 2026-08-07T20:13:12.022Z
+Stopped at: Completed 04-05-PLAN.md (inline text editor: QGraphicsProxyWidget + QTextEdit, canvas double-click + guard)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

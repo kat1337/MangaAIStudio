@@ -18,3 +18,19 @@ logging plan's changes and are not fixed (scope-boundary rule).
   plan; verified failing identically against pristine pre-04-01 source
   (commit `210a178`) in plan 04-01.
 - **Action:** tracked here; not fixed.
+
+## [04-05] Inspector commit path payload aliasing (Pitfall 8 push-side) — OUT OF SCOPE
+
+- **Found during:** plan 04-05 Task 1 GREEN (design review of the inline-editor commit path)
+- **Issue:** `main_window._inspector_commit_pre` captures the before-snapshot via
+  `canvas.boxes_snapshot()`, whose PageBoxes share the live TextBlock by reference;
+  the 04-04 commit handlers mutate `payload.text`/`payload.translation` IN PLACE
+  before `boxes_modified.emit(before)`. `history_manager._materialize_snapshot`
+  copies each item via `PageBox.copy()` at PUSH-time (after the mutation), so the
+  pushed "before" payload carries the POST-edit text — Ctrl+Z after an Inspector
+  text edit restores a no-op. The 04-05 inline editor fixed the same aliasing by
+  detaching the before-snapshot payloads (`copy.copy`) before mutating
+  (`inline_editor.commit()`, test `test_inline_editor_commit_emits_boxes_modified_with_before_state`).
+- **Action:** tracked here; not fixed (04-04 code, outside 04-05's files_modified).
+  Fix pattern proven in 04-05; apply `copy.copy` per snapshot payload in
+  `_inspector_commit_pre` (or detach in `_inspector_commit_post` before the emit).
