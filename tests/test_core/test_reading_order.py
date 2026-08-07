@@ -123,6 +123,28 @@ def test_reading_order_column_tolerance_from_own_geometry() -> None:
 
 
 @pytest.mark.unit
+def test_reading_order_no_fragmentation_within_cumulative_tolerance() -> None:
+    """WR-02 regression: consecutive gaps within tolerance must NOT fragment a
+    column even when the cumulative span from the column start exceeds tol.
+
+    Repro: centers [(0,0), (39,1), (78,2)] — every consecutive gap (39) is
+    within ``col_tol = max(40, median(39,39)=39) = 40``, so all three belong to
+    ONE column. The old walk compared each candidate against the previous
+    cluster START (78 - 0 = 78 > 40) and spurious-split {0,39} | {78}; the walk
+    must compare against the previous ELEMENT."""
+    from manga_ai_studio.core.reading_order import reading_order
+
+    centers = [(0, 0), (39, 1), (78, 2)]
+    # One column, sorted top-to-bottom by cy: (0,0), (39,1), (78,2).
+    assert reading_order(centers, rtl=False) == [0, 1, 2]
+
+    # A real gap beyond tol must still split (the fix narrows, not disables,
+    # the column detection).
+    centers_split = [(0, 0), (39, 1), (200, 2)]
+    assert reading_order(centers_split, rtl=False) == [0, 1, 2]
+
+
+@pytest.mark.unit
 def test_reading_order_within_column_sorted_by_y_ascending() -> None:
     """Within a column, boxes are sorted TOP-TO-BOTTOM by center-y ascending.
     Feed the column out of y-order and confirm the result reorders them."""

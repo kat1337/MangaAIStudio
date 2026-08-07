@@ -101,13 +101,18 @@ def reading_order(box_centers_xy: "list[tuple[float, float]]", rtl: bool) -> "li
         col_tol = 40.0
 
     # Walk the sorted unique center-x values; start a new cluster when the gap
-    # to the previous cluster-start exceeds col_tol. cluster_edges are the x
-    # values that START each cluster (sorted ascending).
+    # Walk the sorted unique center-x values; start a new cluster when the gap
+    # to the PREVIOUS element exceeds col_tol (WR-02: comparing to the previous
+    # cluster START instead fragmented columns whose cumulative span exceeded
+    # tol while every consecutive gap stayed within it). cluster_edges are the
+    # x values that START each cluster (sorted ascending).
     unique_xs = sorted(set(xs))
     cluster_edges: list = [unique_xs[0]]
+    prev = unique_xs[0]
     for x in unique_xs[1:]:
-        if x - cluster_edges[-1] > col_tol:
+        if x - prev > col_tol:
             cluster_edges.append(x)
+        prev = x
     col_index = {edge: i for i, edge in enumerate(cluster_edges)}
 
     # Bucket each box into its column, carrying its index + cy for the
