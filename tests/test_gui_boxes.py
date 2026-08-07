@@ -1545,6 +1545,36 @@ def test_inspector_commit_undo_restores_pre_edit_text(qtbot, tmp_path) -> None:
     )
 
 
+@pytest.mark.gui
+def test_inspector_refreshes_after_inline_editor_commit(qtbot, tmp_path) -> None:
+    """WR-05: after an inline-edit commit the Inspector must display the NEW
+    text — the box stays selected while editing (UI-SPEC §15), so the
+    always-present view (D-08) must follow the commit without a selection
+    change (it previously went stale until the next selection)."""
+    from manga_ai_studio.gui.inline_editor import InlineEditor
+
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 50, 60)])[0]
+    item.pagebox.set_recognized_text("old")
+    item.setSelected(True)
+    QApplication.processEvents()
+    window.inspector_panel.load_box(item.pagebox)
+    assert window.inspector_panel.recognized_edit.toPlainText() == "old"
+
+    # Double-click style inline edit -> commit (the REAL inline-editor path).
+    editor = InlineEditor(window.canvas)
+    editor.enter(item)
+    editor._text_edit.setPlainText("new text")
+    editor.commit()
+    QApplication.processEvents()
+
+    assert item.pagebox.payload.text == "new text"
+    # The Inspector must show the committed text with NO selection change
+    # (the box is still the selected one after the commit).
+    assert item.isSelected() is True
+    assert window.inspector_panel.recognized_edit.toPlainText() == "new text"
+
+
 # ===========================================================================
 # Task 1 — InlineEditor (QGraphicsProxyWidget + QTextEdit) + BoxItem edit-mode
 # hooks (plan 04-05 RED gate). Tests reference the plan-04-05 contract before

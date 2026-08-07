@@ -1311,6 +1311,15 @@ class MainWindow(QMainWindow):
             return
         self.history.push_boxes_state(before_snapshot)
         self._update_undo_redo_actions()
+        # WR-05: keep the Inspector in sync — an inline-edit commit refreshes
+        # the BoxItem overlay + badge but NOT the property panel, so the
+        # always-present view (D-08) goes stale while the box stays selected.
+        # Re-populate from the still-selected box (also covers canvas box
+        # create/move/resize commits). load_box blocks signals during
+        # population, so no commit loop is possible.
+        item = self.canvas._selected_box()
+        if item is not None:
+            self.inspector_panel.load_box(item.pagebox)
 
     # ----------------------------------------------------- plan 04-04 Inspector
     def _on_canvas_selection_changed(self) -> None:
