@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: executing
-stopped_at: "Completed 04-05-PLAN.md (inline text editor: QGraphicsProxyWidget + QTextEdit, canvas double-click + guard)"
-last_updated: "2026-08-07T20:13:17.982Z"
+stopped_at: Completed 04-06-PLAN.md (OCR dispatcher + Text menu + auto-OCR hook)
+last_updated: "2026-08-07T20:38:42.323Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 26
-  completed_plans: 24
+  completed_plans: 25
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [█████████░] 92% (3/4 phases, 21/26 plans)
+Progress: [██████████] 96% (3/4 phases, 21/26 plans)
 
 ## Performance Metrics
 
@@ -89,6 +89,7 @@ Progress: [█████████░] 92% (3/4 phases, 21/26 plans)
 |------|----------|-------|-------|
 | Phase 04 P04 | 17 min | 2 tasks | 6 files |
 | Phase 04 P05 | 497 | 2 tasks | 4 files |
+| Phase 04 P06 | 13 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-04: BoxItem text overlay is a QGraphicsTextItem CHILD of the BoxItem (inherits box visibility) — D-12 three-layer contract falls out naturally (Shift+M hides whole box incl text via setVisible; T hides ONLY the text child via its own _text_overlay_visible flag); outlined text via single-API QTextCharFormat.setTextOutline+setForeground merged over the Document (RESEARCH Pattern 3, no multi-pass QPainter)
 - [Phase ?]: 04-04: InspectorPanel is a pure FOLLOWER (subscribes to scene.selectionChanged; commits route through MainWindow callbacks; never mutates a PageBox directly); recognized commits go through set_recognized_text_edited (Plan 01 setter, D-04 edited=True) NOT set_recognized_text/direct payload.text write; bubble # bounded 1..9999 (T-4-08) + sets manual_override=True (D-16); Task 3 checkpoint auto-approved under auto_advance+end-of-phase verify mode
 - [Phase ?]: 04-05: InlineEditor commit captures the CR-01 before-snapshot and detaches each payload via copy.copy BEFORE the in-place setter mutation — _materialize_snapshot copies at push-time (after the mutation); without the detach, undo would restore the post-edit text (Pitfall 8 push-side, avoided where the 04-04 Inspector path still has the latent aliasing — deferred)
+- [Phase ?]: 04-06: OCR dispatcher (Worker + _op_running) mirrors detect_text verbatim; single-box indeterminate progress, OCR All determinate 0..100 with 'OCR All… {done}/{total} · box N' status
+- [Phase ?]: 04-06: box lookup across the worker boundary via id(frozen Box)/id(PageBox) identity (same object both sides) — no Qt object crosses into the worker (Pitfall 3)
+- [Phase ?]: 04-06: OCR All dispatches over text-empty boxes only (plan action recipe); D-04 batch gate fires on edited-box count with UI-SPEC copy verbatim (plan artifact: copy implies overwrite, dispatch is fill-only)
+- [Phase ?]: 04-06: OCR before-snapshot payloads detached via copy.copy before the setter mutation (Pitfall 8 push-side, the 04-05 pattern applied to the new OCR write path)
 
 ### Pending Todos
 
@@ -187,8 +192,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T20:13:12.022Z
-Stopped at: Completed 04-05-PLAN.md (inline text editor: QGraphicsProxyWidget + QTextEdit, canvas double-click + guard)
+Last session: 2026-08-07T20:38:42.290Z
+Stopped at: Completed 04-06-PLAN.md (OCR dispatcher + Text menu + auto-OCR hook)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
