@@ -340,6 +340,15 @@ class BoxItem(QGraphicsRectItem):
         self._badge_digit.setFont(_BADGE_DIGIT_FONT)
         # Centre the digit inside the badge rect.
         self._badge_digit.setPos(3.0, -1.0)
+        # Plan 04-05 edit-mode state (UI-SPEC §15, D-07): while the inline
+        # editor is active the box cannot be moved or resized. The canvas's
+        # mouse-press dispatch guard is the PRIMARY disable; this flag + the
+        # handles' mouse acceptance are the item-level belt-and-suspenders.
+        self._edit_mode = False
+        # Restore target for the handles' mouse acceptance (captured at
+        # construction so set_edit_mode(False) restores exactly what Qt gave
+        # the handles by default).
+        self._handle_rest_buttons = self.handles["TL"].acceptedMouseButtons()
         self._apply_origin_pen()
         self._sync_handles()
         # Render the display-object children from the current payload/bubble_no
@@ -524,6 +533,38 @@ class BoxItem(QGraphicsRectItem):
             self.refresh_text_overlay()
         else:
             self._text_overlay.setVisible(False)
+
+    # ------------------------------------------- inline-editor edit-mode hooks
+    def enter_edit_mode(self) -> None:
+        """Enter edit mode: disable move/resize interaction (UI-SPEC §15, D-07).
+
+        Thin wrapper the canvas calls when opening the inline editor (plan
+        04-05). The box STAYS selected while editing; the corner handles stay
+        VISIBLE (the box is still selected, §15) but are not interactive until
+        :meth:`exit_edit_mode` restores them.
+        """
+        self.set_edit_mode(True)
+
+    def exit_edit_mode(self) -> None:
+        """Exit edit mode: restore move/resize interaction (UI-SPEC §15)."""
+        self.set_edit_mode(False)
+
+    def set_edit_mode(self, active: bool) -> None:
+        """Enable/disable move/resize interaction while the inline editor is active.
+
+        The canvas's mouse-press dispatch guard (``canvas.mousePressEvent``,
+        plan 04-05) is the PRIMARY disable — it commits the editor + consumes
+        any press before the box hit-test dispatch can run (D-07). This method
+        is the item-level belt-and-suspenders: the corner handles drop their
+        mouse acceptance while editing so a direct handle press cannot arm a
+        resize even on a super() fall-through path.
+        """
+        self._edit_mode = active
+        for handle in self.handles.values():
+            if active:
+                handle.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            else:
+                handle.setAcceptedMouseButtons(self._handle_rest_buttons)
 
     def _current_focus_text(self) -> str:
         """Return the D-10 current-focus text: translation when present, else recognized.
