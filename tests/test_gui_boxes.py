@@ -1427,6 +1427,44 @@ def test_inspector_origin_label_hue_colored(qtbot) -> None:
     assert "f5a623" in usr_ss.lower() or "amber" in usr_ss.lower()
 
 
+@pytest.mark.gui
+def test_inspector_commit_undo_restores_pre_edit_text(qtbot, tmp_path) -> None:
+    """CR-01 regression: an Inspector commit must push a PRE-edit snapshot with
+    DETACHED payloads — undo restores the pre-edit text, not the post-edit text
+    (Pitfall 8 push-side; mirrors test_inline_editor_commit_emits_boxes_modified_with_before_state).
+
+    Without the detach in ``_inspector_commit_pre``, the snapshot PageBoxes
+    share the live TextBlock, the commit handler mutates it in place, and the
+    push-time ``PageBox.copy()`` (which runs AFTER the mutation) captures the
+    NEW text — so Ctrl+Z would restore the post-edit text (a no-op undo)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 50, 60)])[0]
+    item.pagebox.set_recognized_text("before")
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    window._on_inspector_recognized_committed("after")
+    assert item.pagebox.payload.text == "after"
+    # The pushed BEFORE snapshot must carry the pre-edit text + a detached
+    # payload (the load-translations/inline-editor push contract).
+    assert len(emitted) == 1
+    before = emitted[0]
+    assert before[0].payload.text == "before"
+    assert before[0].payload is not item.pagebox.payload
+
+    # Full undo round-trip: Ctrl+Z restores the pre-edit text.
+    window.on_undo()
+    QApplication.processEvents()
+    restored = window.canvas._box_items[0].pagebox
+    assert restored.payload.text == "before", (
+        "undo of an Inspector commit must restore the PRE-edit text; a no-op "
+        "undo (aliased snapshot) would restore 'after'"
+    )
+
+
 # ===========================================================================
 # Task 1 — InlineEditor (QGraphicsProxyWidget + QTextEdit) + BoxItem edit-mode
 # hooks (plan 04-05 RED gate). Tests reference the plan-04-05 contract before

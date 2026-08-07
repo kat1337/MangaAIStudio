@@ -1335,11 +1335,24 @@ class MainWindow(QMainWindow):
         commit is dropped). Mirrors the box-side pre-edit push contract: the
         BOXES stack pops the most-recent checkpoint first, so the pushed
         snapshot must be the BEFORE state for a single-Ctrl+Z undo.
+
+        CR-01: ``boxes_snapshot()`` materializes fresh int-Box PageBoxes but
+        shares the live ``TextBlock`` payload by reference, and the commit
+        handlers mutate that shared payload in place via the setters BEFORE
+        ``boxes_modified`` reaches ``history.push_boxes_state`` (whose
+        ``PageBox.copy()`` runs at push time — AFTER the mutation). Detach the
+        payloads here so the pushed snapshot captures the PRE-edit text and
+        undo restores it (Pitfall 8 push-side; mirrors ``InlineEditor.commit``
+        and ``_apply_translations``).
         """
         item = self.canvas._selected_box()
         if item is None:
             return None
-        self._boxes_interaction_start_snapshot = self.canvas.boxes_snapshot()
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        self._boxes_interaction_start_snapshot = before
         return item
 
     def _inspector_commit_post(self, item: "BoxItem") -> None:
