@@ -46,10 +46,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPen, QPainterPath
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QPen,
+    QPainterPath,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsRectItem,
+    QGraphicsTextItem,
 )
 
 from manga_ai_studio.core.box_model import DETECTED, USER
@@ -81,6 +90,35 @@ _HANDLE_SIZE = 8
 _HANDLE_HIT_SIZE = 18
 # Handle z (above the box border z=100 — UI-SPEC §Z-order).
 _HANDLE_Z = 150
+# Phase 4 display-object z-order (UI-SPEC §Z-order, RESEARCH Pitfall 7). The
+# overlay (z=120) sits inside the box; the badge (z=140) sits TL-outside; both
+# stay below the handles (z=150) so a corner drag is never visually blocked.
+_TEXT_OVERLAY_Z = 120
+_BADGE_Z = 140
+# Text-overlay style (UI-SPEC §Color text-overlay): fill rgba(232,232,234,0.85)
+# translucent Text primary + outline rgba(11,11,14,0.92) 2px dark matte behind
+# the glyphs (D-11 legibility halo against artwork). 14 scene px base size,
+# Liberation Sans (the Phase 1 canvas-overlay font — image_viewer.py:306).
+_OVERLAY_FILL = QColor.fromRgbF(232 / 255, 232 / 255, 234 / 255, 0.85)
+_OVERLAY_OUTLINE = QPen(QColor.fromRgbF(11 / 255, 11 / 255, 14 / 255, 0.92), 2)
+_OVERLAY_FONT = QFont("Liberation Sans", 14)  # 14 scene px (UI-SPEC §16)
+# Inner margin: text inset by the border width + 2px so it never touches the
+# box edge (UI-SPEC §16).
+_OVERLAY_INSET = 2.0
+# Bubble-badge style + geometry (UI-SPEC §17). Constant 20x14 viewport px (fits
+# 1-2 digits + future 3-digit padding); 12px semibold digit; badge fill near-
+# opaque black so the digit reads against any artwork.
+_BADGE_W = 20.0
+_BADGE_H = 14.0
+_BADGE_FILL = QColor.fromRgbF(0.0, 0.0, 0.0, 0.72)
+_BADGE_DIGIT_COLOR = QColor("#e8e8ea")
+_BADGE_OUTLINE_AUTO = QPen(QColor("#0b0b0e"), 2)  # matte — auto-numbered badge
+_BADGE_OUTLINE_OVERRIDE = QPen(QColor("#f5a623"), 2)  # amber — manual override (D-16)
+_BADGE_DIGIT_FONT = QFont("Liberation Sans", 12)
+_BADGE_DIGIT_FONT.setBold(True)  # semibold weight (UI-SPEC §Typography exception)
+# Badge offset from the TL corner: -badge_w-2, -badge_h-2 (UI-SPEC §17 — sits in
+# the outside-northwest diagonal so it never overlaps the TL handle hit area).
+_BADGE_OFFSET = 2.0
 # Handle outline 1px matte (#0b0b0e) separates the handle fill from artwork.
 _HANDLE_OUTLINE = QColor("#0b0b0e")
 # Corner handle is centred on the corner: shift by -size/2 in both axes.
@@ -271,8 +309,43 @@ class BoxItem(QGraphicsRectItem):
         self.handles: dict[str, CornerHandle] = {
             c: CornerHandle(c, self) for c in ("TL", "TR", "BL", "BR")
         }
+        # Phase 4 display-object children (D-09). A text overlay (z=120) + a
+        # bubble-number badge (z=140) — both children of this BoxItem so they
+        # inherit its visibility (the box-layer toggle Shift+M hides the whole
+        # box incl. text + badges; the text-overlay toggle T hides ONLY the
+        # text children, D-12). The overlay is PLAIN text (ASVS V5 — never
+        # setHtml on OCR output); the badge ignores transformations so it stays
+        # a constant 20x14 viewport px at any zoom (like the handles).
+        self._text_overlay = QGraphicsTextItem(self)
+        self._text_overlay.setZValue(_TEXT_OVERLAY_Z)
+        self._text_overlay.setFont(_OVERLAY_FONT)
+        self._text_overlay.setVisible(False)  # shown by refresh_text_overlay
+        self._text_overlay_visible = True  # T toggle state (D-12)
+        # The badge = a background rect + a digit text child, both ignoring
+        # transformations (constant viewport px). Digit is a child of the rect
+        # so it inherits the rect's position/visibility.
+        self._badge = QGraphicsRectItem(0.0, 0.0, _BADGE_W, _BADGE_H, self)
+        self._badge.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
+        self._badge.setZValue(_BADGE_Z)
+        self._badge.setBrush(QBrush(_BADGE_FILL))
+        self._badge.setPen(_BADGE_OUTLINE_AUTO)
+        self._badge.setVisible(False)  # shown by refresh_badge
+        self._badge_digit = QGraphicsTextItem(self._badge)
+        self._badge_digit.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
+        self._badge_digit.setDefaultTextColor(_BADGE_DIGIT_COLOR)
+        self._badge_digit.setFont(_BADGE_DIGIT_FONT)
+        # Centre the digit inside the badge rect.
+        self._badge_digit.setPos(3.0, -1.0)
         self._apply_origin_pen()
         self._sync_handles()
+        # Render the display-object children from the current payload/bubble_no
+        # (a box created with text already on it shows the overlay at once).
+        self.refresh_text_overlay()
+        self.refresh_badge()
 
     # ------------------------------------------------------------- rendering
     def _apply_origin_pen(self) -> None:
@@ -302,12 +375,17 @@ class BoxItem(QGraphicsRectItem):
         zoom changes (``zoom_changed`` subscription). ``ItemIgnoresTransformations``
         keeps each handle 8x8 viewport px regardless of zoom — only its position
         is recomputed.
+
+        Also refreshes the bubble badge so it tracks the box through move/
+        resize/zoom (the badge sits TL-outside the box rect, so it must move
+        whenever the rect does). Mirrors how handles reposition on zoom.
         """
         selected = self.isSelected()
         rect = self.rect()
         for handle in self.handles.values():
             handle.setVisible(selected)
             handle.reposition(rect)
+        self.refresh_badge()
 
     def itemChange(  # noqa: N802 (Qt API casing)
         self, change: QGraphicsItem.GraphicsItemChange, value
@@ -350,6 +428,130 @@ class BoxItem(QGraphicsRectItem):
         for handle in self.handles.values():
             handle.setVisible(selected)
             handle.reposition(rect)
+
+    # --------------------------------------------- Phase 4 display-object children
+    def refresh_text_overlay(self) -> None:
+        """Re-render the text overlay from the current payload (D-09/D-10/D-11).
+
+        The overlay shows the **current-focus** text per the D-10 rule:
+        translation when present, else recognized text. A box with no
+        recognized text renders nothing (the overlay is hidden). The document
+        is PLAIN text (ASVS V5 — never ``setHtml`` on OCR output, T-4-07) styled
+        via ``QTextCharFormat.setTextOutline`` (RESEARCH Pattern 3 — the single
+        clean API for outlined glyphs; no multi-pass QPainter).
+
+        Honours :attr:`_text_overlay_visible` (the T toggle, D-12): if the text
+        layer is off the overlay is hidden even when the box carries text.
+        """
+        text = self._current_focus_text()
+        if not text:
+            self._text_overlay.setVisible(False)
+            return
+        # Build the outlined run via QTextCharFormat on the document. setPlainText
+        # first (PLAIN text — no rich-text injection), then merge the outline +
+        # fill format onto the whole document (RESEARCH Pattern 3 — set the
+        # outline + foreground on ONE format, then mergeCharFormat over the
+        # document so every run carries both).
+        self._text_overlay.setPlainText(text)
+        doc = self._text_overlay.document()
+        fmt = QTextCharFormat()
+        fmt.setFont(_OVERLAY_FONT)
+        fmt.setTextOutline(_OVERLAY_OUTLINE)
+        fmt.setForeground(QBrush(_OVERLAY_FILL))
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.mergeCharFormat(fmt)
+        # Position the overlay inside the box rect, inset by the border width +
+        # 2px so the text never touches the border (UI-SPEC §16).
+        pen_w = self.pen().widthF() / 2.0
+        inset = pen_w + _OVERLAY_INSET
+        self._text_overlay.setPos(self.rect().x() + inset, self.rect().y() + inset)
+        self._text_overlay.setVisible(self._text_overlay_visible)
+
+    def refresh_badge(self) -> None:
+        """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
+
+        Hidden when ``pagebox.bubble_no`` is None. Otherwise shown at the
+        **TL corner, OUTSIDE the box rect** (offset ``(-badge_w-2, -badge_h-2)``)
+        so it never overlaps the TL handle hit area (RESEARCH Pitfall 7). If the
+        outside position would clip off-canvas at the page TL edge, the badge
+        flips to inside-top-left (inset 2px) per UI-SPEC §17. The border pen is
+        amber (``#f5a623``) for a manual-override badge (D-16), matte
+        (``#0b0b0e``) for an auto-numbered one.
+        """
+        if self.pagebox.bubble_no is None:
+            self._badge.setVisible(False)
+            return
+        # Position at the TL corner, OUTSIDE the box rect (UI-SPEC §17). The
+        # badge ignores transformations, so pos() is in SCENE coords; use the
+        # scene-space rect so a moved/resized box keeps the badge tracking.
+        rect = self.sceneBoundingRect()
+        bx = rect.left() - _BADGE_W - _BADGE_OFFSET
+        by = rect.top() - _BADGE_H - _BADGE_OFFSET
+        # Edge-flip: if the outside position would clip off the page TL edge,
+        # flip to inside-top-left (inset 2px). sceneRect reflects the image
+        # bounds (set_image -> setSceneRect); falls back to no-flip when the
+        # scene has no rect (defensive — a parent-less item has no scene).
+        scene = self.scene()
+        if scene is not None:
+            sr = scene.sceneRect()
+            if not sr.isNull() and (bx < sr.left() or by < sr.top()):
+                bx = rect.left() + _BADGE_OFFSET
+                by = rect.top() + _BADGE_OFFSET
+        self._badge.setPos(bx, by)
+        # Border pen: amber for manual override, matte for auto (D-16).
+        if self.pagebox.manual_override:
+            self._badge.setPen(_BADGE_OUTLINE_OVERRIDE)
+        else:
+            self._badge.setPen(_BADGE_OUTLINE_AUTO)
+        self._badge_digit.setPlainText(str(self.pagebox.bubble_no))
+        self._badge.setVisible(True)
+
+    def set_text_overlay_visible(self, visible: bool) -> None:
+        """Show/hide the text-overlay child (the T toggle, D-12).
+
+        Independent of the box-layer visibility (Shift+M): hiding the text layer
+        leaves the box borders + badges visible. The box-layer toggle routes
+        through ``setVisible`` on the whole BoxItem (which hides ALL children
+        incl. the overlay); this method only flips the text-overlay child so the
+        border + badge stay visible. Stores the flag so a subsequent
+        :meth:`refresh_text_overlay` re-applies it.
+        """
+        self._text_overlay_visible = visible
+        # Only show the overlay if it actually has text (refresh enforces the
+        # empty-box-no-overlay contract); otherwise just hide.
+        if visible:
+            self.refresh_text_overlay()
+        else:
+            self._text_overlay.setVisible(False)
+
+    def _current_focus_text(self) -> str:
+        """Return the D-10 current-focus text: translation when present, else recognized.
+
+        Empty string when the box carries neither (the overlay stays hidden).
+        Translation wins when it is a non-empty string; recognized text is read
+        directly off ``payload.text`` (str/list aware — joined + stripped for a
+        list). The returned text is a plain ``str`` (no list shape leaks to the
+        overlay document).
+
+        Defensive against a payload that is not a real ``TextBlock``: a bare
+        marker object (e.g. the ``payload="p"`` duck-typed fake some tests /
+        callers pass) has no ``.text`` / ``.translation`` attributes, so both
+        branches yield empty and the overlay stays hidden. Production always
+        carries either ``None`` or a real ``TextBlock``.
+        """
+        payload = self.pagebox.payload
+        if payload is None:
+            return ""
+        translation = getattr(payload, "translation", "") or ""
+        if translation:
+            return translation
+        t = getattr(payload, "text", None)
+        if t is None:
+            return ""
+        if isinstance(t, list):
+            return "".join(str(s) for s in t).strip()
+        return str(t).strip()
 
     # --------------------------------------------------- snapshot materialization
     def current_box(self) -> "Box":
