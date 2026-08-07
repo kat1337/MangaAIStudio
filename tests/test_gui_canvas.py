@@ -580,3 +580,105 @@ def test_ctrl_z_undo_image_fires_when_canvas_focused(qtbot) -> None:
         "Ctrl+Z did not propagate from focused canvas to parent QShortcut "
         "(CR-09 regressed: canvas is swallowing the key)"
     )
+
+
+# ===========================================================================
+# Plan 04-04 Task 2 — Toggle Text Overlay (T) independent visibility layer
+# ===========================================================================
+#
+# D-12 contracts THREE independent visibility layers: mask (M) / box (Shift+M) /
+# text-overlay (T). The text toggle hides ONLY the per-box text-overlay children,
+# leaving the box borders + handles + badges visible. It is independent of the
+# box-overlay toggle (which hides the entire box layer incl. text) and the mask
+# toggle. toggle_text_overlay flips a per-canvas flag and calls
+# set_text_overlay_visible on every BoxItem.
+
+
+@pytest.mark.gui
+def test_canvas_has_text_overlay_flag_and_toggle(qtbot) -> None:
+    """EditorCanvas has _text_overlay_visible (default True) + toggle_text_overlay()."""
+    canvas = _canvas_with_image(qtbot)
+    assert hasattr(canvas, "_text_overlay_visible")
+    assert canvas._text_overlay_visible is True  # default checked (D-09)
+    assert hasattr(canvas, "toggle_text_overlay")
+
+
+@pytest.mark.gui
+def test_toggle_text_overlay_hides_only_text_children(qtbot) -> None:
+    """toggle_text_overlay hides ONLY the text-overlay children; box borders stay visible (D-12)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    canvas = _canvas_with_image(qtbot)
+    # Seed a box with recognized text so the overlay is showing.
+    pb = PageBox(box=Box(20, 20, 120, 120), origin=USER)
+    pb.set_recognized_text("hello")
+    canvas.set_boxes([pb], [])
+    item = canvas._box_items[0]
+    item.refresh_text_overlay()
+    assert item._text_overlay.isVisible() is True
+
+    # Toggle the text overlay off.
+    canvas.toggle_text_overlay()
+    assert canvas._text_overlay_visible is False
+    # The text child is hidden...
+    assert item._text_overlay.isVisible() is False
+    # ...but the box border + handles are still visible.
+    assert item.isVisible() is True
+
+    # Toggle back on.
+    canvas.toggle_text_overlay()
+    assert canvas._text_overlay_visible is True
+    assert item._text_overlay.isVisible() is True
+
+
+@pytest.mark.gui
+def test_toggle_text_overlay_independent_of_box_overlay(qtbot) -> None:
+    """The text toggle is independent of the box-overlay toggle (Shift+M) (D-12)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    canvas = _canvas_with_image(qtbot)
+    pb = PageBox(box=Box(20, 20, 120, 120), origin=USER)
+    pb.set_recognized_text("hello")
+    canvas.set_boxes([pb], [])
+    item = canvas._box_items[0]
+    item.refresh_text_overlay()
+
+    # Turn the TEXT overlay off (T).
+    canvas.set_text_overlay_visible_flag(False)
+    assert item._text_overlay.isVisible() is False
+    # The BOX overlay stays visible (independent layer).
+    assert canvas._box_overlay_visible is True
+    assert item.isVisible() is True
+
+    # Now hide the BOX overlay (Shift+M) — entire box (incl. text) hides.
+    canvas.set_box_overlay_visible(False)
+    assert item.isVisible() is False
+    # Re-show the box overlay; the text is STILL off (the two toggles are independent).
+    canvas.set_box_overlay_visible(True)
+    assert item.isVisible() is True
+    assert item._text_overlay.isVisible() is False, (
+        "toggling the box layer back on must NOT re-enable the text overlay "
+        "(D-12: the two toggles are independent)"
+    )
+
+
+@pytest.mark.gui
+def test_toggle_text_overlay_applies_to_new_boxes(qtbot) -> None:
+    """A box added AFTER the text overlay was toggled off respects the layer state."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    canvas = _canvas_with_image(qtbot)
+    # Turn the text overlay off first (no boxes yet).
+    canvas.set_text_overlay_visible_flag(False)
+    assert canvas._text_overlay_visible is False
+
+    # Add a box with text — its overlay must NOT show (text layer is off).
+    pb = PageBox(box=Box(20, 20, 120, 120), origin=USER)
+    pb.set_recognized_text("hello")
+    canvas.set_boxes([pb], [])
+    item = canvas._box_items[0]
+    item.refresh_text_overlay()
+    assert item._text_overlay.isVisible() is False

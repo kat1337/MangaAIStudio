@@ -1208,3 +1208,196 @@ def test_badge_digit_shows_bubble_number(qtbot) -> None:
     _scene, item = _scene_with_box(pb)
     item.refresh_badge()
     assert item._badge_digit.toPlainText() == "42"
+
+
+# ===========================================================================
+# Plan 04-04 Task 2 — InspectorPanel dock + Toggle Text Overlay (T)
+# ===========================================================================
+#
+# The InspectorPanel (D-08) is a new QWidget surfaced in a QDockWidget tabbed
+# with Tools. It shows both text fields (Recognized + Translation) + the bubble
+# number + origin/language/vertical metadata for the selected box. Edits commit
+# through the Plan 01 setters (set_recognized_text_edited for manual recognized
+# edits, set_translation for translation) and the panel emits typed Signals the
+# MainWindow wires to the actual pagebox mutation + boxes_modified push. The
+# Toggle Text Overlay action (T, D-12) is an independent third visibility layer
+# on the canvas (independent of M mask and Shift+M box).
+
+from manga_ai_studio.gui.inspector_panel import InspectorPanel  # noqa: E402
+
+
+def _make_inspector(qtbot) -> InspectorPanel:
+    """Build an InspectorPanel added to qtbot (so it can parent widgets)."""
+    panel = InspectorPanel()
+    qtbot.addWidget(panel)
+    return panel
+
+
+@pytest.mark.gui
+def test_inspector_panel_constructs(qtbot) -> None:
+    """InspectorPanel is a QWidget with the expected field widgets (UI-SPEC §18)."""
+    from PySide6.QtWidgets import QCheckBox, QLabel, QSpinBox, QTextEdit
+
+    panel = _make_inspector(qtbot)
+    assert panel.objectName() == "inspector_panel"
+    assert isinstance(panel.bubble_spin, QSpinBox)
+    assert isinstance(panel.origin_label, QLabel)
+    assert isinstance(panel.recognized_edit, QTextEdit)
+    assert isinstance(panel.translation_edit, QTextEdit)
+    assert isinstance(panel.language_label, QLabel)
+    assert isinstance(panel.vertical_check, QCheckBox)
+
+
+@pytest.mark.gui
+def test_inspector_panel_has_class_scope_signals(qtbot) -> None:
+    """InspectorPanel declares translation_changed/recognized_edited/bubble_no_changed Signals."""
+    panel = _make_inspector(qtbot)
+    # Class-scope Signal descriptors exist on the type.
+    assert hasattr(type(panel), "translation_changed")
+    assert hasattr(type(panel), "recognized_edited")
+    assert hasattr(type(panel), "bubble_no_changed")
+    assert hasattr(type(panel), "vertical_changed")
+
+
+@pytest.mark.gui
+def test_inspector_empty_state_disables_fields(qtbot) -> None:
+    """With no box selected the Inspector shows empty-state copy + disables fields."""
+    panel = _make_inspector(qtbot)
+    panel.clear()
+    assert panel.bubble_spin.isEnabled() is False
+    assert panel.recognized_edit.isEnabled() is False
+    assert panel.translation_edit.isEnabled() is False
+    assert panel.vertical_check.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_inspector_load_box_populates_fields(qtbot) -> None:
+    """load_box populates bubble_no/origin/recognized/translation/language/vertical from the pagebox."""
+    pb = _pagebox_with_text(recognized="hello", translation="hola")
+    pb.bubble_no = 7
+    pb.payload.language = "ja"
+    pb.payload.vertical = True
+
+    panel = _make_inspector(qtbot)
+    panel.load_box(pb)
+
+    assert panel.bubble_spin.value() == 7
+    assert panel.bubble_spin.isEnabled() is True
+    assert "Detected" in panel.origin_label.text()  # DETECTED origin
+    assert panel.recognized_edit.toPlainText() == "hello"
+    assert panel.translation_edit.toPlainText() == "hola"
+    assert panel.language_label.text() == "ja"
+    assert panel.vertical_check.isChecked() is True
+
+
+@pytest.mark.gui
+def test_inspector_load_box_blocks_signals_during_populate(qtbot) -> None:
+    """load_box does not re-emit its change signals while populating (no spurious commits)."""
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 3
+
+    panel = _make_inspector(qtbot)
+    fired: list = []
+    panel.recognized_edited.connect(lambda t: fired.append(("rec", t)))
+    panel.translation_changed.connect(lambda t: fired.append(("tr", t)))
+    panel.bubble_no_changed.connect(lambda n: fired.append(("bub", n)))
+
+    panel.load_box(pb)
+    assert fired == [], f"load_box must not emit change signals during populate; got {fired}"
+
+
+@pytest.mark.gui
+def test_inspector_recognized_edit_emits_recognized_edited(qtbot) -> None:
+    """Editing the Recognized field emits recognized_edited(text) via connect_commit_handlers."""
+    panel = _make_inspector(qtbot)
+    captured: list[str] = []
+    panel.connect_commit_handlers(
+        on_recognized=captured.append,
+        on_translation=lambda _t: None,
+        on_bubble=lambda _n: None,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    panel.load_box(pb)
+    panel.recognized_edit.setPlainText("corrected")
+    panel._commit_recognized()
+    assert captured == ["corrected"]
+
+
+@pytest.mark.gui
+def test_inspector_translation_edit_emits_translation_changed(qtbot) -> None:
+    """Editing the Translation field emits translation_changed(text) on commit."""
+    panel = _make_inspector(qtbot)
+    captured: list[str] = []
+    panel.connect_commit_handlers(
+        on_recognized=lambda _t: None,
+        on_translation=captured.append,
+        on_bubble=lambda _n: None,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    panel.load_box(pb)
+    panel.translation_edit.setPlainText("hola")
+    panel._commit_translation()
+    assert captured == ["hola"]
+
+
+@pytest.mark.gui
+def test_inspector_bubble_spin_emits_bubble_no_changed(qtbot) -> None:
+    """The Bubble # QSpinBox emits bubble_no_changed(int) on value change."""
+    panel = _make_inspector(qtbot)
+    captured: list[int] = []
+    panel.connect_commit_handlers(
+        on_recognized=lambda _t: None,
+        on_translation=lambda _t: None,
+        on_bubble=captured.append,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = 1
+    panel.load_box(pb)
+    panel.bubble_spin.setValue(9)
+    assert captured == [9]
+
+
+@pytest.mark.gui
+def test_inspector_vertical_check_emits_vertical_changed(qtbot) -> None:
+    """The Vertical checkbox emits vertical_changed(bool) on toggle."""
+    panel = _make_inspector(qtbot)
+    captured: list[bool] = []
+    panel.connect_commit_handlers(
+        on_recognized=lambda _t: None,
+        on_translation=lambda _t: None,
+        on_bubble=lambda _n: None,
+        on_vertical=captured.append,
+    )
+    pb = _pagebox_with_text(recognized="hello")
+    panel.load_box(pb)  # vertical defaults False
+    panel.vertical_check.setChecked(True)
+    assert captured == [True]
+
+
+@pytest.mark.gui
+def test_inspector_bubble_spin_range_is_bounded(qtbot) -> None:
+    """The Bubble # QSpinBox is bounded (1..9999) per T-4-08 tampering mitigation."""
+    panel = _make_inspector(qtbot)
+    assert panel.bubble_spin.minimum() == 1
+    assert panel.bubble_spin.maximum() == 9999
+
+
+@pytest.mark.gui
+def test_inspector_origin_label_hue_colored(qtbot) -> None:
+    """The Origin label is hue-colored: green for detected, amber for user (UI-SPEC §18)."""
+    panel = _make_inspector(qtbot)
+    # Detected -> green hue in the stylesheet.
+    pb_det = _pagebox_with_text(recognized="hi")
+    panel.load_box(pb_det)
+    det_ss = panel.origin_label.styleSheet()
+    assert "5fd068" in det_ss.lower() or "green" in det_ss.lower()
+
+    # User -> amber hue.
+    pb_usr = PageBox(box=Box(10, 10, 100, 100), origin=USER)
+    pb_usr.set_recognized_text("hi")
+    panel.load_box(pb_usr)
+    usr_ss = panel.origin_label.styleSheet()
+    assert "f5a623" in usr_ss.lower() or "amber" in usr_ss.lower()
