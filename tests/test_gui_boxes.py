@@ -2284,3 +2284,142 @@ def test_run_ocr_selected_real_model_end_to_end(qtbot, tmp_path) -> None:
     qtbot.waitUntil(lambda: window._op_running is False, timeout=120000)
     assert isinstance(item.pagebox.payload.text, str)
     assert item.pagebox.edited is False
+
+
+# ===========================================================================
+# Plan 04-06 Task 2 — Text menu (Run OCR / OCR All Ctrl+R) + auto-OCR hook
+# on canvas._commit_create (D-01) — TDD RED gate
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_alt_drag_draw_release_emits_ocr_requested(qtbot) -> None:
+    """D-01: Alt+drag draw-release emits ocr_requested with the new BoxItem
+    (the MainWindow-subscribed auto-OCR seam)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    requested: list = []
+    canvas.ocr_requested.connect(lambda item: requested.append(item))
+    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
+    canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
+    canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
+    assert canvas.box_count() == 1
+    assert len(requested) == 1
+    assert requested[0] is canvas._box_items[0]
+
+
+@pytest.mark.gui
+def test_alt_drag_too_small_emits_no_ocr_requested(qtbot) -> None:
+    """UI-SPEC §14: a < 8x8 draw (Phase 3 no-op threshold) never triggers
+    auto-OCR."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    requested: list = []
+    canvas.ocr_requested.connect(lambda item: requested.append(item))
+    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
+    canvas.mouseMoveEvent(_move_at(canvas, 32, 32))  # 2x2 — below the 8x8 min
+    canvas.mouseReleaseEvent(_release_at(canvas, 32, 32))
+    assert canvas.box_count() == 0
+    assert requested == []
+
+
+@pytest.mark.gui
+def test_text_menu_has_run_ocr_and_ocr_all_entries(qtbot, tmp_path) -> None:
+    """UI-SPEC §Surface 1: the Text menu (between View and Tools) carries
+    Run OCR + OCR All Boxes (Ctrl+R)."""
+    window = _window_with_page(qtbot, tmp_path)
+    menus = [a.text() for a in window.menuBar().actions() if a.menu() is not None]
+    assert "&Text" in menus
+    # Recommended order File / Edit / View / Text / Tools / Help.
+    assert menus.index("&Text") == menus.index("&View") + 1
+    assert menus.index("&Text") == menus.index("&Tools") - 1
+    text_menu = next(
+        a.menu() for a in window.menuBar().actions() if a.text() == "&Text"
+    )
+    texts = [a.text() for a in text_menu.actions()]
+    assert "Run OCR" in texts
+    assert "OCR All Boxes" in texts
+    assert window.action_ocr_all.shortcut().toString() == "Ctrl+R"
+
+
+@pytest.mark.gui
+def test_action_run_ocr_enabled_only_with_selection(qtbot, tmp_path) -> None:
+    """Run OCR is enabled iff exactly one box is selected AND no async op runs."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._refresh_action_states()
+    assert window.action_run_ocr.isEnabled() is False  # no boxes yet
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    window._refresh_action_states()
+    assert window.action_run_ocr.isEnabled() is False  # box exists, not selected
+    item.setSelected(True)
+    window._refresh_action_states()
+    assert window.action_run_ocr.isEnabled() is True
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_run_ocr.isEnabled() is False  # async-op gate
+
+
+@pytest.mark.gui
+def test_action_ocr_all_enabled_with_boxes(qtbot, tmp_path) -> None:
+    """OCR All Boxes is enabled iff >= 1 box exists AND no async op runs."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._refresh_action_states()
+    assert window.action_ocr_all.isEnabled() is False  # no boxes
+    _add_user_box_window(window, Box(10, 10, 60, 60))
+    window._refresh_action_states()
+    assert window.action_ocr_all.isEnabled() is True
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_ocr_all.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_ctrl_r_shortcut_triggers_ocr_all(qtbot, tmp_path, monkeypatch) -> None:
+    """UI-SPEC §Shortcuts: Ctrl+R fires run_ocr_all."""
+    window = _window_with_page(qtbot, tmp_path)
+    called: list[str] = []
+    monkeypatch.setattr(window, "run_ocr_all", lambda: called.append("run_ocr_all"))
+    assert window.action_ocr_all.shortcut().toString() == "Ctrl+R"
+    window.action_ocr_all.trigger()
+    assert called == ["run_ocr_all"]
+
+
+@pytest.mark.gui
+def test_on_canvas_ocr_requested_dispatches_single_box_worker(qtbot, tmp_path, monkeypatch) -> None:
+    """D-01 auto-OCR hook end-to-end: a real Alt+drag on the window's canvas
+    emits ocr_requested -> MainWindow dispatches the worker -> the box
+    arrives with recognized text (off the GUI thread, T-4-11)."""
+    window = _window_with_page(qtbot, tmp_path)
+    fake = _FakeOCRModel("自動")
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: fake,
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    canvas = window.canvas
+    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
+    canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
+    canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
+    assert canvas.box_count() == 1
+    item = canvas._box_items[0]
+    assert item.isSelected() is True
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert item.pagebox.payload.text == "自動"
+    assert item.pagebox.edited is False
+
+
+@pytest.mark.gui
+def test_on_canvas_ocr_requested_skipped_when_op_running(qtbot, tmp_path, monkeypatch) -> None:
+    """T-4-14: auto-OCR is silently skipped while another async op runs
+    (no worker pileup on rapid draws)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window._op_running = True
+    factory_calls: list[str] = []
+
+    def _fake_factory(kind, backend):
+        factory_calls.append(kind)
+        return _FakeOCRModel()
+
+    monkeypatch.setattr("manga_ai_studio.gui.main_window.backend_factory", _fake_factory)
+    item = _add_user_box_window(window, Box(10, 10, 60, 60))
+    window._on_canvas_ocr_requested(item)
+    assert factory_calls == []
+    assert window._op_running is True  # untouched
