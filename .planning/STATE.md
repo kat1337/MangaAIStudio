@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
-status: executing
-stopped_at: Completed 04-06-PLAN.md (OCR dispatcher + Text menu + auto-OCR hook)
-last_updated: "2026-08-07T20:38:42.323Z"
+status: verifying
+stopped_at: Completed 04-07-PLAN.md (Load Translations + Auto-Number — phase 04 final plan)
+last_updated: "2026-08-07T20:52:35.238Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 26
-  completed_plans: 25
+  completed_plans: 26
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [██████████] 96% (3/4 phases, 21/26 plans)
+Progress: [██████████] 100% (3/4 phases, 21/26 plans)
 
 ## Performance Metrics
 
@@ -90,6 +90,7 @@ Progress: [██████████] 96% (3/4 phases, 21/26 plans)
 | Phase 04 P04 | 17 min | 2 tasks | 6 files |
 | Phase 04 P05 | 497 | 2 tasks | 4 files |
 | Phase 04 P06 | 13 | 2 tasks | 3 files |
+| Phase 04 P07 | 7 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -166,6 +167,11 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-06: box lookup across the worker boundary via id(frozen Box)/id(PageBox) identity (same object both sides) — no Qt object crosses into the worker (Pitfall 3)
 - [Phase ?]: 04-06: OCR All dispatches over text-empty boxes only (plan action recipe); D-04 batch gate fires on edited-box count with UI-SPEC copy verbatim (plan artifact: copy implies overwrite, dispatch is fill-only)
 - [Phase ?]: 04-06: OCR before-snapshot payloads detached via copy.copy before the setter mutation (Pitfall 8 push-side, the 04-05 pattern applied to the new OCR write path)
+- [Phase ?]: 04-07: LoadTranslationsDialog is a PURE COLLECTOR (RESEARCH Pitfall 3): _on_apply stores (text, page_index) and accept()s; the MainWindow runs parse_translations + apply_translations, refreshes overlays/badges, and pushes ONE batch BOXES snapshot (UI-SPEC 20)
+- [Phase ?]: 04-07: non-current-page translation applies target ImageFile.boxes in place WITHOUT a BOXES push — the undo stack is per-page (reset_history on page switch), so a cross-page snapshot would corrupt undo; the one-batch-entry contract is honored on the current page
+- [Phase ?]: 04-07: parser-result report combines unmatched + skipped into ONE user-facing skipped total per the UI-SPEC copy shape; report page number is 1-indexed (matches status-bar Page {n} / {total})
+- [Phase ?]: 04-07: _auto_number emits boxes_modified only when count > 0 (an all-manual-override page is a no-op edit — no empty undo entries); returns None per plan signature; status transient shows the actual count
+- [Phase ?]: 04-07: Task 3 checkpoint auto-approved under auto_advance=true + human_verify_mode=end-of-phase (gate=blocking, NOT blocking-human/package-legitimacy) — the established project cadence; the 9 manual checks defer to the end-of-phase UAT gate
 
 ### Pending Todos
 
@@ -192,8 +198,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T20:38:42.290Z
-Stopped at: Completed 04-06-PLAN.md (OCR dispatcher + Text menu + auto-OCR hook)
+Last session: 2026-08-07T20:52:17.131Z
+Stopped at: Completed 04-07-PLAN.md (Load Translations + Auto-Number — phase 04 final plan)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
