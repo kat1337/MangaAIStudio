@@ -2577,7 +2577,8 @@ def test_apply_translations_fills_set_translation_on_matched_boxes(qtbot, tmp_pa
     window._apply_translations("[1]: hello\n[2]: world", 0)
     assert items[0].pagebox.payload.translation == "hello"
     assert items[1].pagebox.payload.translation == "world"
-    assert items[2].pagebox.payload.translation is None  # unmatched box untouched
+    # Unmatched box untouched: no payload was ever created for it.
+    assert items[2].pagebox.payload is None
 
 
 @pytest.mark.gui

@@ -37,6 +37,7 @@ from natsort import natsorted
 from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QDialog,
     QDockWidget,
     QFileDialog,
     QLabel,
@@ -62,6 +63,7 @@ from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
+from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
 from manga_ai_studio.gui.tools_panel import ToolsPanel
 from manga_ai_studio.gui.worker_thread import Worker
 
@@ -465,9 +467,24 @@ class MainWindow(QMainWindow):
         # (refreshed in _refresh_action_states).
         self.action_ocr_all.setEnabled(False)
 
+        # Load Translations (D-17): paste/import a typesetting-tool-format
+        # translation list and match it to bubble numbers. Plan 07 adds the
+        # Auto-Number submenu between these two groups.
+        self.action_load_translations = QAction("Load Translations\u2026", self)
+        self.action_load_translations.setStatusTip(
+            "Paste or import a typesetting-tool-format translation list and"
+            " match it to bubble numbers."
+        )
+        self.action_load_translations.triggered.connect(self._open_load_translations)
+        # Enabled iff a page is open AND no async op is running (refreshed in
+        # _refresh_action_states).
+        self.action_load_translations.setEnabled(False)
+
         text_menu = self.menuBar().addMenu("&Text")
         text_menu.addAction(self.action_run_ocr)
         text_menu.addAction(self.action_ocr_all)
+        text_menu.addSeparator()
+        text_menu.addAction(self.action_load_translations)
 
     def _build_tools_menu(self) -> None:
         # Detect Text (D) — wired in plan 03 (async CTD detection).
@@ -738,6 +755,12 @@ class MainWindow(QMainWindow):
         )
         self.action_ocr_all.setEnabled(
             page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
+        # Plan 07: Load Translations needs only an open page + no running op
+        # (a page with no boxes reports the no-matches copy; Auto-Number needs
+        # >= 1 box — Task 2 adds its actions).
+        self.action_load_translations.setEnabled(
+            page_open and not self._op_running
         )
 
     def _current_page_index(self) -> int | None:
@@ -2677,6 +2700,123 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(rerun_btn)
         box.exec()
         return box.clickedButton() is rerun_btn
+
+    # ------------------------------------------------ load translations (plan 07)
+    def _open_load_translations(self) -> None:
+        """Text -> Load Translations…: show the paste/file-import dialog (D-17).
+
+        Opens :class:`LoadTranslationsDialog` with the open pages by name and
+        the current page pre-selected. On Accept, the collected ``(text,
+        page_index)`` is handed to :meth:`_apply_translations` — the dialog
+        never parses or mutates boxes itself (RESEARCH §Pitfall 3 separation).
+        """
+        if not self.image_files:
+            return
+        page_names = [imf.path.name for imf in self.image_files]
+        current_index = self._current_page_index()
+        if current_index is None:
+            current_index = 0
+        dlg = LoadTranslationsDialog(self, page_names, current_index)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._apply_translations(dlg.get_text(), dlg.get_page_index())
+
+    def _apply_translations(self, text: str, page_index: int) -> None:
+        """Apply a translation block to the page at ``page_index`` (D-17).
+
+        Runs the Plan 02 parser core (``parse_translations`` +
+        ``apply_translations`` — no parsing/matching logic in the GUI) and
+        reports the parser-result counts. On the CURRENT page the apply goes
+        through the live BoxItems, refreshes the overlays/badges, and pushes
+        ONE batch BOXES snapshot (UI-SPEC §20 — the whole Load Translations
+        op is one undo entry) with Pitfall-8 payload detach before the
+        setter mutation. For non-current pages (multi-page files with
+        "Page N:" markers, D-17) the apply targets ``ImageFile.boxes`` in
+        place; the canvas refresh happens when the user navigates there.
+        """
+        if not self.image_files or not 0 <= page_index < len(self.image_files):
+            return
+        from manga_ai_studio.core.translation_parser import (
+            apply_translations,
+            parse_translations,
+        )
+
+        # ASVS V7 belt-and-suspenders: the Plan 02 parser never raises, but an
+        # unexpected failure surfaces a friendly dialog, not a crash.
+        try:
+            matches, skipped = parse_translations(text)
+        except Exception as exc:
+            logger.error(f"Translation parse failed: {exc}")
+            QMessageBox.critical(
+                self, "Load Translations", "Couldn't apply translations — see the log."
+            )
+            return
+
+        page_no = page_index + 1  # 1-indexed for the user-facing copy
+        if page_index == self._current_page_index():
+            boxes = [it.pagebox for it in self.canvas._box_items]
+            # CR-01 before-state + Pitfall-8 detach (the 04-05/04-06 pattern).
+            before = self.canvas.boxes_snapshot()
+            for pb in before:
+                if pb.payload is not None:
+                    pb.payload = copy.copy(pb.payload)
+            try:
+                applied, unmatched = apply_translations(
+                    matches, boxes, page_no=page_index
+                )
+            except Exception as exc:
+                logger.error(f"Translation apply failed: {exc}")
+                QMessageBox.critical(
+                    self,
+                    "Load Translations",
+                    "Couldn't apply translations — see the log.",
+                )
+                return
+            if applied:
+                for it in self.canvas._box_items:
+                    it.refresh_text_overlay()
+                    it.refresh_badge()
+                # ONE batch entry (UI-SPEC §20) -> _on_boxes_modified pushes it.
+                self.canvas.boxes_modified.emit(before)
+            self._show_translation_report(applied, unmatched + skipped, page_no)
+        else:
+            # Non-current page (multi-page file): apply in place; the canvas
+            # refresh happens on navigation. No BOXES push — the undo stack is
+            # per-page (reset_history on page switch).
+            try:
+                applied, unmatched = apply_translations(
+                    matches, self.image_files[page_index].boxes, page_no=page_index
+                )
+            except Exception as exc:
+                logger.error(f"Translation apply failed: {exc}")
+                QMessageBox.critical(
+                    self,
+                    "Load Translations",
+                    "Couldn't apply translations — see the log.",
+                )
+                return
+            self._show_translation_report(applied, unmatched + skipped, page_no)
+
+    def _show_translation_report(self, applied: int, skipped_total: int, page_no: int) -> None:
+        """Show the parser-result report (UI-SPEC §Copywriting, D-15/D-17).
+
+        Informational, non-modal tone (ASVS V5 — unmatched lines are a soft
+        skip, not an error): the success copy names the applied count + the
+        combined skipped total (unmatched bubble numbers + unparseable/SFX
+        lines); zero applied shows the no-matches path copy.
+        """
+        if applied == 0:
+            body = (
+                f"No lines matched any bubble number on page {page_no}. Check"
+                " that the bubble numbers in your text match the numbers on"
+                " the canvas (Text \u2192 Auto-Number)."
+            )
+        else:
+            body = (
+                f"Applied {applied} translation(s) to page {page_no}."
+                f" {skipped_total} line(s) did not match a bubble number and"
+                " were skipped."
+            )
+        QMessageBox.information(self, "Load Translations", body)
 
     def _on_show_original_toggled(self, show: bool) -> None:
         """View -> Show Original (P): toggle the before/after preview.
