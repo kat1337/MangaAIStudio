@@ -153,6 +153,38 @@ def test_configure_stores_overrides() -> None:
 
 
 @pytest.mark.unit
+def test_load_passes_conf_and_nms_thresholds_to_detector(monkeypatch) -> None:
+    """WR-03: configure()'s conf_thresh/nms_thresh must reach TextDetector on
+    load() — they were silently dropped, making both knobs dead config with a
+    false "applied on the next load()" docstring."""
+    import manga_ai_studio.adapters.torch_impl as torch_impl
+
+    captured: dict = {}
+
+    class _FakeTextDetector:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(torch_impl, "TextDetector", _FakeTextDetector)
+
+    model = torch_impl.TorchCTDModel()
+    model.configure(conf_thresh=0.7, nms_thresh=0.2)
+    fake_model = Path("fake.pt")
+    fake_model.write_bytes(b"x")  # load() validates existence before constructing
+    try:
+        model.load(fake_model)
+    finally:
+        fake_model.unlink()
+
+    assert captured.get("conf_thresh") == 0.7
+    assert captured.get("nms_thresh") == 0.2
+    # The other knobs keep flowing too (no regression in the load contract).
+    assert captured.get("input_size") == 1024
+    assert captured.get("act") == "leaky"
+    assert captured.get("device") == "cpu"
+
+
+@pytest.mark.unit
 def test_postprocess_thresholds_mask() -> None:
     """postprocess binarizes a heatmap at 128 (RESEARCH Pattern 1)."""
     model = TorchCTDModel()

@@ -99,6 +99,11 @@ class TorchCTDModel(DetectionModel):
             input_size=self._input_size,
             device=self.device,
             act=self._act,
+            # WR-03: configure()'s threshold knobs must actually reach the
+            # detector (they were silently dropped — dead config, false
+            # docstring; TextDetector accepts and uses them in postprocess_yolo).
+            conf_thresh=self._conf_thresh,
+            nms_thresh=self._nms_thresh,
         )
 
     def detect(self, image: np.ndarray) -> Tuple[np.ndarray, list]:
