@@ -22,11 +22,16 @@ from PIL import Image as PILImage
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QShortcut
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QGraphicsRectItem, QToolButton
+from PySide6.QtWidgets import QApplication, QDialog, QGraphicsRectItem, QToolButton
 
 from manga_ai_studio.config.profile_manager import ProfileManager
 from manga_ai_studio.core.box_model import USER, PageBox
-from manga_ai_studio.core.mask_editor import ToolMode
+from manga_ai_studio.core.mask_editor import (
+    ToolMode,
+    mask_to_numpy_binary,
+    numpy_binary_to_mask_qimage,
+)
+from manga_ai_studio.gui.crop_dialog import CropDialog
 from manga_ai_studio.gui.main_window import MainWindow
 from manga_ai_studio.gui.tools_panel import ToolsPanel
 from panelcleaner.structures import Box
@@ -140,6 +145,38 @@ def _seed_box(window: MainWindow, box: Box) -> PageBox:
     finally:
         window._suppress_boxes_push = False
     return pb
+
+
+def _seed_mask(window: MainWindow) -> np.ndarray:
+    """Seed a binary mask (10:20 x 30:50) — returns the mask array."""
+    img = window.canvas.get_image_numpy()
+    h, w = img.shape[:2]
+    mask_bin = np.zeros((h, w), dtype=np.uint8)
+    mask_bin[10:20, 30:50] = 255
+    window.canvas.set_mask(numpy_binary_to_mask_qimage(mask_bin))
+    return mask_bin
+
+
+def _seed_three_boxes(window: MainWindow) -> list[PageBox]:
+    """Seed the D-16 scenario: one inside, one fully outside, one partial.
+
+    All relative to the (10, 10, 100, 80) crop used by the apply tests:
+    - inside  (10, 10, 30, 20)  -> kept, translated (0, 0, 20, 10)
+    - outside (150, 120, 180, 150) -> dropped (fully outside)
+    - partial (80, 60, 140, 120) -> clipped to (80, 60, 110, 90) ->
+      translated (70, 50, 100, 80)
+    """
+    boxes = [
+        PageBox(box=Box(10, 10, 30, 20), origin=USER),
+        PageBox(box=Box(150, 120, 180, 150), origin=USER),
+        PageBox(box=Box(80, 60, 140, 120), origin=USER),
+    ]
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes(boxes, [])
+    finally:
+        window._suppress_boxes_push = False
+    return boxes
 
 
 # ===========================================================================
@@ -401,3 +438,156 @@ def test_tool_switch_clears_armed_crop(qtbot, tmp_path) -> None:
     canvas.crop_committed.connect(emitted.append)
     _key(window, Qt.Key.Key_Return)
     assert emitted == []
+
+
+# ===========================================================================
+# Task 3 — crop apply (drop/clip + count flash + one undo) + Crop… dialog
+# ===========================================================================
+
+@pytest.mark.gui
+def test_crop_apply_drop_clip_count(qtbot, tmp_path) -> None:
+    """_apply_crop(10, 10, 100, 80) on a 200x160 page with 3 boxes (D-16):
+    image + mask are the EXACT slices; the inside box translates; the
+    fully-outside box is GONE; the partial box is clipped (bbox); the
+    dropped count feeds the status flash; ONE geometry undo entry; one
+    Ctrl+Z restores ALL THREE incl. the dropped box; geometry_altered True
+    (D-22)."""
+    window = _window_with_page(qtbot, tmp_path, size=(200, 160))
+    pre = window.canvas.get_image_numpy().copy()
+    mask_bin = _seed_mask(window)
+    _seed_three_boxes(window)
+
+    window._apply_crop(10, 10, 100, 80)
+    QApplication.processEvents()
+
+    # Image + mask: exact slices (D-18).
+    now = window.canvas.get_image_numpy()
+    assert np.array_equal(now, pre[10:90, 10:110])
+    assert np.array_equal(mask_to_numpy_binary(window.canvas.get_mask()), mask_bin[10:90, 10:110])
+
+    # Boxes: inside translated, outside dropped, partial clipped (D-16).
+    kept = window.canvas.boxes_snapshot()
+    assert [pb.box.as_tuple for pb in kept] == [
+        (0, 0, 20, 10),  # inside, translated by (-10, -10)
+        (70, 50, 100, 80),  # partial, clipped to the crop rect
+    ]
+
+    # Dropped-count flash (UI-SPEC §Copywriting crop row).
+    assert (
+        "Cropped. 1 box(es) were outside the crop and removed \u2014"
+        " press Ctrl+Z to restore." in window.status_bar_left.text()
+    )
+
+    # ONE geometry undo entry across the three stores.
+    hist = window.history
+    stamps = {
+        "image": hist._image_undo[-1][0],
+        "mask": hist._mask_undo[-1][0],
+        "boxes": hist._boxes_undo[-1][0],
+    }
+    assert stamps["image"] == stamps["mask"] == stamps["boxes"]
+    assert len(hist._image_undo) == 1
+
+    # geometry_altered True (D-22).
+    assert window.image_files[0].geometry_altered is True
+
+    # ONE Ctrl+Z restores ALL THREE incl. the dropped box.
+    window.on_undo()
+    QApplication.processEvents()
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    assert np.array_equal(mask_to_numpy_binary(window.canvas.get_mask()), mask_bin)
+    restored = window.canvas.boxes_snapshot()
+    assert [pb.box.as_tuple for pb in restored] == [
+        (10, 10, 30, 20),
+        (150, 120, 180, 150),
+        (80, 60, 140, 120),
+    ]
+
+
+@pytest.mark.gui
+def test_crop_dialog_contract(qtbot) -> None:
+    """CropDialog opens at the FULL page bounds with live W−x / H−y recompute
+    and apply-time re-validation (UI-SPEC surface 24b, E3 partial coverage):
+    editing X to 50 recomputes the Width max to W−50; an out-of-range
+    programmatic value keeps the dialog OPEN with corrected values; a valid
+    Apply collects (x, y, w, h) and accepts."""
+    dlg = CropDialog(page_w=200, page_h=160)
+    qtbot.addWidget(dlg)
+
+    # Opens at the full page bounds — never empty.
+    assert dlg.x_spin.value() == 0
+    assert dlg.y_spin.value() == 0
+    assert dlg.w_spin.value() == 200
+    assert dlg.h_spin.value() == 160
+    assert dlg.x_spin.maximum() == 199
+    assert dlg.y_spin.maximum() == 159
+
+    # Editing X recomputes the Width range: W−x.
+    dlg.x_spin.setValue(50)
+    assert dlg.w_spin.maximum() == 150
+    dlg.y_spin.setValue(60)
+    assert dlg.h_spin.maximum() == 100
+
+    # Out-of-range programmatic value (spinbox range widened — user input can
+    # never exceed it): Apply corrects IN PLACE and the dialog stays open.
+    dlg.w_spin.setRange(1, 5000)
+    dlg.w_spin.setValue(5000)
+    dlg.apply_btn.click()
+    assert dlg.result() != QDialog.DialogCode.Accepted
+    assert dlg.w_spin.value() == 150  # corrected to W−x
+
+    # A valid Apply collects the values and accepts.
+    dlg.apply_btn.click()
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.result_values == (50, 60, 150, 100)
+
+
+@pytest.mark.gui
+def test_crop_dialog_apply_end_to_end(qtbot, tmp_path, monkeypatch) -> None:
+    """Edit -> Crop… Apply runs the SAME crop semantics as the tool path
+    (image/mask slices, drop/clip, count flash, ONE entry)."""
+    window = _window_with_page(qtbot, tmp_path, size=(200, 160))
+    pre = window.canvas.get_image_numpy().copy()
+    mask_bin = _seed_mask(window)
+    _seed_three_boxes(window)
+
+    def _fake_exec(dlg):
+        dlg.result_values = (10, 10, 100, 80)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CropDialog, "exec", _fake_exec)
+    window._on_crop_dialog()
+    QApplication.processEvents()
+
+    assert np.array_equal(window.canvas.get_image_numpy(), pre[10:90, 10:110])
+    kept = window.canvas.boxes_snapshot()
+    assert [pb.box.as_tuple for pb in kept] == [(0, 0, 20, 10), (70, 50, 100, 80)]
+    assert (
+        "Cropped. 1 box(es) were outside the crop and removed" in window.status_bar_left.text()
+    )
+    assert window.history._image_undo[-1][0] == window.history._boxes_undo[-1][0]
+    assert window.image_files[0].geometry_altered is True
+
+
+@pytest.mark.gui
+def test_crop_degenerate_noop(qtbot, tmp_path) -> None:
+    """A degenerate _apply_crop (w=0 or out-of-bounds) is a SILENT no-op:
+    no change, no undo entry, no crash (T-05-17)."""
+    window = _window_with_page(qtbot, tmp_path, size=(200, 160))
+    pre = window.canvas.get_image_numpy().copy()
+    _seed_mask(window)
+    _seed_three_boxes(window)
+
+    window._apply_crop(0, 0, 0, 0)  # zero width
+    window._apply_crop(0, 0, 500, 100)  # beyond the page
+    window._apply_crop(-5, 0, 50, 50)  # negative origin
+    QApplication.processEvents()
+
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    assert not window.history.can_undo()
+    assert window.image_files[0].geometry_altered is False
+    assert [pb.box.as_tuple for pb in window.canvas.boxes_snapshot()] == [
+        (10, 10, 30, 20),
+        (150, 120, 180, 150),
+        (80, 60, 140, 120),
+    ]

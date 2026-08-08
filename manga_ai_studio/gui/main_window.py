@@ -29,6 +29,7 @@ Security:
 from __future__ import annotations
 
 import copy
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -423,9 +424,22 @@ class MainWindow(QMainWindow):
         self.action_clear_mask = QAction("Clear Mask\u2026", self)
         self.action_clear_mask.setEnabled(False)  # plan 04
 
+        # Crop… (D-11, plan 05-07): the numeric crop dialog (UI-SPEC surface
+        # 24b). No shortcut — the canvas Crop tool is the gesture path; the
+        # dialog is the precision path (menu-accelerable). Dialog-opening
+        # ellipsis per §Copywriting.
+        self.action_crop_dialog = QAction("Crop\u2026", self)
+        self.action_crop_dialog.setToolTip(
+            "Crop the page by exact coordinates (x, y, width, height)."
+        )
+        self.action_crop_dialog.triggered.connect(self._on_crop_dialog)
+        self.action_crop_dialog.setEnabled(False)
+
         edit_menu = self.menuBar().addMenu("&Edit")
         edit_menu.addAction(self.action_undo)
         edit_menu.addAction(self.action_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_crop_dialog)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_clear_mask)
 
@@ -1006,6 +1020,9 @@ class MainWindow(QMainWindow):
             self.action_resize,
         ):
             act.setEnabled(page_open and not self._op_running)
+        # Plan 05-07: the numeric Crop… dialog (Edit menu) — same gating as
+        # the image ops (surface 24b, §21).
+        self.action_crop_dialog.setEnabled(page_open and not self._op_running)
 
     # -------------------------------------------------- image ops (plan 05-06)
     # PROJ-04's GUI apply layer: Rotate / Levels / Resize all funnel through
@@ -1207,6 +1224,114 @@ class MainWindow(QMainWindow):
             transform_fn=_transform,
             flash=f"Resized to {new_w} \u00d7 {new_h}.",
         )
+
+    # -------------------------------------------------- crop (plan 05-07, D-11)
+    # Both crop entry points funnel here: the canvas Crop tool (armed rect +
+    # Enter -> ``crop_committed``) and the numeric Crop… dialog (Edit menu).
+    # ``_apply_crop`` is the D-16/D-18 contract: exact image + mask slices,
+    # drop fully-outside boxes / clip partial ones (bbox AND line quads) via
+    # the plan 05-02 core seam, dropped count in the status flash, ONE
+    # geometry undo entry (via ``_apply_geometry_op``), Show Original
+    # re-baseline (D-14), ``geometry_altered`` (D-22).
+    def _on_crop_committed(self, scene_rect) -> None:
+        """canvas.crop_committed -> ``_apply_crop`` (scene rect -> image pixels).
+
+        The armed rect is in SCENE coordinates (floats); the apply path is
+        integer-pixel: ``math.floor`` on each edge, clamped to the image dims
+        — never beyond (the tool already clamps the rect to the page; the
+        clamp here is belt-and-suspenders for programmatic callers).
+        """
+        img = self.canvas.get_image_numpy()
+        if img is None:
+            return
+        h_img, w_img = img.shape[:2]
+        x = max(0, min(w_img - 1, math.floor(scene_rect.x())))
+        y = max(0, min(h_img - 1, math.floor(scene_rect.y())))
+        x2 = max(x + 1, min(w_img, math.floor(scene_rect.right())))
+        y2 = max(y + 1, min(h_img, math.floor(scene_rect.bottom())))
+        self._apply_crop(x, y, x2 - x, y2 - y)
+
+    def _apply_crop(self, x: int, y: int, w: int, h: int) -> None:
+        """Apply a crop end-to-end (image + mask slice, drop/clip boxes).
+
+        ``(x, y, w, h)`` are integer image pixels. A degenerate call (w < 1,
+        h < 1, or any edge out of bounds) is a SILENT no-op (T-05-17) — the
+        tool's 8x8 minimum and the dialog ranges make it near-impossible;
+        the guard covers programmatic edges so a degenerate slice never
+        reaches the core seam. The flash carries the dropped-box count copy
+        when D-16 removed boxes.
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        img = self.canvas.get_image_numpy()
+        if img is None:
+            return
+        h_img, w_img = img.shape[:2]
+        if (
+            not isinstance(x, int)
+            or not isinstance(y, int)
+            or not isinstance(w, int)
+            or not isinstance(h, int)
+            or w < 1
+            or h < 1
+            or x < 0
+            or y < 0
+            or x + w > w_img
+            or y + h > h_img
+        ):
+            return  # degenerate — silent no-op (T-05-17)
+
+        state: dict = {"ran": False, "dropped": 0}
+
+        def _transform():
+            mask = self.canvas.get_mask()
+            if mask is not None:
+                mask_bin = mask_to_numpy_binary(mask)
+            else:
+                mask_bin = np.zeros(img.shape[:2], dtype=np.uint8)
+            new_img, new_mask, kept_boxes, dropped = (
+                image_ops.crop_page_with_boxes(
+                    img, mask_bin, self.canvas.boxes_snapshot(), x, y, w, h
+                )
+            )
+            state["ran"] = True
+            state["dropped"] = dropped
+            return new_img, new_mask, kept_boxes
+
+        self._apply_geometry_op("crop", geometry=True, transform_fn=_transform)
+        if not state["ran"]:
+            return
+        dropped = state["dropped"]
+        if dropped > 0:
+            flash = (
+                f"Cropped. {dropped} box(es) were outside the crop and"
+                " removed \u2014 press Ctrl+Z to restore."
+            )
+        else:
+            flash = "Cropped."
+        self._show_transient_status(flash)
+
+    def _on_crop_dialog(self) -> None:
+        """Edit -> Crop… (plan 05-07, UI-SPEC surface 24b): numeric crop.
+
+        The dialog opens at the FULL current page bounds (x=0, y=0, w=W,
+        h=H — never empty) with live W−x / H−y range recompute; Apply runs
+        the same crop semantics as the canvas tool path via
+        ``_apply_crop(*dialog.result_values)``.
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        from manga_ai_studio.gui.crop_dialog import CropDialog
+
+        img = self.canvas.get_image_numpy()
+        if img is None:
+            return
+        h_img, w_img = img.shape[:2]
+        dialog = CropDialog(self, page_w=w_img, page_h=h_img)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        x, y, w, h = dialog.result_values
+        self._apply_crop(x, y, w, h)
 
     def _current_page_index(self) -> int | None:
         """Return the 0-indexed position of the path shown in the canvas."""
@@ -2178,6 +2303,9 @@ class MainWindow(QMainWindow):
         """
         self.tools_panel.tool_changed.connect(self.set_active_tool)
         self.tools_panel.brush_size_changed.connect(self.canvas.set_brush_size)
+        # Plan 05-07: the canvas Crop tool's Enter-apply signal funnels into
+        # the shared crop apply path (_apply_crop -> _apply_geometry_op).
+        self.canvas.crop_committed.connect(self._on_crop_committed)
         # Default brush size so the canvas and panel agree on startup.
         self.canvas.set_brush_size(DEFAULT_BRUSH_SIZE)
 
