@@ -177,3 +177,9 @@ None - no external service configuration required (zero new dependencies).
 ---
 *Phase: 05-project-persistence-image-ops-export*
 *Completed: 2026-08-08*
+
+## Self-Check: PASSED
+
+- Created files verified on disk (image_ops.py, test_image_ops.py, 05-02-SUMMARY.md)
+- Commits verified in git log: 8db54ef, ed8b997, b4ef148, fd4bec6
+

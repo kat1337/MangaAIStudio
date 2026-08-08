@@ -208,7 +208,7 @@ Plans:
 **Wave 1** (parallel — headless core, no Qt)
 
 - [x] 05-01-PLAN.md — .mas serialization core: LZMA2 container + manifest + PageBox mapping + D-06 checksum + D-09 climb + validation (PROJ-01)
-- [ ] 05-02-PLAN.md — core/image_ops.py: rotate/crop/resize/levels + box/line geometry transforms (PROJ-04)
+- [x] 05-02-PLAN.md — core/image_ops.py: rotate/crop/resize/levels + box/line geometry transforms (PROJ-04)
 - [ ] 05-03-PLAN.md — core/ocr_export.py: D-19 shape + D-20 \n-split + D-22 location + batch loop (PROJ-03)
 - [ ] 05-09-PLAN.md — [gap closure] remediate pre-existing tests/test_gui_boxes.py move-round-trip 1px regression (test-side QTest int-truncation; no production change; separate commit) (PROJ-04)
 
