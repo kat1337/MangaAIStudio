@@ -36,7 +36,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QFileDialog  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
@@ -963,3 +963,52 @@ def test_file_menu_internal_order(qtbot, tmp_path) -> None:
         "Quit",
     ]
     assert [i for i, a in enumerate(file_actions) if a.isSeparator()] == [3, 6]
+
+
+# ---------------------------------------------------------------------------
+# UAT test 1 gap closure round 2 (plan 04-09): toolbar open action
+# ---------------------------------------------------------------------------
+# The user's report: "on the small bar under there with tools, it should have
+# open folder instead of open image" — the toolbar's open action is Open
+# Folder (Ctrl+Shift+O, the manga-workflow default); Open Image stays in the
+# File menu (Ctrl+O). Pre-fix main_window.py:617 added action_open_image to
+# the toolbar.
+
+
+@pytest.mark.gui
+def test_toolbar_first_action_is_open_folder(qtbot, tmp_path) -> None:
+    """The toolbar's first action IS Open Folder (Ctrl+Shift+O), not Open Image."""
+    window = _make_window(qtbot, tmp_path)
+    toolbar_actions = window.toolbar.actions()
+    first = toolbar_actions[0]
+    assert first is window.action_open_folder
+    assert first.text() == "Open Folder\u2026"
+    assert first.shortcut() == QKeySequence("Ctrl+Shift+O")
+    assert window.action_open_folder is not window.action_open_image
+
+
+@pytest.mark.gui
+def test_open_image_remains_in_file_menu_not_toolbar(qtbot, tmp_path) -> None:
+    """Open Image stays in the File menu (Ctrl+O) and is NOT on the toolbar."""
+    window = _make_window(qtbot, tmp_path)
+    actions = window.menuBar().actions()
+    file_menu = next(a for a in actions if a.text() == "&File").menu()
+    assert window.action_open_image in file_menu.actions()
+    assert window.action_open_image not in window.toolbar.actions()
+
+
+@pytest.mark.gui
+def test_toolbar_open_folder_triggered_opens_folder(qtbot, tmp_path, monkeypatch) -> None:
+    """Triggering the toolbar's first action runs open_folder (not open_image).
+
+    The dialog must be stubbed: open_folder calls the modal
+    QFileDialog.getExistingDirectory synchronously — returning "" makes it
+    return early (main_window.py:832-834), so trigger() never blocks. Without
+    the stub this test would hang on the native modal dialog.
+    """
+    window = _make_window(qtbot, tmp_path)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    fired: list[bool] = []
+    window.action_open_folder.triggered.connect(lambda: fired.append(True))
+    window.action_open_folder.trigger()
+    assert fired == [True]
