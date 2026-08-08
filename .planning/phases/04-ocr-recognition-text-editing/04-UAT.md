@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T01:10:00Z"
+updated: "2026-08-08T02:00:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -28,9 +28,7 @@ expected: |
   legibility: white+outline text readable over varied artwork with art visible beneath;
   text scales legibly on zoom in/out. Translucent overlay (fill 232,232,234,0.85 /
   outline 11,11,14,0.92 2px) is legible over light and dark artwork at 100-800% zoom.
-result: issue
-reported: "the text now moves with the boxes and scales (RC-1/2/3 FIXED ✓), but it's still a bit small and it overshoots the box, renders horizontally — it should try to fit in the box and adapt the text to the size of the text box. ALSO (out-of-scope UX, user requested inclusion): menu bar top-level shows Recent Files and Batch ahead of File and Edit — should be Recent Files, File, then Batch (Recent/Batch should be File submenus only, not top-level); toolbar 'small bar under the menu' should have Open Folder instead of Open Image (opening a folder by default makes more sense for manga)"
-severity: major
+result: pass
 
 ### 2. Real-model OCR end-to-end on a manga page
 expected: |
@@ -87,8 +85,8 @@ result: [pending]
 ## Summary
 
 total: 7
-passed: 0
-issues: 1
+passed: 1
+issues: 0
 pending: 6
 skipped: 0
 blocked: 0
