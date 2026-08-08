@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:10:00Z"
+updated: "2026-08-08T02:20:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -47,7 +47,7 @@ expected: |
   commits; drag during edit does NOT move the box; F2 opens the editor; with a
   translation present the editor shows the translation (focus rule); with a JP IME
   active, confirm candidates appear and text commits correctly.
-result: [pending]
+result: pass
 
 ### 4. Inspector + badge on real artwork
 expected: |
@@ -85,9 +85,9 @@ result: [pending]
 ## Summary
 
 total: 7
-passed: 2
+passed: 3
 issues: 0
-pending: 5
+pending: 4
 skipped: 0
 blocked: 0
 ## Gaps
