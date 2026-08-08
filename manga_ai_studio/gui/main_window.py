@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
         # Quit (Ctrl+Q).
         self.action_quit = QAction("Quit", self)
         self.action_quit.setShortcut(QKeySequence("Ctrl+Q"))
-        self.action_quit.triggered.connect(self.close)
+        self.action_quit.triggered.connect(self._on_quit)
 
         # Export Page (Ctrl+E) — plan 04 (PROJ-02): writes the DISPLAYED canvas
         # image (not a re-clean) to a user-chosen PNG/JPG path via
@@ -914,7 +914,8 @@ class MainWindow(QMainWindow):
 
         Uses ``QFileDialog.getOpenFileName`` (T-01-01 path-traversal mitigation)
         and routes through ``set_image_from_path`` which runs the size + suffix
-        validators.
+        validators. The D-07 Unsaved Changes gate runs before the session is
+        replaced (after the dialog — the file was already chosen).
         """
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -924,6 +925,8 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        if not self._confirm_discard_changes():
+            return
         self._open_single_image(Path(path))
 
     def open_folder(self) -> None:
@@ -932,9 +935,12 @@ class MainWindow(QMainWindow):
         UI-SPEC surface 4 Open Folder (Ctrl+Shift+O). Folder scan uses
         ``Path.iterdir`` + ``is_file`` + ``validate_image_path`` — symlink
         resolution is handled by ``Path.resolve()`` inside the validator.
+        The D-07 Unsaved Changes gate runs before the session is replaced.
         """
         directory = QFileDialog.getExistingDirectory(self, "Open Folder", "")
         if not directory:
+            return
+        if not self._confirm_discard_changes():
             return
         self._load_folder(Path(directory))
 
@@ -4171,6 +4177,32 @@ class MainWindow(QMainWindow):
         """Show the persistent #7a1f1f error chip with ``text`` (UI-SPEC §Color)."""
         self.error_chip.setText(text)
         self.error_chip.show()
+
+    def _on_quit(self) -> None:
+        """Quit (Ctrl+Q / File → Quit): the D-07 Unsaved Changes gate runs
+        HERE, before the programmatic ``close()``.
+
+        The gate lives at the action handler (not in closeEvent) because the
+        ``close()`` it triggers is a programmatic, non-spontaneous close —
+        closeEvent gates only window-manager closes (see :meth:`closeEvent`),
+        so a programmatic close must consult the gate at its own call site.
+        """
+        if self._confirm_discard_changes():
+            self.close()
+
+    def closeEvent(self, event) -> None:
+        """Window close (X / Alt+F4) -> the D-07 Unsaved Changes gate.
+
+        Only SPONTANEOUS close events (initiated by the window manager) run
+        the gate: a programmatic ``close()`` must not re-prompt — the Quit
+        action is gated in :meth:`_on_quit`, and host/test teardown closes
+        must not pop a modal dialog. Cancel aborts the close
+        (``event.ignore()``); Save/Discard let it proceed.
+        """
+        if event.spontaneous() and not self._confirm_discard_changes():
+            event.ignore()
+            return
+        event.accept()
 
 
 def compute_mask_bbox(mask_binary: np.ndarray) -> tuple[int, int, int, int] | None:

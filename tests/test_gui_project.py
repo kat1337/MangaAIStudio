@@ -95,11 +95,35 @@ def _stub_open_dialog(monkeypatch, target: Path | None) -> list:
     return calls
 
 
-def _save_as(window: MainWindow, target_dir: Path, monkeypatch) -> None:
-    """Run the Save As flow with the folder dialog stubbed to ``target_dir``."""
+def _save_as(
+    window: MainWindow, target_dir: Path, monkeypatch, isolate_settings: bool = True
+) -> None:
+    """Run the Save As flow with the folder dialog stubbed to ``target_dir``.
+
+    QSettings are isolated to a throwaway INI so a save's
+    ``_add_recent_project`` never touches the user's real registry settings
+    (``isolate_settings=False`` keeps an already-isolated store, e.g. for
+    multi-save Recent Projects tests).
+    """
     _stub_dir_dialog(monkeypatch, target_dir)
+    if isolate_settings:
+        _isolate_settings_any(window, monkeypatch)
     window._save_project(force_as=True)
     QApplication.processEvents()
+
+
+def _isolate_settings_any(window: MainWindow, monkeypatch) -> None:
+    """Point the window's QSettings at a throwaway INI (never the real one)."""
+    import os
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".ini")
+    os.close(fd)
+    monkeypatch.setattr(
+        window,
+        "_settings",
+        lambda: QSettings(path, QSettings.Format.IniFormat),
+    )
 
 
 def _dirty(window: MainWindow) -> None:
@@ -494,3 +518,151 @@ def test_page_navigation_uses_embedded_image_for_missing_original(
     # The embedded image rendered (dims match the page) — not an error.
     assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
     assert warnings == []  # no "Couldn't open file" dialog (D-06)
+
+
+# ------------------------------------------------------------- Task 3 tests
+
+@pytest.mark.gui
+def test_folder_open_sets_original_verified(qtbot, tmp_path) -> None:
+    """A normal folder-open session: every ImageFile.original_verified is
+    True (D-06 normal-open wiring — Show Original is valid)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    assert len(window.image_files) == 2
+    assert all(imf.original_verified for imf in window.image_files)
+
+
+@pytest.mark.gui
+def test_menu_gating_during_op(qtbot, tmp_path) -> None:
+    """While _op_running: Save Project… / Save Project As… / Open Project…
+    are disabled; they re-enable when the op finishes."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    assert window.action_save_project.isEnabled()
+    assert window.action_save_project_as.isEnabled()
+    assert window.action_open_project.isEnabled()
+
+    window._op_running = True
+    window._refresh_action_states()
+    assert not window.action_save_project.isEnabled()
+    assert not window.action_save_project_as.isEnabled()
+    assert not window.action_open_project.isEnabled()
+
+    window._op_running = False
+    window._refresh_action_states()
+    assert window.action_save_project.isEnabled()
+    assert window.action_open_project.isEnabled()
+
+
+@pytest.mark.gui
+def test_unsaved_changes_prompt_save_discard_cancel(qtbot, tmp_path, monkeypatch) -> None:
+    """Dirty session + Quit / spontaneous window close -> the Unsaved
+    Changes prompt appears EXACTLY ONCE and one button click resolves it:
+    Discard proceeds, Cancel aborts, Save saves (Save As… first) then
+    proceeds; a clean session closes without prompting."""
+    chapter = tmp_path / "chapter"
+
+    # --- Discard proceeds with the close ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    titles: list = []
+    _dirty(window)
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.DestructiveRole, capture=titles)
+    window._on_quit()  # the D-07 Quit path (gate -> programmatic close)
+    assert titles == ["Unsaved Changes"]  # prompted exactly once
+    assert not window.isVisible()
+
+    # --- Cancel aborts the close ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    titles.clear()
+    _dirty(window)
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.RejectRole, capture=titles)
+    window._on_quit()
+    assert titles == ["Unsaved Changes"]
+    assert window.isVisible()  # close aborted
+
+    # --- Save runs Save As… (no project path yet), then the close proceeds ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _isolate_settings(window, tmp_path, monkeypatch)  # the Save path writes
+    titles.clear()
+    _dirty(window)
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.AcceptRole, capture=titles)
+    _stub_dir_dialog(monkeypatch, tmp_path / "chapter.mas-project")
+    window._on_quit()
+    assert titles == ["Unsaved Changes"]
+    assert not window.isVisible()
+    assert window._project_dir == tmp_path / "chapter.mas-project"
+    assert not window._session_dirty()
+
+    # --- Clean session: no prompt, close proceeds ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    titles.clear()
+    _stub_messagebox_exec(monkeypatch, role=None, capture=titles)
+    window._on_quit()
+    assert titles == []
+    assert not window.isVisible()
+
+    # --- Spontaneous (window-manager X) close runs the same single gate ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    titles.clear()
+    _dirty(window)
+    from PySide6.QtGui import QCloseEvent
+
+    monkeypatch.setattr(QCloseEvent, "spontaneous", lambda self: True)
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.RejectRole, capture=titles)
+    window.close()
+    assert titles == ["Unsaved Changes"]  # exactly one prompt
+    assert window.isVisible()  # Cancel aborted the close
+
+    # --- Programmatic close (host teardown / non-spontaneous) NEVER prompts ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    titles.clear()
+    _dirty(window)
+    monkeypatch.setattr(QCloseEvent, "spontaneous", lambda self: False)
+    _stub_messagebox_exec(monkeypatch, role=None, capture=titles)
+    window.close()
+    assert titles == []  # no dialog for programmatic closes
+
+
+@pytest.mark.gui
+def test_recent_projects_menu(qtbot, tmp_path, monkeypatch) -> None:
+    """Recent Projects: 'Project — {folder-name}' entries with full-path
+    tooltips, capped at 8 across 9 saves, Clear Menu empties it, and a fresh
+    QSettings shows the disabled 'No recent projects yet.' empty item."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _isolate_settings(window, tmp_path, monkeypatch)
+    # The submenu was populated at construction from the real settings;
+    # rebuild it from the isolated store.
+    window._refresh_recent_projects_menu()
+
+    # Fresh settings -> the empty-state item.
+    def entry_actions():
+        acts = []
+        for act in window.recent_projects_menu.actions():
+            if act.property("recent_project"):
+                acts.append(act)
+        return acts
+
+    assert [a.text() for a in entry_actions()] == []
+
+    # 9 saves to 9 different dirs -> capped at 8, newest first. The isolated
+    # settings store must persist across saves (no re-isolation).
+    for i in range(9):
+        _dirty(window)
+        _save_as(window, tmp_path / f"chapter{i}.mas-project", monkeypatch, isolate_settings=False)
+    entries = entry_actions()
+    assert len(entries) == 8
+    assert entries[0].text() == "Project \u2014 chapter8.mas-project"
+    assert entries[0].toolTip() == str(tmp_path / "chapter8.mas-project")
+    assert entries[-1].text() == "Project \u2014 chapter1.mas-project"
+    # chapter0 dropped off (oldest).
+    assert all("chapter0" not in e.toolTip() for e in entries)
+
+    # Clear Menu empties the list -> empty-state item returns.
+    window.action_clear_recent_projects.trigger()
+    QApplication.processEvents()
+    assert entry_actions() == []
+    assert any(
+        a.text() == "No recent projects yet." and not a.isEnabled()
+        for a in window.recent_projects_menu.actions()
+    )
