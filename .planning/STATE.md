@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Completed 05-05-PLAN.md
-last_updated: "2026-08-08T21:54:00.953Z"
+stopped_at: Completed 05-06-PLAN.md
+last_updated: "2026-08-08T22:21:22.918Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 35
+  completed_plans: 36
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
-Plan: 7 of 9
+Plan: 8 of 9
 Status: Ready to execute
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [█████████░] 92% (4/4 phases, 29/29 plans)
+Progress: [██████████] 95% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -102,6 +102,7 @@ Progress: [█████████░] 92% (4/4 phases, 29/29 plans)
 | Phase 05-project-persistence-image-ops-export P05-09 | 12 | 2 tasks | 1 files |
 | Phase 05 P04 | 14 | 2 tasks | 4 files |
 | Phase 05-project-persistence-image-ops-export P05 | 110 | 3 tasks | 5 files |
+| Phase 05 P05-06 | 42 | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -216,6 +217,11 @@ Recent decisions affecting current work:
 - [Phase ?]: Unsaved-Changes gate lives inside _load_project_session/_load_single_page_mas (shared by the Open Project… dialog, chapter-climb, and Recent Projects) so the D-07 gate runs once per action without double-prompting after Discard (05-05)
 - [Phase ?]: Project session rebuild bypasses _set_pages: ImageFiles carry restored mask/boxes/current_image and the sidebar is populated directly — _set_pages would rebuild fresh ImageFiles and auto-load placeholder paths via set_image_from_path (05-05)
 - [Phase ?]: Save-side per-page image source = cleaned → source path → embedded current_image (RESEARCH A3 + portable-project fallback): re-saving a project whose originals are missing embeds the last-known image instead of failing (05-05)
+- [Phase ?]: 05-06: Dialogs store result_values (not 'result') — 'result' shadows QDialog.result(); LoadTranslationsDialog result_text/result_page_index precedent
+- [Phase ?]: 05-06: transform_fn returns (image, mask_bin|None, boxes|None) — None means the op does NOT touch that layer; levels passes (img, None, None) so set_mask/set_boxes are skipped and the undo record is image-only
+- [Phase ?]: 05-06: Show Original gating reads _last_page_index (the D-11 seam rule) with a bounds check, per the plan contract
+- [Phase ?]: 05-06: Full-frame geometry patches at (0,0) with differing dims REPLACE the whole image on undo (canvas.apply_undo_image) — the T-01-15 clip assumes same-frame patches and truncated the pre-op frame; non-origin patches keep the clip
+- [Phase ?]: 05-06: pop_image_undo/redo stash the FULL current image for dims-changing geometry records — the region slice would clip the redo stash and break one-press redo after rotate/resize
 
 ### Pending Todos
 
@@ -242,8 +248,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T21:54:00.910Z
-Stopped at: Completed 05-05-PLAN.md
+Last session: 2026-08-08T22:20:51.094Z
+Stopped at: Completed 05-06-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
