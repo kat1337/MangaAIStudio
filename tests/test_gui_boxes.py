@@ -1099,6 +1099,77 @@ def test_text_overlay_uses_outlined_text_format(qtbot) -> None:
     assert pen.widthF() >= 1.0
 
 
+# -- UAT test 1 gap closure (plan 04-08): overlay geometry tracking (RC-1) --
+# The overlay child must track the box through the canvas geometry paths. The
+# canvas moves/resizes boxes via setRect + _sync_handles (canvas.py:1022-1023,
+# 1597-1598, 1618-1619) on every drag-move and corner-resize, so the RC-1 fix
+# splits a setPos-ONLY _reposition_text_overlay() out of refresh_text_overlay()
+# and calls it from _sync_handles. Pre-fix the overlay stayed at its pre-move
+# scene position (debug session 04-01 measured intersection 0.0 after a move).
+
+
+@pytest.mark.gui
+def test_text_overlay_tracks_box_after_setrect_move(qtbot) -> None:
+    """After setRect(move) + _sync_handles the overlay sits INSIDE the moved box (RC-1).
+
+    Matches the debug probe exactly: pre-fix the overlay sceneBoundingRect stays
+    at the pre-move (23,23,217,30) while the box moves to (149,149,202,102) —
+    a 0.0 intersection. Post-fix the overlay topLeft tracks the box's new
+    topLeft (pen width 2/2 + 2px inset = 3px).
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    # Precondition: overlay inset at (23,23) inside box (20,20,220,120).
+    tl0 = item._text_overlay.sceneBoundingRect().topLeft()
+    assert tl0.x() == pytest.approx(23.0, abs=0.01)
+    assert tl0.y() == pytest.approx(23.0, abs=0.01)
+    item.setRect(QRectF(150, 150, 200, 100))
+    item._sync_handles()
+    tl = item._text_overlay.sceneBoundingRect().topLeft()
+    assert tl.x() == pytest.approx(153.0, abs=0.01)
+    assert tl.y() == pytest.approx(153.0, abs=0.01)
+
+
+@pytest.mark.gui
+def test_text_overlay_tracks_box_after_tl_edge_resize(qtbot) -> None:
+    """After a TL-edge setRect resize + _sync_handles the overlay is INSIDE the box (RC-1).
+
+    A TL/BL/TR-edge resize moves the box's top-left corner, which pre-fix left
+    the overlay detached at the old position (the debug's containment proxy:
+    sceneBoundingRect intersection must be non-empty).
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.setRect(QRectF(60, 40, 180, 90))
+    item._sync_handles()
+    tl = item._text_overlay.sceneBoundingRect().topLeft()
+    assert tl.x() == pytest.approx(63.0, abs=0.01)
+    assert tl.y() == pytest.approx(43.0, abs=0.01)
+    assert (
+        item._text_overlay.sceneBoundingRect().intersects(item.sceneBoundingRect())
+        is True
+    )
+
+
+@pytest.mark.gui
+def test_text_overlay_reposition_does_not_rebuild_document(qtbot) -> None:
+    """_sync_handles repositions the overlay WITHOUT rebuilding its document (RC-1).
+
+    The canvas calls _sync_handles on EVERY mouseMoveEvent during a drag, so the
+    reposition must be setPos-only — a full refresh_text_overlay (setPlainText +
+    document rebuild) per mousemove would be wasteful. The rendered text must
+    survive the move unchanged.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.setRect(QRectF(150, 150, 200, 100))
+    item._sync_handles()
+    assert item._text_overlay.toPlainText() == "hello"
+
+
 @pytest.mark.gui
 def test_set_text_overlay_visible_false_hides_only_text(qtbot) -> None:
     """set_text_overlay_visible(False) hides the text child but the box border stays visible.
