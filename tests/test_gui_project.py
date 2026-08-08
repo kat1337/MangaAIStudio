@@ -666,3 +666,54 @@ def test_recent_projects_menu(qtbot, tmp_path, monkeypatch) -> None:
         a.text() == "No recent projects yet." and not a.isEnabled()
         for a in window.recent_projects_menu.actions()
     )
+
+
+# ===========================================================================
+# Plan 05-06 Task 3 — Show Original gating (surface 29, D-06/D-14)
+# ===========================================================================
+
+@pytest.mark.gui
+def test_show_original_gating(qtbot, tmp_path, monkeypatch) -> None:
+    """Surface 29 (D-06): Show Original is disabled with the not-found tooltip
+    when the current page's original is unverified (a .mas-loaded page whose
+    source failed the checksum); a folder-open page keeps the inherited
+    gating; after an image op on the folder page Show Original shows the
+    post-op image (D-14 re-baseline)."""
+    chapter = tmp_path / "chapter"
+
+    # --- .mas-loaded page with original_verified False -> disabled + tooltip ---
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    (chapter / "page_01.png").unlink()  # original goes missing -> unverified
+
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+    assert window2.image_files[0].original_verified is False
+    assert not window2.action_show_original.isEnabled()
+    assert (
+        window2.action_show_original.toolTip()
+        == "Show Original (P) — original file not found."
+    )
+
+    # --- folder-open page: inherited gating + post-op re-baseline (D-14) ---
+    window3 = _make_window(qtbot, tmp_path, folder=tmp_path / "chapter2")
+    assert window3.image_files[0].original_verified is True
+    # No inpaint result yet -> the action follows has_inpaint (disabled), with
+    # the inherited tooltip (NOT the not-found copy).
+    assert not window3.action_show_original.isEnabled()
+    assert "original file not found" not in window3.action_show_original.toolTip().lower()
+    # An image op re-baselines the cache and enables the toggle (set_image
+    # ran -> has_inpaint_result True; _apply_geometry_op refreshes states).
+    window3._rotate_page(-1)
+    QApplication.processEvents()
+    now = window3.canvas.get_image_numpy()
+    assert window3.action_show_original.isEnabled()
+    assert "original file not found" not in window3.action_show_original.toolTip().lower()
+    assert len(window3.history._image_undo) == 1  # the op really applied
+    assert np.array_equal(window3.canvas._original_image_numpy, now)
+    window3.canvas.show_original(True)
+    assert np.array_equal(window3.canvas.get_image_numpy(), now)

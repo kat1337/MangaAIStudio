@@ -885,7 +885,30 @@ class MainWindow(QMainWindow):
         # loaded — UI-SPEC §11).
         self.action_toggle_box_overlay.setEnabled(page_open)
         has_inpaint = self.canvas.has_inpaint_result()
-        self.action_show_original.setEnabled(has_inpaint)
+        # Surface 29 (D-06, plan 05-06): Show Original is disabled with the
+        # not-found tooltip when the current page's original is unverified —
+        # a .mas-loaded page whose source path/checksum failed (the embedded
+        # image is the only base; UI-SPEC §Copywriting). Normal sessions
+        # (original_verified True — set on folder/image open by plan 05-05)
+        # keep the inherited has_inpaint gating. The current page is read
+        # from the stored _last_page_index (the D-11 seam rule — never
+        # _current_page_index mid-navigation).
+        page_original_unverified = False
+        gating_idx = self._last_page_index
+        if (
+            gating_idx is not None
+            and 0 <= gating_idx < len(self.image_files)
+            and not self.image_files[gating_idx].original_verified
+        ):
+            page_original_unverified = True
+        if page_original_unverified:
+            self.action_show_original.setEnabled(False)
+            self.action_show_original.setToolTip(
+                "Show Original (P) — original file not found."
+            )
+        else:
+            self.action_show_original.setEnabled(has_inpaint)
+            self.action_show_original.setToolTip("")
         self.btn_preview_hold.setEnabled(has_inpaint)
         # The painting tools are usable only with a page open (they paint on
         # the mask layer, which is sized to the image). Move stays usable.

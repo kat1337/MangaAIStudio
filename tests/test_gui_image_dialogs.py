@@ -34,6 +34,7 @@ from manga_ai_studio.core.mask_editor import (
 )
 from manga_ai_studio.gui.levels_dialog import LevelsDialog
 from manga_ai_studio.gui.main_window import MainWindow
+from manga_ai_studio.gui.resize_dialog import ResizeDialog
 from panelcleaner.structures import Box
 
 
@@ -264,3 +265,92 @@ def test_levels_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None
     assert np.array_equal(window.canvas._original_image_numpy, pre)
     window.canvas.show_original(True)
     assert np.array_equal(window.canvas.get_image_numpy(), pre)
+
+
+# ===========================================================================
+# Task 3 — Resize dialog contract + end-to-end apply
+# ===========================================================================
+
+@pytest.mark.gui
+def test_resize_dialog_contract(qtbot) -> None:
+    """ResizeDialog opens at the current dims with the full number contract.
+
+    UI-SPEC surface 26: current-dim initialization; aspect lock recomputes
+    the other field (rounded, >= 1) and unlocking frees it; % mode applies
+    to the current dimension with the label showing resulting px; ranges
+    clamp 1..100000 px / 1..1000 percent.
+    """
+    dlg = ResizeDialog(current_w=60, current_h=40)
+    qtbot.addWidget(dlg)
+
+    # Opens at the current dims, aspect lock checked by default.
+    assert dlg.width_spin.value() == 60
+    assert dlg.height_spin.value() == 40
+    assert dlg.aspect_check.isChecked()
+    assert dlg.unit_combo.currentIndex() == 0  # pixels default
+
+    # Locked: editing the dominant field recomputes the other (rounded, >=1).
+    dlg.width_spin.setValue(30)
+    assert dlg.height_spin.value() == 20  # round(30 * 40 / 60)
+    assert "Result: 30 \u00d7 20 px" in dlg.result_label.text()
+
+    # Unlocking frees the other field.
+    dlg.aspect_check.setChecked(False)
+    dlg.height_spin.setValue(40)
+    assert dlg.width_spin.value() == 30  # untouched
+
+    # % mode applies to the current dimension; the label shows resulting px.
+    dlg.unit_combo.setCurrentIndex(1)  # percent (30px/60 -> 50%, 40px/40 -> 100%)
+    assert dlg.width_spin.value() == 50
+    assert dlg.height_spin.value() == 100
+    assert "Result: 30 \u00d7 40 px" in dlg.result_label.text()
+    dlg.width_spin.setValue(50)
+    assert "Result: 30 \u00d7 40 px" in dlg.result_label.text()
+
+    # Ranges clamp: 1..100000 px, 1..1000 percent.
+    dlg.unit_combo.setCurrentIndex(0)  # back to pixels
+    assert dlg.width_spin.maximum() == 100000
+    dlg.unit_combo.setCurrentIndex(1)
+    assert dlg.width_spin.maximum() == 1000
+    assert dlg.width_spin.minimum() == 1
+
+
+@pytest.mark.gui
+def test_resize_apply_end_to_end(qtbot, tmp_path, monkeypatch) -> None:
+    """Resize Apply transforms image + mask + boxes with ONE undo entry.
+
+    LANCZOS image / NEAREST mask (binary stays strictly 0/255 — no soft
+    alpha drift, D-18/A8), boxes scaled int, ONE geometry entry,
+    geometry_altered True (D-22), the resized-dims flash, and the post-resize
+    Show Original re-baseline (D-14).
+    """
+    window = _window_with_page(qtbot, tmp_path)  # 60x40 page
+    pre = window.canvas.get_image_numpy().copy()
+    mask_bin, _box = _seed_mask_and_box(window)
+
+    def _fake_exec(dlg):
+        dlg.result_values = (30, 20)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ResizeDialog, "exec", _fake_exec)
+    window._on_resize()
+    QApplication.processEvents()
+
+    # Image resized LANCZOS to the collected dims.
+    now = window.canvas.get_image_numpy()
+    assert now.shape[:2] == (20, 30)
+    # Mask resized NEAREST: binary values only (0/255), correct dims.
+    mask_now = mask_to_numpy_binary(window.canvas.get_mask())
+    assert mask_now.shape[:2] == (20, 30)
+    assert set(np.unique(mask_now)).issubset({0, 255})
+    # Boxes scaled int: (30,10,50,20) at 0.5x -> (15,5,25,10).
+    assert window.canvas.boxes_snapshot()[0].box.as_tuple == (15, 5, 25, 10)
+
+    # ONE geometry entry across the three stores.
+    hist = window.history
+    assert len(hist._image_undo) == 1
+    assert hist._image_undo[-1][0] == hist._mask_undo[-1][0] == hist._boxes_undo[-1][0]
+    assert window.image_files[0].geometry_altered is True
+    assert "Resized to 30 \u00d7 20." in window.status_bar_left.text()
+    # Show Original re-baselines to the post-resize image (D-14).
+    assert np.array_equal(window.canvas._original_image_numpy, now)
