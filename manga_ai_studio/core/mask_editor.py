@@ -54,12 +54,15 @@ DEFAULT_BRUSH_SIZE = 40
 
 
 class ToolMode(enum.Enum):
-    """The 5 exclusive mask-editing tools (UI-SPEC surface 6).
+    """The 6 exclusive mask-editing tools (UI-SPEC surface 6, D-11).
 
     Move/Pan is the default (no painting). Brush/Rectangle/Lasso paint mask
-    content; Eraser removes it. Differs from MangaCleaner_GPU's
-    stringly-typed "NONE"/"BRUSH"/"RECT"/"LASSO" — we use an enum and treat
-    Eraser as a first-class tool per UI-SPEC (not a Shift toggle alone).
+    content; Eraser removes it; Crop (the 6th tool, plan 05-07) defines a
+    crop rect via an armed drag (Enter applies, Esc cancels) — the first
+    enum extension since Phase 1 (the Phase 3 "no 6th tool" stance is
+    superseded by D-11). Differs from MangaCleaner_GPU's stringly-typed
+    "NONE"/"BRUSH"/"RECT"/"LASSO" — we use an enum and treat Eraser as a
+    first-class tool per UI-SPEC (not a Shift toggle alone).
     """
 
     MOVE = "move"
@@ -67,6 +70,7 @@ class ToolMode(enum.Enum):
     RECTANGLE = "rectangle"
     LASSO = "lasso"
     ERASER = "eraser"
+    CROP = "crop"
 
 
 def clamp_brush_size(size: int) -> int:

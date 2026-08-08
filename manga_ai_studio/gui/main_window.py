@@ -662,6 +662,23 @@ class MainWindow(QMainWindow):
             lambda: self.set_active_tool(ToolMode.ERASER)
         )
 
+        # The 6th tool (D-11, plan 05-07): Crop — same wiring as the other
+        # tool actions (setData(ToolMode) + set_active_tool via lambda; the
+        # toolbar button shares the ToolsPanel QActionGroup so the dock and
+        # toolbar highlight in sync). Tooltip per UI-SPEC §Copywriting crop
+        # tool row; shortcut G is installed as a window-level QShortcut in
+        # _wire_tool_actions (the established pattern — an action-level
+        # setShortcut would collide with it, CR-14).
+        self.action_tool_crop = QAction("Crop", self)
+        self.action_tool_crop.setData(ToolMode.CROP)
+        self.action_tool_crop.setToolTip(
+            "Crop tool (G): drag a rectangle on the page, Enter applies,"
+            " Esc cancels."
+        )
+        self.action_tool_crop.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.CROP)
+        )
+
         # Cancel Batch (D-09) — plan 04: emits batch_abort_requested, which the
         # running Worker.abort consumes (worker_thread.py abort_signal wiring).
         # Disabled unless a batch is running (refreshed in _refresh_action_states).
@@ -725,6 +742,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_rectangle)
         tools_menu.addAction(self.action_tool_lasso)
         tools_menu.addAction(self.action_tool_eraser)
+        tools_menu.addAction(self.action_tool_crop)
         tools_menu.addSeparator()
         rotate_menu = tools_menu.addMenu("Rotate")
         rotate_menu.addAction(self.action_rotate_cw)
@@ -775,6 +793,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_rectangle))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_lasso))
         self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
+        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_crop))
         # Surface 13 (plan 03-05): the 4-button undo toolbar collapses to 2
         # ([Undo][Redo]). Ctrl+Z pops the merged MASK/IMAGE/BOXES timeline; the
         # Phase 1 image/mask pair + inner divider are gone. Tooltips name the
@@ -912,12 +931,14 @@ class MainWindow(QMainWindow):
         self.btn_preview_hold.setEnabled(has_inpaint)
         # The painting tools are usable only with a page open (they paint on
         # the mask layer, which is sized to the image). Move stays usable.
+        # The 6th tool (Crop, D-11) follows the same page-open gating.
         self.action_tool_move.setEnabled(True)
         for act in (
             self.action_tool_brush,
             self.action_tool_rectangle,
             self.action_tool_lasso,
             self.action_tool_eraser,
+            self.action_tool_crop,
         ):
             act.setEnabled(page_open)
 
@@ -2169,12 +2190,15 @@ class MainWindow(QMainWindow):
         # main window so they fire regardless of focus (as long as a child
         # widget doesn't consume them first). Reimplemented patterned after
         # MangaCleaner_GPU main_window.py:160-163 (D-12 reference-only).
+        # G = Crop, the 6th tool (D-11, plan 05-07; free letter per the
+        # UI-SPEC shortcut audit).
         for key, tool in (
             ("V", ToolMode.MOVE),
             ("B", ToolMode.BRUSH),
             ("R", ToolMode.RECTANGLE),
             ("L", ToolMode.LASSO),
             ("E", ToolMode.ERASER),
+            ("G", ToolMode.CROP),
         ):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(lambda _t=tool: self.set_active_tool(_t))

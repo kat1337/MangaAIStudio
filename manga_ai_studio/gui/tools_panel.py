@@ -1,4 +1,4 @@
-"""ToolsPanel — the 5-tool mask-editing panel + brush-size control.
+"""ToolsPanel — the 6-tool mask-editing panel + brush-size control.
 
 Per D-10 this is our own reimplementation patterned after MangaCleaner_GPU
 ``frontend/widgets.py`` ``ToolGroup`` + ``BrushSlider`` (lines 21-88) —
@@ -10,9 +10,9 @@ per UI-SPEC surface 6 (which contracts the spinbox that MangaCleaner_GPU
 omits).
 
 UI-SPEC surface 6 contracts:
-    - 5 exclusive tools: Move/Pan (V), Brush (B), Rectangle (R), Lasso (L),
-      Eraser (E). Active tool highlighted with accent ``#00d4ff`` (accent
-      reserved use #1).
+    - 6 exclusive tools: Move/Pan (V), Brush (B), Rectangle (R), Lasso (L),
+      Eraser (E), Crop (G — the 6th tool, D-11; no brush-size row for crop).
+      Active tool highlighted with accent ``#00d4ff`` (accent reserved use #1).
     - Brush size: ``QSlider`` (1-300) + ``QSpinBox`` (1-300), label
       ``"Brush size: {n} px"``, default 40 px.
     - Slider<->spinbox stay in sync; either emits ``brush_size_changed``.
@@ -84,7 +84,7 @@ QSpinBox {
 
 
 class ToolsPanel(QWidget):
-    """The Tools dock panel: 5 exclusive tool buttons + brush-size control."""
+    """The Tools dock panel: 6 exclusive tool buttons + brush-size control."""
 
     # Emitted when the user selects a different tool (the active QAction
     # becomes checked). Carries the matching ToolMode.
@@ -101,11 +101,11 @@ class ToolsPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # ---- Tool row: 5 exclusive checkable QToolButtons ----
+        # ---- Tool row: 6 exclusive checkable QToolButtons ----
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
 
-        # Build the 5 actions. Text doubles as the tooltip; QToolButton renders
+        # Build the 6 actions. Text doubles as the tooltip; QToolButton renders
         # icon-only (UI-SPEC toolbar/dock icon style).
         self.action_move = self._make_tool_action(
             "Move/Pan", "Move/Pan tool (V)", ToolMode.MOVE, checked=True
@@ -122,6 +122,16 @@ class ToolsPanel(QWidget):
         self.action_eraser = self._make_tool_action(
             "Eraser", "Eraser tool (E)", ToolMode.ERASER
         )
+        # The 6th tool (D-11, plan 05-07): Crop defines a crop rect via an
+        # armed drag (Enter applies, Esc cancels — UI-SPEC §Copywriting crop
+        # tool row). No brush-size row (UI-SPEC surface 6 — crop needs no
+        # size control).
+        self.action_crop = self._make_tool_action(
+            "Crop",
+            "Crop tool (G): drag a rectangle on the page, Enter applies,"
+            " Esc cancels.",
+            ToolMode.CROP,
+        )
 
         # QAction -> ToolMode lookup for the triggered slot.
         self._action_to_tool: dict[QAction, ToolMode] = {
@@ -130,6 +140,7 @@ class ToolsPanel(QWidget):
             self.action_rectangle: ToolMode.RECTANGLE,
             self.action_lasso: ToolMode.LASSO,
             self.action_eraser: ToolMode.ERASER,
+            self.action_crop: ToolMode.CROP,
         }
         # Connect each action's toggled signal so tool_changed fires whether the
         # action is activated by a click, a menu, a shortcut, or a programmatic
@@ -148,6 +159,7 @@ class ToolsPanel(QWidget):
             self.action_rectangle,
             self.action_lasso,
             self.action_eraser,
+            self.action_crop,
         ):
             btn = QToolButton(self)
             btn.setDefaultAction(action)
@@ -230,16 +242,27 @@ class ToolsPanel(QWidget):
             self.tool_changed.emit(tool)
 
     def set_active_tool(self, tool: ToolMode) -> None:
-        """Programmatically check the tool's action (keeps panel in sync)."""
+        """Programmatically check the tool's action (keeps panel in sync).
+
+        The matching action is checked AND every other action is explicitly
+        unchecked: ``blockSignals`` around ``setChecked`` would otherwise
+        suppress the QActionGroup's exclusive unchecking (a Qt behavior —
+        the group reacts to the action event, which blocked signals swallow),
+        leaving the previous tool checked and ``active_tool()`` reporting
+        the wrong tool (plan 05-07, the 6th-tool exclusivity contract).
+        Signals stay blocked so no ``tool_changed`` re-emission happens when
+        the change originates from outside the panel (e.g. the Tools menu or
+        a keyboard shortcut) — the caller already knows the new tool.
+        """
         for act, mode in self._action_to_tool.items():
             if mode == tool:
-                # blockSignals: avoid re-emitting tool_changed when the change
-                # originates from outside the panel (e.g. the Tools menu or a
-                # keyboard shortcut) — the caller already knows the new tool.
                 was = act.blockSignals(True)
                 act.setChecked(True)
                 act.blockSignals(was)
-                return
+            elif act.isChecked():
+                was = act.blockSignals(True)
+                act.setChecked(False)
+                act.blockSignals(was)
 
     def active_tool(self) -> ToolMode:
         """Return the currently-checked tool's ToolMode."""

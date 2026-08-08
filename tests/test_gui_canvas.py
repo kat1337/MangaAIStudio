@@ -275,13 +275,14 @@ def _canvas_with_image(qtbot, size: int = 100) -> EditorCanvas:
 # --- ToolsPanel tests ---
 
 def test_tools_panel_tool_group_exclusive(qtbot) -> None:
-    """ToolsPanel exposes 5 exclusive checkable actions; checking one unchecks others."""
+    """ToolsPanel exposes 6 exclusive checkable actions; checking one unchecks others."""
     panel = ToolsPanel()
     qtbot.addWidget(panel)
 
-    # 5 actions in the group, all checkable.
+    # 6 actions in the group (Crop is the 6th — D-11, plan 05-07), all
+    # checkable.
     actions = panel.tool_group.actions()
-    assert len(actions) == 5
+    assert len(actions) == 6
     assert panel.tool_group.isExclusive()
     for act in actions:
         assert act.isCheckable()
@@ -296,6 +297,13 @@ def test_tools_panel_tool_group_exclusive(qtbot) -> None:
     assert blocker.args == [ToolMode.BRUSH]
     assert not panel.action_move.isChecked()
     assert panel.active_tool() == ToolMode.BRUSH
+
+    # Checking Crop (the 6th tool) unchecks Brush and emits tool_changed(CROP).
+    with qtbot.waitSignal(panel.tool_changed, timeout=1000) as blocker:
+        panel.action_crop.setChecked(True)
+    assert blocker.args == [ToolMode.CROP]
+    assert not panel.action_brush.isChecked()
+    assert panel.active_tool() == ToolMode.CROP
 
 
 def test_tools_panel_brush_slider_spinbox_sync(qtbot) -> None:
