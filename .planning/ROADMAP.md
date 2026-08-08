@@ -152,7 +152,7 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 9/9 plans executed
+**Plans**: 10/10 plans executed
 
 Plans:
 
@@ -182,6 +182,10 @@ Plans:
 **Gap-closure waves** (UAT test 1 round 2 — run via `/gsd-execute-phase 4 --gaps-only`)
 
 - [x] 04-09-PLAN.md — *(Wave 1)* Overlay fit-in-box (wrap + box-adaptive font + shrink-to-fit) + menu-bar structure (Recent/Batch = File submenus) + toolbar Open Folder — TEXT-04
+
+**Gap-closure waves** (UAT round 3 — run via `/gsd-execute-phase 4 --gaps-only`)
+
+- [ ] 04-10-PLAN.md — *(Wave 1)* Badge sized to its number (digit measurement + re-center + actual-size placement) + bubble # 1 manually assignable (0-sentinel) — TEXT-05
 
 **UI hint**: yes
 
