@@ -1464,7 +1464,8 @@ class MainWindow(QMainWindow):
         self._save_project(force_as=True)
 
     def _open_project(self, manifest_path: Path | None = None) -> None:
-        """Open Project… (Ctrl+O) — the D-08/D-09 open flow.
+        """Open Project… — the D-08/D-09 open flow (its shortcut key is the
+        D-07-mandated one; per Pitfall 8 it binds here and nowhere else).
 
         Dialog (or a Recent Projects entry / chapter-climb caller) hands over
         a ``manifest.json`` or a page ``.mas``. Routing (D-09, UI-SPEC
