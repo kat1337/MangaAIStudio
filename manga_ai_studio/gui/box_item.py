@@ -102,6 +102,10 @@ _BADGE_Z = 140
 _OVERLAY_FILL = QColor.fromRgbF(232 / 255, 232 / 255, 234 / 255, 0.85)
 _OVERLAY_OUTLINE = QPen(QColor.fromRgbF(11 / 255, 11 / 255, 14 / 255, 0.92), 2)
 _OVERLAY_FONT = QFont("Liberation Sans", 14)  # 14 scene px (UI-SPEC §16)
+# The §16 clamp base: the 14 scene px at 100% zoom. apply_overlay_zoom scales
+# this by the zoom to keep the RENDERED viewport-px size within [10, 28]
+# (UI-SPEC §16, plan 04-08 RC-2).
+_OVERLAY_FONT_BASE = 14.0
 # Inner margin: text inset by the border width + 2px so it never touches the
 # box edge (UI-SPEC §16).
 _OVERLAY_INSET = 2.0
@@ -321,6 +325,11 @@ class BoxItem(QGraphicsRectItem):
         self._text_overlay.setFont(_OVERLAY_FONT)
         self._text_overlay.setVisible(False)  # shown by refresh_text_overlay
         self._text_overlay_visible = True  # T toggle state (D-12)
+        # Stored zoom for the §16 font clamp + viewport-px outline (plan 04-08,
+        # RC-2/RC-3). Set BEFORE the first refresh_text_overlay() so a fresh box
+        # renders the zoom-1 style (identical to the pre-plan output); updated
+        # by apply_overlay_zoom() on every canvas zoom_changed emission.
+        self._overlay_zoom = 1.0
         # The badge = a background rect + a digit text child, both ignoring
         # transformations (constant viewport px). Digit is a child of the rect
         # so it inherits the rect's position/visibility.
@@ -474,8 +483,19 @@ class BoxItem(QGraphicsRectItem):
         self._text_overlay.setPlainText(text)
         doc = self._text_overlay.document()
         fmt = QTextCharFormat()
-        fmt.setFont(_OVERLAY_FONT)
-        fmt.setTextOutline(_OVERLAY_OUTLINE)
+        # §16 font clamp + constant-viewport-px outline from the STORED zoom
+        # (RC-2/RC-3, plan 04-08). The clamp formula keeps the RENDERED
+        # viewport-px size within [10, 28] at every zoom (clamp(14*zoom, 10,
+        # 28)/zoom scene px); the outline stays a constant 2 viewport px
+        # (2/zoom scene px) — the RC-3 documented deviation (the scene-px
+        # reading renders a sub-pixel halo below 100% zoom).
+        zoom = self._overlay_zoom
+        viewport_px = _OVERLAY_FONT_BASE * zoom
+        clamped_vp = min(28.0, max(10.0, viewport_px))
+        font = QFont(_OVERLAY_FONT)
+        font.setPointSizeF(clamped_vp / zoom)
+        fmt.setFont(font)
+        fmt.setTextOutline(QPen(_OVERLAY_OUTLINE.color(), 2.0 / zoom))
         fmt.setForeground(QBrush(_OVERLAY_FILL))
         cursor = QTextCursor(doc)
         cursor.select(QTextCursor.SelectionType.Document)
@@ -500,6 +520,25 @@ class BoxItem(QGraphicsRectItem):
         pen_w = self.pen().widthF() / 2.0
         inset = pen_w + _OVERLAY_INSET
         self._text_overlay.setPos(self.rect().x() + inset, self.rect().y() + inset)
+
+    def apply_overlay_zoom(self, zoom: float) -> None:
+        """Re-apply the §16 font clamp + constant-viewport-px outline for ``zoom``.
+
+        Stores the zoom on :attr:`_overlay_zoom` and refreshes the overlay so
+        the style re-derives from the new zoom (RC-2/RC-3, plan 04-08). Called
+        from the canvas ``zoom_changed`` slot (and transitively by
+        fit-to-window / zoom_reset / wheel zoom, which all emit ``zoom_changed``
+        — canvas.py:820/827/851).
+
+        Defensive guard: a non-positive zoom falls back to 1.0 so the
+        ``clamp/zoom`` and ``2/zoom`` divisions can never divide by zero (the
+        canvas ``zoom_factor`` is always positive — setTransform scale /
+        fitInView m11).
+        """
+        if zoom <= 0:
+            zoom = 1.0
+        self._overlay_zoom = zoom
+        self.refresh_text_overlay()
 
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).

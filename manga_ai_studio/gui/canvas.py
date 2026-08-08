@@ -1442,15 +1442,24 @@ class EditorCanvas(QGraphicsView):
             top,
         )
 
-    def _on_zoom_changed_reposition_handles(self, _zoom: float) -> None:
-        """Reposition every box's corner handles on zoom (UI-SPEC §12b).
+    def _on_zoom_changed_reposition_handles(self, zoom: float) -> None:
+        """Reposition every box's handles + re-apply the overlay style on zoom (UI-SPEC §12b).
 
         ``ItemIgnoresTransformations`` keeps each handle 8x8 viewport px
         regardless of zoom — only its scene-space position is recomputed so it
         tracks the box corner through the zoom.
+
+        Also forwards the zoom to each box so the overlay style re-derives
+        (RC-2/RC-3, plan 04-08): the overlay font clamp ([10,28] viewport px,
+        UI-SPEC §16) and the outline (constant 2 viewport px) are viewport-px
+        contracts, so they are re-derived from the new zoom. This single slot
+        covers wheel zoom, zoom_reset, and fit_to_window — the app default on
+        every page load, exactly the zoom where the pre-fix outline was
+        invisible.
         """
         for item in self._box_items:
             item._sync_handles()
+            item.apply_overlay_zoom(zoom)
 
     # --------------------------------------------------- box interaction helpers
     def _commit_inline_editor_if_active(self) -> None:
