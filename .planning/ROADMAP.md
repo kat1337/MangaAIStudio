@@ -179,6 +179,10 @@ Plans:
 - [x] 04-07-PLAN.md — LoadTranslationsDialog (paste + file-import) + parser apply + Auto-Number menu (RTL/LTR) (TEXT-05)
 - [x] 04-08-PLAN.md — *(UAT test 1 gap closure)* Overlay geometry tracking on move/resize (RC-1) + zoom font clamp [10,28] viewport px + 2-viewport-px outline (RC-2/RC-3) (TEXT-04)
 
+**Gap-closure waves** (UAT test 1 round 2 — run via `/gsd-execute-phase 4 --gaps-only`)
+
+- [ ] 04-09-PLAN.md — *(Wave 1)* Overlay fit-in-box (wrap + box-adaptive font + shrink-to-fit) + menu-bar structure (Recent/Batch = File submenus) + toolbar Open Folder — TEXT-04
+
 **UI hint**: yes
 
 ### Phase 5: Project Persistence, Image Ops & Export
