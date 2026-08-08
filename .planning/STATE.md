@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Completed 05-06-PLAN.md
-last_updated: "2026-08-08T22:21:22.918Z"
+stopped_at: Completed 05-07-PLAN.md
+last_updated: "2026-08-08T22:58:59.795Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 36
+  completed_plans: 37
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
-Plan: 8 of 9
+Plan: 9 of 9
 Status: Ready to execute
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [██████████] 95% (4/4 phases, 29/29 plans)
+Progress: [██████████] 97% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -103,6 +103,7 @@ Progress: [██████████] 95% (4/4 phases, 29/29 plans)
 | Phase 05 P04 | 14 | 2 tasks | 4 files |
 | Phase 05-project-persistence-image-ops-export P05 | 110 | 3 tasks | 5 files |
 | Phase 05 P05-06 | 42 | 3 tasks | 8 files |
+| Phase 05-project-persistence-image-ops-export P05-07 | 28min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -222,6 +223,11 @@ Recent decisions affecting current work:
 - [Phase ?]: 05-06: Show Original gating reads _last_page_index (the D-11 seam rule) with a bounds check, per the plan contract
 - [Phase ?]: 05-06: Full-frame geometry patches at (0,0) with differing dims REPLACE the whole image on undo (canvas.apply_undo_image) — the T-01-15 clip assumes same-frame patches and truncated the pre-op frame; non-origin patches keep the clip
 - [Phase ?]: 05-06: pop_image_undo/redo stash the FULL current image for dims-changing geometry records — the region slice would clip the redo stash and break one-press redo after rotate/resize
+- [Phase ?]: G is a window-level QShortcut (the V/B/R/L/E pattern), NOT an action-level setShortcut — duplicate setShortcut triggers Qt's Ambiguous shortcut overload (CR-14).
+- [Phase ?]: ToolsPanel.set_active_tool explicitly unchecks the other actions — blockSignals around setChecked swallows the QActionGroup's exclusive unchecking (Qt behavior), leaving the previous tool checked and active_tool() wrong.
+- [Phase ?]: The dim-out 1px inset is a moat (page minus crop inflated 1px each side); dim rects are clamped to the page so a crop hugging an edge dims nothing outside it.
+- [Phase ?]: Crop geometry tests run at zoom_reset() so the scene<->viewport round trip is exact — the 05-09 truncation lesson applied as prevention.
+- [Phase ?]: CropDialog stores result_values (the 05-06 precedent — result shadows QDialog.result()); apply-time re-validation compares against the PAGE bounds, not the spinbox ranges.
 
 ### Pending Todos
 
@@ -248,8 +254,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T22:20:51.094Z
-Stopped at: Completed 05-06-PLAN.md
+Last session: 2026-08-08T22:58:59.758Z
+Stopped at: Completed 05-07-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

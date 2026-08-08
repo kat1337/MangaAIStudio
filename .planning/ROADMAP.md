@@ -201,7 +201,7 @@ Plans:
   2. User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
   3. User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
 
-**Plans**: 7/9 plans executed
+**Plans**: 8/9 plans executed
 
 Plans:
 
@@ -226,7 +226,7 @@ Plans:
 
 **Wave 5** *(blocked on 05-06)*
 
-- [ ] 05-07-PLAN.md — Crop surface: 6th tool + armed-rect/dim-out + numeric Crop… dialog (PROJ-04)
+- [x] 05-07-PLAN.md — Crop surface: 6th tool + armed-rect/dim-out + numeric Crop… dialog (PROJ-04)
 
 **Wave 6** *(blocked on 05-03 + 05-07)*
 
@@ -251,7 +251,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
 | 4. OCR Recognition & Text Editing | 10/10 | Complete    | 2026-08-08 |
-| 5. Project Persistence, Image Ops & Export | 7/9 | In Progress|  |
+| 5. Project Persistence, Image Ops & Export | 8/9 | In Progress|  |
 
 ---
 *Roadmap created: 2026-07-11*

@@ -15,3 +15,18 @@ here; the owning plan handles them).
 Both are in `tests/test_gui_boxes.py`, untouched by plan 05-03 (pure core
 module, not imported by the GUI). Plan 05-09 (same wave) owns the
 `test_gui_boxes.py` regression fixes per its plan text.
+
+## 2026-08-08 — toolbar tool-button highlight never functional (during plan 05-07)
+
+- The window's tool actions (`action_tool_move`/`brush`/`rectangle`/`lasso`/
+  `eraser`/`crop`) are NOT checkable and NOT members of the ToolsPanel's
+  `QActionGroup`; `QToolButton.setChecked` on a button bound to a non-checkable
+  default action is a no-op, so `MainWindow.set_active_tool`'s toolbar sync
+  never highlights anything (verified by probe: all toolbar tool buttons stay
+  unchecked after `set_active_tool`). The comment at `_make_tool_toolbar_button`
+  (main_window.py) claims group membership that does not exist. Pre-existing
+  since plan 04, out of scope for 05-07 (the accent-highlight contract lives on
+  the ToolsPanel, which works); owning plan: any future plan touching the
+  toolbar/tool wiring — fix by making the window tool actions checkable and
+  adding them to the panel's exclusive group.
+
