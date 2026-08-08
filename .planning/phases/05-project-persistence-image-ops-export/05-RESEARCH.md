@@ -82,7 +82,7 @@ No `./AGENTS.md` exists. `.claude/CLAUDE.md` (GSD-generated from PROJECT.md/STAC
 - **GSD workflow enforcement:** "Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync… Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it." [VERIFIED: .claude/CLAUDE.md:142-153]
 - **Tech stack:** PyQt/PySide desktop GUI, Python backend — non-negotiable; Windows-first for v1; avoid Windows-only APIs and hard-coded paths; single environment preferred (isolated pyenvs are the fallback). [VERIFIED: .claude/CLAUDE.md:13-17]
 - **GPL v3:** derivative of PanelCleaner — preserve GPL v3 in all distributions and provide source code. Phase 5 adds no new vendoring (CONTEXT canonical_refs; PROJ-04 is greenfield — PanelCleaner's `image_ops.py` is mask-fitting machinery, NOT crop/rotate/levels). [CITED: 05-CONTEXT.md:82,108]
-- **pyproject.toml pins** `numpy<2` but the working env has numpy 2.3.5 with 461 tests green — do not re-pin; do not add new dependencies. [VERIFIED: pyproject.toml:25, local probe]
+- **pyproject.toml pins** `numpy<2` but the working env has numpy 2.3.5 with the Phase 1–4 suite green at plan time (measured 2026-08-08: 463 collected / 462 passed / 1 failed — the sole failure is the pre-existing tests/test_gui_boxes.py::test_moved_box_via_real_events_persists_round_trip 1px move-round-trip regression, a test-side QTest int-truncation artifact; remediation in plan 05-09) — do not re-pin; do not add new dependencies. [VERIFIED: pyproject.toml:25, local probe]
 
 ## Architectural Responsibility Map
 
@@ -147,7 +147,7 @@ No `./AGENTS.md` exists. `.claude/CLAUDE.md` (GSD-generated from PROJECT.md/STAC
 | natsort | PyPI | 12 yrs | n/a | github.com/SethMMorton/natsort | [SUS — unknown-downloads only] | Approved — already installed |
 
 **Packages removed due to [SLOP] verdict:** none.
-**Packages flagged as suspicious [SUS]:** all five above carry the seam's `unknown-downloads` reason — a data-availability gap, not a real signal. No postinstall scripts (`postinstall: null` for all), no slop signals, all long-established projects, all already installed and exercised by 461 passing Phase 1–4 tests. **No `checkpoint:human-verify` tasks are needed because nothing is installed in this phase.**
+**Packages flagged as suspicious [SUS]:** all five above carry the seam's `unknown-downloads` reason — a data-availability gap, not a real signal. No postinstall scripts (`postinstall: null` for all), no slop signals, all long-established projects, all already installed and exercised by the Phase 1–4 suite (463 collected / 462 passed / 1 failed at plan time — the single failure is a pre-existing test-side regression unrelated to packages, fixed by plan 05-09). **No `checkpoint:human-verify` tasks are needed because nothing is installed in this phase.**
 
 *Note: all packages were discovered in-repo (`pyproject.toml` dependencies) and verified present in the working environment by local import probes — not via web search, so no `[ASSUMED]` tags apply to the stack itself.*
 
@@ -653,7 +653,7 @@ def line_box(quad: list) -> list[int]:
 
 | Dependency | Required By | Available | Version | Fallback |
 |------------|------------|-----------|---------|----------|
-| Python (pyenv) | Runtime | ✓ | 3.14.2 (pyenv-win default) | — (project already runs here; 461 tests green) |
+| Python (pyenv) | Runtime | ✓ | 3.14.2 (pyenv-win default) | — (project already runs here; 463 collected / 462 passed / 1 failed at plan time — sole pre-existing failure fixed by plan 05-09) |
 | PySide6 | All GUI work (dialogs, canvas, menus) | ✓ | 6.10.1 | — |
 | Pillow | Embedded image encode, resize, levels | ✓ | 12.0.0 | — |
 | numpy | Image/mask arrays, rot90, LUT | ✓ | 2.3.5 | — (note: pyproject pins `numpy<2`; installed env has 2.3.5 and works) |
@@ -682,7 +682,7 @@ def line_box(quad: list) -> list[int]:
 | Quick run command | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_core/test_project_io.py -x` |
 | Full suite command | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest` |
 
-Existing infrastructure: `tests/conftest.py` (PySide6 importorskip), `tests/test_core/` (13 files incl. `test_image_io.py`, `test_batch_runner.py`, `test_box_model.py`, `test_history_boxes.py`), `tests/test_mask_editor/`, GUI tests (`test_gui_boxes.py`, `test_gui_canvas.py`, …). 461 tests green at Phase 4 close.
+Existing infrastructure: `tests/conftest.py` (PySide6 importorskip), `tests/test_core/` (13 files incl. `test_image_io.py`, `test_batch_runner.py`, `test_box_model.py`, `test_history_boxes.py`), `tests/test_mask_editor/`, GUI tests (`test_gui_boxes.py`, `test_gui_canvas.py`, …). **Baseline measured at plan time (2026-08-08): 463 collected / 462 passed / 1 failed — the earlier "461 tests green at Phase 4 close" claim is stale:** `test_moved_box_via_real_events_persists_round_trip` regressed by 1px (box lands at (69,69,129,129) instead of (70,70,130,130)); root cause verified as test-side: PySide6 QTest/mapFromScene deliver int viewport coords while the MainWindow canvas fit-scale is fractional in the pytest environment (~0.18333), losing <1 scene px; the canvas move math applies the delivered delta exactly (no production defect). Remediation: plan 05-09 (Wave 1, separate commit).
 
 ### Phase Requirements → Test Map
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
