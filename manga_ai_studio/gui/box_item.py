@@ -385,9 +385,10 @@ class BoxItem(QGraphicsRectItem):
         keeps each handle 8x8 viewport px regardless of zoom — only its position
         is recomputed.
 
-        Also refreshes the bubble badge so it tracks the box through move/
-        resize/zoom (the badge sits TL-outside the box rect, so it must move
-        whenever the rect does). Mirrors how handles reposition on zoom.
+        Also refreshes the bubble badge and repositions the text overlay so
+        both track the box through move/resize/zoom (the badge sits TL-outside
+        the box rect; the overlay sits inside it — both must move whenever the
+        rect does). Mirrors how handles reposition on zoom.
         """
         selected = self.isSelected()
         rect = self.rect()
@@ -395,6 +396,7 @@ class BoxItem(QGraphicsRectItem):
             handle.setVisible(selected)
             handle.reposition(rect)
         self.refresh_badge()
+        self._reposition_text_overlay()
 
     def itemChange(  # noqa: N802 (Qt API casing)
         self, change: QGraphicsItem.GraphicsItemChange, value
@@ -432,11 +434,19 @@ class BoxItem(QGraphicsRectItem):
             self.setBrush(Qt.BrushStyle.NoBrush)
 
     def _sync_handles_for_state(self, selected: bool) -> None:
-        """Reposition handles and toggle visibility for a given selection state."""
+        """Reposition handles and toggle visibility for a given selection state.
+
+        Also repositions the text overlay: selection changes the pen width
+        (2px unselected / 3px selected, UI-SPEC §12c), which changes the
+        overlay inset (``pen_w/2``), so the inset stays exact on selection
+        change. ``itemChange`` calls ``_apply_look_for`` BEFORE this, so the
+        pen already reflects the new state here.
+        """
         rect = self.rect()
         for handle in self.handles.values():
             handle.setVisible(selected)
             handle.reposition(rect)
+        self._reposition_text_overlay()
 
     # --------------------------------------------- Phase 4 display-object children
     def refresh_text_overlay(self) -> None:
@@ -470,12 +480,26 @@ class BoxItem(QGraphicsRectItem):
         cursor = QTextCursor(doc)
         cursor.select(QTextCursor.SelectionType.Document)
         cursor.mergeCharFormat(fmt)
-        # Position the overlay inside the box rect, inset by the border width +
-        # 2px so the text never touches the border (UI-SPEC §16).
+        # Geometry sync is delegated to the setPos-only _reposition_text_overlay
+        # (RC-1, plan 04-08) so _sync_handles can reuse it per-mousemove without
+        # rebuilding the document. The visible-state line stays here.
+        self._reposition_text_overlay()
+        self._text_overlay.setVisible(self._text_overlay_visible)
+
+    def _reposition_text_overlay(self) -> None:
+        """Reposition the text overlay inside the box rect — setPos ONLY (RC-1).
+
+        Pure geometry sync: no text/document rebuild. Called from
+        :meth:`_sync_handles` / :meth:`_sync_handles_for_state` on every
+        move/resize/zoom/selection change (the canvas calls ``_sync_handles``
+        on EVERY ``mouseMoveEvent`` during a drag — canvas.py:1022-1023 — so a
+        full document rebuild per mousemove would be wasteful). Positions the
+        overlay inset by the border width + 2px so the text never touches the
+        border (UI-SPEC §16).
+        """
         pen_w = self.pen().widthF() / 2.0
         inset = pen_w + _OVERLAY_INSET
         self._text_overlay.setPos(self.rect().x() + inset, self.rect().y() + inset)
-        self._text_overlay.setVisible(self._text_overlay_visible)
 
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
