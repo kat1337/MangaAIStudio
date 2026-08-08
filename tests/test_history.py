@@ -877,3 +877,124 @@ def test_pop_mask_undo_with_null_current_mask_does_not_crash(qtbot) -> None:
     assert result[0] == "mask"
     assert result[1] is not None
 
+
+# ---------------------------------------------------------------------------
+# Plan 05-04 — geometry-op undo record (push_geometry_state, stamp-shared
+# triple push — PROJ-04 / UI-SPEC surface 28 "one press per op, never two").
+# RESEARCH Pattern 2: push_geometry_state stamps IMAGE+MASK+BOXES with ONE
+# monotonic stamp so a single unified undo pops all three together. The
+# per-type pop methods stay untouched; the pop-all-with-max-stamp lives in
+# undo()/redo() (Task 2's tests).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_geometry_push_stamps_all_stores() -> None:
+    """push_geometry_state stamps IMAGE+MASK+BOXES with ONE shared stamp.
+
+    The shared tail stamp is what makes one Ctrl+Z reverse the whole op
+    (undo() pops every store whose tail stamp equals the max). The image side
+    is a FULL-FRAME patch at (0, 0) (RESEARCH Pattern 2 — pop_image_undo's
+    existing machinery handles it). The next ordinary push must get a HIGHER
+    stamp (strict monotonicity, Pitfall 4).
+    """
+    history = HistoryManager(limit=20)
+    patch = np.zeros((8, 8, 3), dtype=np.uint8)
+    mask = _transparent_mask(8)
+    boxes = [(1, "detected", {"text": "a"})]
+    history.push_geometry_state(patch, mask, boxes)
+
+    image_stamp = history._image_undo[-1][0]
+    # ONE stamp across all three stores.
+    assert image_stamp == history._mask_undo[-1][0]
+    assert image_stamp == history._boxes_undo[-1][0]
+    # The image entry is a full-frame patch at (0, 0).
+    x, y, stored = history._image_undo[-1][1]
+    assert (x, y) == (0, 0)
+    assert stored.shape == (8, 8, 3)
+
+    # The next ordinary push stamps strictly higher.
+    history.push_mask_state(_transparent_mask(8))
+    assert history._mask_undo[-1][0] > image_stamp
+
+
+@pytest.mark.unit
+def test_geometry_push_omits_none_stores() -> None:
+    """mask_qimage=None / boxes=None omit that store (levels pushes image-only).
+
+    The levels op is geometry-free (D-15) — push_geometry_state(patch) must
+    touch ONLY the image store so a levels undo is an ordinary single-store
+    image pop.
+    """
+    history = HistoryManager(limit=20)
+    history.push_geometry_state(np.zeros((8, 8, 3), dtype=np.uint8))
+    assert len(history._image_undo) == 1
+    assert len(history._mask_undo) == 0
+    assert len(history._boxes_undo) == 0
+
+    # mask present, boxes omitted — only image + mask touched.
+    history2 = HistoryManager(limit=20)
+    history2.push_geometry_state(
+        np.zeros((8, 8, 3), dtype=np.uint8), _transparent_mask(8)
+    )
+    assert len(history2._image_undo) == 1
+    assert len(history2._mask_undo) == 1
+    assert len(history2._boxes_undo) == 0
+
+
+@pytest.mark.unit
+def test_geometry_push_clears_redo() -> None:
+    """A geometry push invalidates EVERY touched store's redo branch."""
+    history = HistoryManager(limit=20)
+    history.push_mask_state(_transparent_mask(8))
+    history.push_image_action(0, 0, np.zeros((4, 4, 3), dtype=np.uint8))
+    history.push_boxes_state([(1, "detected", None)])
+
+    # Pop each once so all three redo branches are populated.
+    history.pop_mask_undo(_transparent_mask(8))
+    history.pop_image_undo(np.zeros((8, 8, 3), dtype=np.uint8))
+    history.pop_boxes_undo([])
+    assert history.can_redo_mask()
+    assert history.can_redo_image()
+    assert history.can_redo_boxes()
+
+    history.push_geometry_state(
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        _transparent_mask(8),
+        [(1, "detected", None)],
+    )
+    assert not history.can_redo_mask()
+    assert not history.can_redo_image()
+    assert not history.can_redo_boxes()
+
+
+@pytest.mark.unit
+def test_geometry_push_detaches_patch() -> None:
+    """T-05-11 (Pitfall 2/3): mutating the caller's array/mask/boxes list after
+    push does NOT change the stored entry (the push-side .copy() /
+    _materialize_snapshot discipline).
+
+    Regression guard for RESEARCH Pattern 2's image .copy() + mask .copy()
+    on the geometry push path.
+    """
+    history = HistoryManager(limit=20)
+    patch = np.zeros((8, 8, 3), dtype=np.uint8)
+    mask = _transparent_mask(8)
+    boxes = [(1, "detected", {"text": "original"})]
+    history.push_geometry_state(patch, mask, boxes)
+
+    # Mutate the caller's array, mask, and boxes list in place.
+    patch.fill(255)
+    mask.fill(QColor(0, 255, 0, 255).rgba())
+    boxes.append((2, "manual", {"text": "new"}))
+    boxes[0][2]["text"] = "mutated"
+
+    _x, _y, stored = history._image_undo[-1][1]
+    assert np.array_equal(stored, np.zeros((8, 8, 3), dtype=np.uint8))
+    # The stored mask snapshot is still fully transparent.
+    assert history._mask_undo[-1][1].pixelColor(0, 0).alpha() == 0
+    # The stored boxes snapshot ignored the append AND the payload mutation.
+    stored_boxes = history._boxes_undo[-1][1]
+    assert len(stored_boxes) == 1
+    assert stored_boxes[0][2] == {"text": "original"}
+
