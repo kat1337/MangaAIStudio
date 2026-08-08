@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
-status: executing
-stopped_at: Completed 05-07-PLAN.md
-last_updated: "2026-08-08T22:58:59.795Z"
+status: verifying
+stopped_at: Completed 05-08-PLAN.md
+last_updated: "2026-08-08T23:17:53.885Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 38
-  completed_plans: 37
+  completed_plans: 38
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
 Plan: 9 of 9
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [██████████] 97% (4/4 phases, 29/29 plans)
+Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -104,6 +104,7 @@ Progress: [██████████] 97% (4/4 phases, 29/29 plans)
 | Phase 05-project-persistence-image-ops-export P05 | 110 | 3 tasks | 5 files |
 | Phase 05 P05-06 | 42 | 3 tasks | 8 files |
 | Phase 05-project-persistence-image-ops-export P05-07 | 28min | 3 tasks | 8 files |
+| Phase 05-project-persistence-image-ops-export P05-08 | 55min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -228,6 +229,8 @@ Recent decisions affecting current work:
 - [Phase ?]: The dim-out 1px inset is a moat (page minus crop inflated 1px each side); dim rects are clamped to the page so a crop hugging an edge dims nothing outside it.
 - [Phase ?]: Crop geometry tests run at zoom_reset() so the scene<->viewport round trip is exact — the 05-09 truncation lesson applied as prevention.
 - [Phase ?]: CropDialog stores result_values (the 05-06 precedent — result shadows QDialog.result()); apply-time re-validation compares against the PAGE bounds, not the spinbox ranges.
+- [Phase ?]: Batch progress {done}/{total} is derived from the worker's (percent, name) emissions against a dispatched page count (_batch_ocr_total) — batch_export_ocr's D-10 signal shape carries percent, not a done count (05-08)
+- [Phase ?]: Per-page batch-failure logging stays in batch_export_ocr (stems + error strings only, T-05-05) — _on_batch_ocr_export_finished is UI-only; single-source logging (05-08)
 
 ### Pending Todos
 
@@ -254,8 +257,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T22:58:59.758Z
-Stopped at: Completed 05-07-PLAN.md
+Last session: 2026-08-08T23:17:53.847Z
+Stopped at: Completed 05-08-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
