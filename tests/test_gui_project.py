@@ -118,6 +118,82 @@ def _find_action(window: MainWindow, text: str):
     return None
 
 
+def _stub_messagebox_exec(monkeypatch, role=None, capture: list | None = None):
+    """Stub QMessageBox.exec to click the button with ``role`` (None = Esc /
+    no button, simulating cancel). Records each shown dialog's windowTitle
+    into ``capture`` when given."""
+
+    def _exec(self, *a, **k):
+        if capture is not None:
+            capture.append(self.windowTitle())
+        if role is not None:
+            for btn in self.buttons():
+                if self.buttonRole(btn) == role:
+                    self.clickedButton = lambda *a2, **k2: btn
+                    return QMessageBox.DialogCode.Accepted
+        self.clickedButton = lambda *a2, **k2: None
+        return QMessageBox.DialogCode.Rejected
+
+    monkeypatch.setattr(QMessageBox, "exec", _exec)
+
+
+def _capture_critical(monkeypatch) -> list:
+    """Capture QMessageBox.critical calls; return [(title, text), ...]."""
+    captured: list = []
+
+    def _fake(parent, title, text, *a, **k):
+        captured.append((title, text))
+        return None
+
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.QMessageBox.critical", _fake
+    )
+    return captured
+
+
+def _capture_warning(monkeypatch) -> list:
+    """Capture QMessageBox.warning calls; return [(title, text), ...]."""
+    captured: list = []
+
+    def _fake(parent, title, text, *a, **k):
+        captured.append((title, text))
+        return None
+
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.QMessageBox.warning", _fake
+    )
+    return captured
+
+
+def _seed_mask_content(window: MainWindow) -> None:
+    """Paint a full red mask on the canvas (real painted content)."""
+    mask = QImage(60, 60, QImage.Format.Format_ARGB32)
+    mask.fill(QColor(255, 0, 0, 255))
+    window.canvas.set_mask(mask)
+
+
+def _seed_boxes_with_text(window: MainWindow) -> None:
+    """Seed one user box with a TextBlock payload (text + translation)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.comic_text_detector.utils.textblock import TextBlock
+    from panelcleaner.structures import Box
+
+    tb = TextBlock(
+        [5, 5, 40, 20],
+        lines=[[[5, 5], [40, 5], [40, 20], [5, 20]]],
+        vertical=False,
+        language="ja",
+    )
+    tb.text = "hello"
+    tb.translation = "\u3053\u3093\u306b\u3061\u306f"  # こんにちは
+    pb = PageBox(box=Box(5, 5, 40, 20), origin=USER, payload=tb)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([pb], [])
+    finally:
+        window._suppress_boxes_push = False
+
+
 # ------------------------------------------------------------- Task 1 tests
 
 @pytest.mark.gui
@@ -201,3 +277,220 @@ def test_dirty_title_suffix(qtbot, tmp_path, monkeypatch) -> None:
     _save_as(window, tmp_path / "chapter.mas-project", monkeypatch)
     assert not window.windowTitle().endswith("*")
     assert window.windowTitle() == "Manga AI Studio \u2014 chapter \u2014 page_01.png"
+
+
+# ------------------------------------------------------------- Task 2 tests
+
+@pytest.mark.gui
+def test_open_project_restores_session(qtbot, tmp_path, monkeypatch) -> None:
+    """Save a 2-page session, reopen it: sidebar order, mask, boxes (incl.
+    text/translation), title, and fresh undo history are all restored."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _seed_mask_content(window)
+    _seed_boxes_with_text(window)
+    _dirty(window)
+
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # Reopen in a fresh window via the manifest path.
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+
+    assert [imf.path.name for imf in window2.image_files] == [
+        "page_01.png",
+        "page_02.png",
+    ]
+    assert window2._project_dir == project_dir
+    assert window2._project_name == "chapter"
+    assert window2.windowTitle() == (
+        "Manga AI Studio \u2014 chapter \u2014 page_01.png"
+    )
+    # Mask restored with content (D-11 seam).
+    assert window2.image_files[0].mask is not None
+    assert window2.image_files[0].has_mask_content()
+    # Boxes round-trip incl. text + translation.
+    assert window2.image_files[0].boxes is not None
+    restored = window2.image_files[0].boxes[0]
+    assert restored.payload.text == "hello"
+    assert restored.payload.translation == "\u3053\u3093\u306b\u3061\u306f"
+    # D-05: fresh undo history on reopen.
+    assert not window2.history.can_undo()
+    # The canvas shows the first page's image.
+    assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_open_project_populates_all_current_images(qtbot, tmp_path, monkeypatch) -> None:
+    """BOTH pages get their embedded image decoded into current_image — incl.
+    the non-displayed second page whose original was deleted (the 05-08 batch
+    dims fallback); the open-status flash notes the missing original."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # Delete page 2's original AFTER saving (D-06 missing-original state).
+    (chapter / "page_02.png").unlink()
+
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+
+    for imf in window2.image_files:
+        assert imf.current_image is not None
+        assert imf.current_image.shape[:2] == (60, 60)
+    assert not window2.image_files[1].original_verified
+    assert "Original file not found" in window2.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_open_page_mas_with_sibling_prompt(qtbot, tmp_path, monkeypatch) -> None:
+    """A page .mas with a sibling manifest pops the Chapter Detected prompt:
+    Open Page Only loads one page; Open Project loads the chapter; Esc
+    cancels the action entirely (previous session untouched)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    page_mas = project_dir / "page_01.mas"
+    assert page_mas.is_file()
+
+    # --- [Open Page Only] -> single-page standalone session ---
+    titles: list = []
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.RejectRole, capture=titles)
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, page_mas)
+    window2._open_project()
+    QApplication.processEvents()
+    assert "Chapter Detected" in titles
+    assert len(window2.image_files) == 1
+    assert window2.image_files[0].current_image is not None
+
+    # --- [Open Project] -> the chapter loads via the manifest ---
+    titles.clear()
+    _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.AcceptRole, capture=titles)
+    window3 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, page_mas)
+    window3._open_project()
+    QApplication.processEvents()
+    assert len(window3.image_files) == 2
+    assert window3._project_name == "chapter"
+
+    # --- Esc (no button clicked) -> action cancelled, session untouched ---
+    _stub_messagebox_exec(monkeypatch, role=None, capture=titles)
+    window4 = _make_window(qtbot, tmp_path, folder=chapter)
+    before = list(window4.image_files)
+    _stub_open_dialog(monkeypatch, page_mas)
+    window4._open_project()
+    QApplication.processEvents()
+    assert [imf.path for imf in window4.image_files] == [
+        imf.path for imf in before
+    ]
+
+
+@pytest.mark.gui
+def test_open_corrupt_project_keeps_session(qtbot, tmp_path, monkeypatch) -> None:
+    """A corrupt manifest -> critical dialog with the corrupt-project copy;
+    the previous session is byte-identical (no partial load)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    before = [imf.path for imf in window.image_files]
+
+    corrupt_dir = tmp_path / "bad.mas-project"
+    corrupt_dir.mkdir(exist_ok=True)
+    (corrupt_dir / "manifest.json").write_text("this is not json {", encoding="utf-8")
+
+    captured = _capture_critical(monkeypatch)
+    _stub_open_dialog(monkeypatch, corrupt_dir / "manifest.json")
+    window._open_project()
+    QApplication.processEvents()
+
+    assert captured and "Couldn't open" in captured[0][0]
+    assert "corrupt or from a newer version" in captured[0][1]
+    assert [imf.path for imf in window.image_files] == before
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_open_verified_original_flag(qtbot, tmp_path, monkeypatch) -> None:
+    """D-06 both branches: original exists + sha256 matches -> True and the
+    original renders; original deleted -> False and the EMBEDDED image
+    renders (the canvas numpy equals the modified save-time image)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    # Replace the canvas image with a modified version BEFORE saving so the
+    # embedded image differs from the source (proves which one renders).
+    alt = np.zeros((60, 60, 3), dtype=np.uint8)
+    alt[:, :, 0] = 200
+    alt[:, :, 1] = 40
+    window.canvas.set_image_from_numpy(alt.copy())
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # Original present + matching -> verified True. The first page displays
+    # the EMBEDDED image at open (D-05 resume contract); NAVIGATING back to
+    # the page renders the re-verified ORIGINAL (D-06).
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+    assert window2.image_files[0].original_verified is True
+    assert np.array_equal(window2.canvas.get_image_numpy(), alt)  # embedded
+    window2.file_table.select_path(window2.image_files[1].path)
+    window2.on_page_selected(window2.image_files[1].path)
+    window2.file_table.select_path(window2.image_files[0].path)
+    window2.on_page_selected(window2.image_files[0].path)
+    shown = window2.canvas.get_image_numpy()
+    assert not np.array_equal(shown, alt)  # the source, not the embedded alt
+    assert np.all(shown == [30, 60, 90])  # the original page_01 pixels
+
+    # Original deleted -> verified False, embedded image renders.
+    (chapter / "page_01.png").unlink()
+    window3 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window3._open_project()
+    QApplication.processEvents()
+    assert window3.image_files[0].original_verified is False
+    assert np.array_equal(window3.canvas.get_image_numpy(), alt)
+    assert "Original file not found" in window3.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_page_navigation_uses_embedded_image_for_missing_original(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Navigating to a missing-original page renders its EMBEDDED image and
+    never shows the 'Couldn't open file' warning (the D-06/D-08 resume
+    contract — the placeholder path never reaches set_image_from_path)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    (chapter / "page_02.png").unlink()  # page 2's original goes missing
+
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+    second = window2.image_files[1]
+    assert not second.original_verified
+
+    warnings = _capture_warning(monkeypatch)
+    # The exact _set_pages sidebar-selection entry: select_path then
+    # on_page_selected with the incoming (placeholder) path.
+    window2.file_table.select_path(second.path)
+    window2.on_page_selected(second.path)
+    QApplication.processEvents()
+
+    # The embedded image rendered (dims match the page) — not an error.
+    assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
+    assert warnings == []  # no "Couldn't open file" dialog (D-06)

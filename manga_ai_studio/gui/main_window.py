@@ -1047,16 +1047,53 @@ class MainWindow(QMainWindow):
         # Step 2: reset the per-page history (unchanged from plan 06).
         self.reset_history()
 
-        # Step 3: load the new page image (unchanged).
-        if not self.canvas.set_image_from_path(path):
-            # UI-SPEC §Copywriting "file unreadable" dialog.
-            QMessageBox.warning(
-                self,
-                "Couldn't open file",
-                f"Couldn't open '{path.name}'.\nThe file may be corrupt or in an"
-                " unsupported format.",
-            )
-            return
+        # Step 3: load the new page image (with the D-06/D-08 missing-original
+        # navigation fallback). ``incoming_idx`` is valid BEFORE this step:
+        # the preceding ``select_path`` already flipped
+        # ``file_table.current_path()`` to the incoming page, and the
+        # placeholder path stored on the ImageFile equals it by construction.
+        # When the incoming page's original is unverified (missing/mismatched
+        # checksum) AND it carries an embedded image, that embedded image IS
+        # the page (D-06: a missing original is a NORMAL state for portable
+        # projects) — display it via set_image_from_numpy and SKIP the
+        # "Couldn't open file" warning (the resume-work contract; the
+        # placeholder path NEVER reaches set_image_from_path). Sessions
+        # without an embedded image fall through to the existing path-based
+        # load unchanged.
+        incoming_idx = self._current_page_index()
+        imf = (
+            self.image_files[incoming_idx]
+            if incoming_idx is not None and 0 <= incoming_idx < len(self.image_files)
+            else None
+        )
+        if (
+            imf is not None
+            and (not imf.original_verified or not imf.path.is_file())
+            and imf.current_image is not None
+        ):
+            # Pitfall 2: the .copy() detaches the embedded numpy before the
+            # QImage build (canvas.py:658-663); decode-time .convert("RGB")
+            # already guarantees the (H,W,3) uint8 contract.
+            self.canvas.set_image_from_numpy(imf.current_image.copy())
+            if imf.mask is None or imf.mask.isNull():
+                # The path-based load resets the mask to a fresh transparent
+                # one (set_image); mirror it here so a stale overlay from the
+                # outgoing page does not linger (Step 4 restores the incoming
+                # mask when present).
+                h, w = imf.current_image.shape[:2]
+                empty = QImage(w, h, QImage.Format.Format_ARGB32)
+                empty.fill(Qt.GlobalColor.transparent)
+                self.canvas.set_mask(empty)
+        else:
+            if not self.canvas.set_image_from_path(path):
+                # UI-SPEC §Copywriting "file unreadable" dialog.
+                QMessageBox.warning(
+                    self,
+                    "Couldn't open file",
+                    f"Couldn't open '{path.name}'.\nThe file may be corrupt or in an"
+                    " unsupported format.",
+                )
+                return
 
         # Step 4: restore the INCOMING page's persisted mask onto the canvas.
         # _current_page_index() now correctly returns the INCOMING index
@@ -1421,14 +1458,298 @@ class MainWindow(QMainWindow):
         self._save_project(force_as=True)
 
     def _open_project(self, manifest_path: Path | None = None) -> None:
-        """Open Project….
+        """Open Project… (Ctrl+O) — the D-08/D-09 open flow.
 
-        The D-08 session rebuild + D-09 chapter-climb routing are wired in
-        plan 05-05 Task 2 (this Task-1 commit wires the menu action + the
-        shortcut remap only; the slot body lands with the open-side
-        implementation).
+        Dialog (or a Recent Projects entry / chapter-climb caller) hands over
+        a ``manifest.json`` or a page ``.mas``. Routing (D-09, UI-SPEC
+        surface 21/22): a manifest rebuilds the session
+        (:meth:`_load_project_session`); a page ``.mas`` with a sibling
+        manifest pops the Chapter Detected prompt ([Open Project] loads the
+        chapter, [Open Page Only] opens the page standalone, Esc cancels
+        entirely); no sibling → the page opens standalone. Every failure
+        (ProjectFormatError / OSError — corrupt or newer-version files)
+        surfaces the corrupt-project copy (T-05-13) and the CURRENT session
+        is never mutated — the new session is built fully before swapping.
         """
-        return
+        if self._op_running:
+            return
+        if manifest_path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open Project",
+                "",
+                "Manga AI Studio Project (manifest.json *.mas)",
+            )
+            if not path:
+                return
+            selected = Path(path)
+        else:
+            selected = manifest_path
+        try:
+            if selected.name == "manifest.json":
+                self._load_project_session(selected)
+            elif selected.suffix.lower() == ".mas":
+                sibling = project_io.find_sibling_manifest(selected)
+                if sibling is not None:
+                    choice = self._confirm_chapter_climb(selected, sibling)
+                    if choice == "project":
+                        self._load_project_session(sibling)
+                    elif choice == "page":
+                        self._load_single_page_mas(selected)
+                    # None (Esc / close) → cancel the action entirely; the
+                    # previous session stays untouched (UI-SPEC §22).
+                else:
+                    self._load_single_page_mas(selected)
+            else:
+                logger.warning(
+                    f"Open Project: unsupported selection '{selected.name}'"
+                )
+        except (project_io.ProjectFormatError, OSError) as exc:
+            # T-05-12/T-05-13: corrupt-project copy; the traceback goes to
+            # loguru. The session-swap happens only after the full rebuild
+            # succeeds, so the previous session is byte-identical here.
+            logger.error(f"Open Project failed: {exc}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                f"Couldn't open '{selected.name}'.",
+                "The project file may be corrupt or from a newer version of"
+                " Manga AI Studio. No pages were changed.",
+            )
+
+    def _confirm_chapter_climb(
+        self, page_path: Path, manifest_path: Path
+    ) -> str | None:
+        """D-09 'Chapter Detected' prompt for a page ``.mas`` with a sibling
+        manifest (UI-SPEC surface 22 + §Copywriting).
+
+        Returns ``"project"`` (load the chapter via the manifest),
+        ``"page"`` (open the single page standalone), or ``None`` (Esc /
+        window close — cancel the action ENTIRELY; Esc must never silently
+        load the chapter OR the page, UI-SPEC §22). A hidden EscapeRole
+        button absorbs Esc so ``clickedButton()`` is None on Escape.
+        """
+        data = project_io.load_project(manifest_path)  # re-validated (cheap)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Chapter Detected")
+        box.setText(
+            f"'{page_path.name}' is part of the project '{data['name']}'"
+            f" ({len(data['pages'])} pages). Open the entire project instead?"
+        )
+        open_btn = box.addButton("Open Project", QMessageBox.ButtonRole.AcceptRole)
+        page_btn = box.addButton(
+            "Open Page Only", QMessageBox.ButtonRole.RejectRole
+        )
+        esc_btn = QPushButton("Cancel", box)
+        # ActionRole = a non-special placement role; the ESCAPE binding comes
+        # from setEscapeButton below (PySide6 exposes no ButtonRole.EscapeRole).
+        box.addButton(esc_btn, QMessageBox.ButtonRole.ActionRole)
+        esc_btn.hide()
+        box.setEscapeButton(esc_btn)
+        box.setDefaultButton(open_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is open_btn:
+            return "project"
+        if clicked is page_btn:
+            return "page"
+        return None
+
+    def _build_image_file_from_parsed(
+        self, parsed: dict, fallback_path: Path
+    ) -> ImageFile:
+        """Build an ``ImageFile`` from a page container's parsed entries.
+
+        Shared by :meth:`_load_project_session` and
+        :meth:`_load_single_page_mas`. The D-06 rule: ``path`` = the original
+        ref when ``verify_original`` passes (sha256 match), else
+        ``fallback_path`` — a placeholder with the original stem so the
+        sidebar shows the right name; ``original_verified`` carries the D-06
+        result. The mask restores via ``numpy_binary_to_mask_qimage`` (which
+        ``.copy()``-detaches — Pitfall 2), boxes via ``json_to_pagebox``
+        (the Phase 3 setter path, D-15 seam preserved), and the embedded
+        ``image.png`` decodes into ``ImageFile.current_image`` for EVERY
+        page — the D-08 dims source for non-current pages AND the D-06/D-08
+        navigation fallback. A corrupt embedded blob raises
+        ProjectFormatError (corrupt-project dialog at the caller).
+        """
+        original_ref = None
+        original_verified = False
+        original = parsed.get("original")
+        if isinstance(original, dict) and original.get("path"):
+            if project_io.verify_original(
+                original["path"], original.get("sha256", "") or ""
+            ):
+                original_ref = Path(original["path"])
+                original_verified = True
+        if original_ref is None:
+            original_ref = fallback_path
+        imf = ImageFile(path=original_ref)
+        imf.original_verified = original_verified
+        imf.geometry_altered = bool(
+            parsed["meta"].get("geometry_altered", False)
+        )
+        if parsed["mask"] is not None:
+            imf.mask = numpy_binary_to_mask_qimage(parsed["mask"])
+        imf.boxes = [
+            project_io.json_to_pagebox(d)
+            for d in parsed["meta"].get("boxes") or []
+        ]
+        try:
+            # .convert("RGB") normalizes odd embedded blobs to the (H,W,3)
+            # uint8 contract set_image_from_numpy enforces (canvas.py:631-634);
+            # the .copy() detaches (Pitfall 2).
+            imf.current_image = np.asarray(
+                Image.open(BytesIO(parsed["image_png"])).convert("RGB")
+            ).copy()
+        except (OSError, ValueError) as exc:
+            raise project_io.ProjectFormatError(
+                f"corrupt embedded image: {exc}"
+            ) from exc
+        return imf
+
+    def _display_page_state(self, imf: ImageFile) -> None:
+        """Display a page's embedded image + mask + boxes on the canvas (D-08).
+
+        The load-side mirror of the D-11 seam: the embedded ``current_image``
+        goes in via ``set_image_from_numpy`` (no re-decode — the D-05
+        current-image contract), the mask via ``set_mask`` (empty transparent
+        when the page has none — the stale overlay must not linger),
+        and the boxes via ``set_boxes`` split by origin, with the
+        ``_suppress_boxes_push`` guard (WR-05: a pure restore must not push).
+        """
+        self.canvas.set_image_from_numpy(imf.current_image.copy())
+        if imf.mask is not None and not imf.mask.isNull():
+            self.canvas.set_mask(imf.mask.copy())
+        else:
+            h, w = imf.current_image.shape[:2]
+            empty = QImage(w, h, QImage.Format.Format_ARGB32)
+            empty.fill(Qt.GlobalColor.transparent)
+            self.canvas.set_mask(empty)
+        user_pbs = [pb for pb in (imf.boxes or []) if pb.origin == USER]
+        detected_pbs = [pb for pb in (imf.boxes or []) if pb.origin == DETECTED]
+        self._suppress_boxes_push = True
+        try:
+            self.canvas.set_boxes(user_pbs, detected_pbs)
+        finally:
+            self._suppress_boxes_push = False
+
+    def _confirm_discard_changes(self) -> bool:
+        """The D-07 Unsaved Changes prompt: [Save] [Discard] [Cancel].
+
+        Returns True when the caller may proceed (session clean, discarded,
+        or saved); False = Cancel — abort the action. Runs on every
+        session-replacement entry point (Quit, window close, Open
+        Project…, Open Image…, Open Folder…) while any page is dirty.
+        Save runs the normal save flow (Save As… first when the session has
+        no project path); if the save is cancelled/fails the action aborts.
+        """
+        if not self._session_dirty():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Unsaved Changes")
+        box.setText(
+            f"Save changes to '{self._project_name or 'this session'}' before"
+            " continuing? Changes you don't save will be lost."
+        )
+        save_btn = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton(
+            "Discard", QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return False
+        if clicked is save_btn:
+            # Save → the normal save flow (As… first when there is no path);
+            # a cancelled folder dialog or failed write aborts the action.
+            self._save_project()
+            return self._project_dir is not None
+        return True  # Discard — continue without saving
+
+    def _load_project_session(self, manifest_path: Path) -> None:
+        """Rebuild the session from a chapter manifest (D-08).
+
+        The Unsaved-Changes gate runs first. Every page is parsed in
+        manifest order into a fully-built ``ImageFile`` (mask/boxes/text/
+        translation/geometry/current-image + the D-06 original verification)
+        BEFORE anything is swapped — a corrupt file raises and the previous
+        session stays byte-identical. On success: sidebar in manifest order,
+        the first page displayed from its embedded image (D-05), fresh undo
+        history (D-05), the project dir/name recorded, dirty cleared, and
+        the open-status transient (with the missing-original append when any
+        original failed verification).
+        """
+        if not self._confirm_discard_changes():
+            return
+        data = project_io.load_project(manifest_path)
+        page_files: list[ImageFile] = []
+        for page in data["pages"]:
+            page_path = manifest_path.parent / page["file"]
+            entries = project_io.load_page_file(page_path)
+            parsed = project_io.parse_page_entries(entries)
+            page_files.append(
+                self._build_image_file_from_parsed(
+                    parsed, manifest_path.parent / f"{page['name']}.mas"
+                )
+            )
+        if not page_files:
+            # E7 zero-one-many: a manifest with zero pages is corrupt.
+            raise project_io.ProjectFormatError("project contains no pages")
+
+        # ---- session swap (everything above succeeded) ----
+        self.image_files = page_files
+        self.file_table.set_pages([imf.path for imf in page_files])
+        self.file_table.select_path(page_files[0].path)
+        self._last_page_index = 0
+        self._display_page_state(page_files[0])
+        self.reset_history()  # D-05: fresh undo on reopen
+        self._project_dir = manifest_path.parent
+        self._project_name = data["name"]
+        for imf in self.image_files:
+            imf.dirty = False
+        self._update_title()
+        self.canvas.fit_to_window()
+        self._refresh_status_bar()
+        missing = sum(1 for imf in self.image_files if not imf.original_verified)
+        status = (
+            f"Opened project '{data['name']}' ({len(self.image_files)} pages)."
+        )
+        if missing:
+            status += " Original file not found — using the saved image."
+        self._show_transient_status(status)
+
+    def _load_single_page_mas(self, path: Path) -> None:
+        """Open a page ``.mas`` as a standalone 1-page session (D-09).
+
+        The page behaves exactly like a normally opened image plus its
+        restored mask/boxes/text; Show Original follows the D-06 checksum
+        rule; Save Project… on it creates a single-page project (UI-SPEC
+        surface 22). The Unsaved-Changes gate runs first.
+        """
+        if not self._confirm_discard_changes():
+            return
+        entries = project_io.load_page_file(path)
+        parsed = project_io.parse_page_entries(entries)
+        imf = self._build_image_file_from_parsed(parsed, path)
+
+        # ---- session swap ----
+        self.image_files = [imf]
+        self.file_table.set_pages([imf.path])
+        self.file_table.select_path(imf.path)
+        self._last_page_index = 0
+        self._display_page_state(imf)
+        self.reset_history()
+        self._project_dir = None
+        self._project_name = None
+        for imf_ in self.image_files:
+            imf_.dirty = False
+        self._update_title()
+        self.canvas.fit_to_window()
+        self._refresh_status_bar()
 
     # --------------------------------------------------- recent projects (D-07)
     def _recent_projects(self) -> list[Path]:
