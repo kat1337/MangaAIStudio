@@ -1,24 +1,16 @@
 ---
-status: testing
+status: complete
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:50:00Z"
+updated: "2026-08-08T03:00:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
 
 ## Current Test
 
-number: 2
-name: Real-model OCR end-to-end on a manga page
-expected: |
-  Draw a box with Alt+drag; confirm auto-OCR fires on draw-release (first run shows
-  "Loading OCR model…" then fills the box with recognized Japanese text); run
-  Text->Run OCR on a detected box; run OCR All (Ctrl+R) with mixed empty/edited boxes —
-  confirm status-bar progress, the D-04 single + batch confirm dialogs on edited boxes
-  (Cancel = no overwrite), and the error UX by breaking the model cache.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -86,14 +78,14 @@ severity: minor
 expected: |
   Toggle the Vertical checkbox in the Inspector: confirm it checks, the editor stays
   horizontal (v1 fallback), payload.vertical is preserved without crash or visual change.
-result: [pending]
+result: pass
 
 ## Summary
 
 total: 7
-passed: 3
+passed: 4
 issues: 3
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 ## Gaps
