@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-07T22:05:00Z"
+updated: "2026-08-08T01:10:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -29,7 +29,7 @@ expected: |
   text scales legibly on zoom in/out. Translucent overlay (fill 232,232,234,0.85 /
   outline 11,11,14,0.92 2px) is legible over light and dark artwork at 100-800% zoom.
 result: issue
-reported: "Text detection works as expected, but the text is in one location on the image, i can't actually see if it's black or white because it just looks white, also doesn't seem to scale much, it does get closer and further with zoom but that's it, it doesn't seem to scale or move with the box when the box is moved either"
+reported: "the text now moves with the boxes and scales (RC-1/2/3 FIXED ✓), but it's still a bit small and it overshoots the box, renders horizontally — it should try to fit in the box and adapt the text to the size of the text box. ALSO (out-of-scope UX, user requested inclusion): menu bar top-level shows Recent Files and Batch ahead of File and Edit — should be Recent Files, File, then Batch (Recent/Batch should be File submenus only, not top-level); toolbar 'small bar under the menu' should have Open Folder instead of Open Image (opening a folder by default makes more sense for manga)"
 severity: major
 
 ### 2. Real-model OCR end-to-end on a manga page
@@ -92,8 +92,29 @@ issues: 1
 pending: 6
 skipped: 0
 blocked: 0
-
 ## Gaps
+
+- truth: "Text overlay adapts to box size: overlay text wraps/fits INSIDE the box rect (no horizontal overshoot), sized legibly relative to the box"
+  status: failed
+  reason: "User reported: text is still a bit small, overshoots the box, renders horizontally — should try to fit in the box and adapt text to the text box size"
+  severity: major
+  test: 1
+  artifacts: [manga_ai_studio/gui/box_item.py]
+  missing: [text wrap to box width, font-size fit-to-box adaptation]
+- truth: "Menu bar structure: Recent Files and Batch appear as File submenus only — top-level order is File, Edit, View, Text, Tools, Help"
+  status: failed
+  reason: "User reported (out-of-scope UX, requested inclusion): Recent Files and Batch appear as top-level menu bar entries AHEAD of File and Edit; should be Recent Files, File, then Batch (i.e. Recent/Batch nested in File, not top-level)"
+  severity: minor
+  test: 1
+  artifacts: [manga_ai_studio/gui/main_window.py]
+  missing: [QMenu parent fix — menuBar().addMenu() then file_menu.addMenu() leaves the action in the menubar action list]
+- truth: "Toolbar default open action is Open Folder (manga workflow: open a folder of pages by default)"
+  status: failed
+  reason: "User reported (out-of-scope UX, requested inclusion): the toolbar should have Open Folder instead of Open Image"
+  severity: minor
+  test: 1
+  artifacts: [manga_ai_studio/gui/main_window.py]
+  missing: [toolbar Open Folder action]
 
 - truth: "Text overlay follows box geometry: overlay text appears ON the box rect and moves/scales with the box on zoom and drag"
   status: failed
@@ -116,3 +137,5 @@ blocked: 0
     renderer (ruled out). Fix: 2/zoom scene px outline.
     Test gap: test_text_overlay_uses_outlined_text_format asserts format only (never render);
     no test asserts overlay position after setRect move/resize/zoom.
+  resolved: true
+  resolution: "Fixed in plan 04-08 (commits 44d395c..dd2f09a) — user confirmed 'the text now moves with the boxes and scales'. RC-1 setPos-only reposition wired into _sync_handles; RC-2 font clamp clamp(14*zoom,10,28)/zoom; RC-3 outline 2/zoom scene px; 13 new tests, 439 passed."
