@@ -607,37 +607,45 @@ def line_box(quad: list) -> list[int]:
 | A8 | Resize interpolation = LANCZOS (image) / NEAREST (mask) | Pattern (Code Examples 3) | UI-SPEC §26 contracts "smooth" image interpolation (planner may pick bilinear/lanczos) and NEAREST mask (D-18); LANCZOS is the highest-quality default |
 | A9 | The manifest carries `version`, chapter `name`, and `pages: [{name, file}]` (plain JSON) | Pattern 1 / Open Questions | Manifest schema is planner discretion (D-03 "session metadata"); a version field enables the "from a newer version" corrupt-file copy |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Ctrl+O remap confirmation (UI-SPEC Open Question 1, D-07 vs Phase 1)**
+> All six questions below were resolved during planning; each carries the plan reference that implements its recommendation.
+
+1. **Ctrl+O remap confirmation (UI-SPEC Open Question 1, D-07 vs Phase 1)** — **(RESOLVED — plan 05-05 Task 1)**
    - What we know: `action_open_image` binds Ctrl+O (main_window.py:261); D-07 assigns Ctrl+O to Open Project…; UI-SPEC resolves "newest user decision wins; remove the old binding" and the shortcut audit shows no other collision.
    - What's unclear: whether the user prefers a different key for Open Project….
    - Recommendation: adopt the UI-SPEC resolution — remove `setShortcut(Ctrl+O)` from Open Image…, bind Open Project… to Ctrl+O. Executor MUST not leave two actions on Ctrl+O (Pitfall 8).
+   - Resolution: plan 05-05 Task 1 removes the Open Image… binding (Pitfall 8) and assigns Ctrl+O to Open Project…; `test_ctrl_o_opens_project_not_image` + the `grep 'Ctrl+O' == 1` gate assert exactly one binding.
 
-2. **Geometry-op undo record shape (CONTEXT Claude's Discretion)**
+2. **Geometry-op undo record shape (CONTEXT Claude's Discretion)** — **(RESOLVED — plan 05-04)**
    - What we know: Phase 3 D-11 unified timeline pops the max-stamp store; one Ctrl+Z must reverse image+mask+boxes.
    - What's unclear: combined record vs paired push — the planner picks.
    - Recommendation: **stamp-shared triple push** (Pattern 2) — `push_geometry_state` stamps all three stores with one `_stamp()`; `undo()`/`redo()` pop every store whose tail stamp equals the max and return a list; `on_undo`/`on_redo` apply each. Least-surprising, preserves "three not seven", per-type pop methods untouched. Regression guard: `test_geometry_undo_reverses_all_three_in_one_press`.
+   - Resolution: implemented as a dedicated TDD plan (05-04) — `push_geometry_state(image_patch, mask_qimage=None, boxes=None)` + pop-all-with-max-stamp `undo()`/`redo()` returning `list[(kind, value)]`; `test_geometry_undo_reverses_all_three` is the regression guard; the MainWindow list-apply is part of the same atomic contract change.
 
-3. **`_ocr.json` spelling + version value (CONTEXT Claude's Discretion)**
+3. **`_ocr.json` spelling + version value (CONTEXT Claude's Discretion)** — **(RESOLVED — plan 05-03)**
    - What we know: shape locked by D-19; mokuro is snake_case.
    - What's unclear: exact spelling; version string.
    - Recommendation: snake_case as in Pattern 3, `"version": "1"`; document the exact JSON in the plan so downstream consumers can pin it.
+   - Resolution: snake_case per Pattern 3; `"version": "1"` pinned as `OCR_JSON_VERSION` in `core/ocr_export.py` (plan 05-03 Task 1); the exact shape is documented in the plan and asserted by `test_json_shape`.
 
-4. **Batch Export OCR JSON threading (D-21 discretion)**
+4. **Batch Export OCR JSON threading (D-21 discretion)** — **(RESOLVED — plans 05-03 Task 2 + 05-08 Task 2)**
    - What we know: model-free serialization is fast; UI-SPEC contracts the batch progress surface (status-left + 3px bar + Cancel) "contracted either way".
    - What's unclear: Worker vs inline.
    - Recommendation: Worker path — `core/ocr_export.py` gains `batch_export_ocr(pages, progress_callback=None, abort_flag=None) -> {"ok", "failed", "total"}` mirroring `batch_runner._run_batch_task`'s contract (per-page try/except, abort at loop top), dispatched via the existing `_dispatch` pattern with `_op_running` gating. Reuses tested machinery; consistent with the three Phase 2 batch actions.
+   - Resolution: Worker path chosen — `batch_export_ocr` with the last-two-kwargs auto-injection contract lands in plan 05-03 Task 2; plan 05-08 Task 2 dispatches it via the Phase 2 `_dispatch_batch` template with `_op_running` gating and the batch progress surface.
 
-5. **Project-folder collision handling (D-02 detail)**
+5. **Project-folder collision handling (D-02 detail)** — **(RESOLVED — plan 05-01 Task 2)**
    - What we know: UI-SPEC §Copywriting contracts non-destructive overwrite — "the app writes into an existing `*.mas-project` folder, overwriting per-page `.mas`/`manifest.json` files it owns, never deleting other content"; failed writes use the save-failure copy.
    - What's unclear: exact folder-name validation (e.g. `chapter-01.mas-project` vs an existing unrelated folder of the same name).
    - Recommendation: derive the default name `<source-folder-name>.mas-project`; if the folder exists, write into it non-destructively (overwrite owned files only); never delete foreign content.
+   - Resolution: plan 05-01 Task 2's `save_project` writes only owned manifest.json + *.mas files (atomic temp+os.replace per file); `test_non_destructive_overwrite` proves a foreign `notes.txt` survives re-save; `test_save_is_atomic` covers the interrupted-write backstop.
 
-6. **Show Original gating mechanism for `.mas`-loaded pages (D-06)**
+6. **Show Original gating mechanism for `.mas`-loaded pages (D-06)** — **(RESOLVED — plans 05-01 + 05-06)**
    - What we know: the action's enable state is driven by `has_inpaint_result()` (main_window.py:754) — a `.mas` page without a verified original must grey it out per UI-SPEC §29.
    - What's unclear: where the "original available" flag lives.
    - Recommendation: a per-page flag (e.g. `ImageFile.original_verified: bool = False`) set during `.mas` load when path-ref + sha256 match; `_refresh_action_states` consults it (page from project AND not verified → disabled + tooltip "Show Original (P) — original file not found."). Levels/geometry ops re-baseline via `canvas.rebaseline_original()` (D-14).
+   - Resolution: `ImageFile.original_verified` lands in plan 05-01 Task 2 (set at load per the D-06 sha256 rule via `verify_original`); plan 05-06 Task 3 consumes it in `_refresh_action_states` (disabled + not-found tooltip) and `canvas.rebaseline_original()` runs after every op (D-14); `test_show_original_gating` covers both branches.
 
 ## Environment Availability
 

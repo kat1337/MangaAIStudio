@@ -211,20 +211,23 @@ Plans:
 - [ ] 05-02-PLAN.md — core/image_ops.py: rotate/crop/resize/levels + box/line geometry transforms (PROJ-04)
 - [ ] 05-03-PLAN.md — core/ocr_export.py: D-19 shape + D-20 \n-split + D-22 location + batch loop (PROJ-03)
 
-**Wave 2** (parallel)
+**Wave 2** *(blocked on 05-02)*
 
 - [ ] 05-04-PLAN.md — HistoryManager stamp-shared geometry undo (one Ctrl+Z reverses image+mask+boxes) + MainWindow list-apply (PROJ-04)
+
+**Wave 3** *(blocked on 05-01 + 05-04 — main_window.py owned by 05-04's list-apply contract change)*
+
 - [ ] 05-05-PLAN.md — Save/Open Project session: dirty tracking, Unsaved Changes prompt, Recent Projects, chapter-climb (PROJ-01)
 
-**Wave 3**
+**Wave 4** *(blocked on 05-05)*
 
 - [ ] 05-06-PLAN.md — Image-op GUI apply path: Rotate actions, Levels/Resize dialogs, Show Original gating + re-baseline (PROJ-04)
 
-**Wave 4**
+**Wave 5** *(blocked on 05-06)*
 
 - [ ] 05-07-PLAN.md — Crop surface: 6th tool + armed-rect/dim-out + numeric Crop… dialog (PROJ-04)
 
-**Wave 5**
+**Wave 6** *(blocked on 05-03 + 05-07)*
 
 - [ ] 05-08-PLAN.md — Export OCR JSON… single + Batch Export OCR JSON (Worker + progress + Cancel) (PROJ-03)
 
