@@ -26,7 +26,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Project/Export
 
-- [ ] **PROJ-01**: User can save the full page state (image, masks, boxes, text, translation) as a `.mas` project file and reopen it to resume work
+- [x] **PROJ-01**: User can save the full page state (image, masks, boxes, text, translation) as a `.mas` project file and reopen it to resume work
 - [x] **PROJ-02**: User can export the cleaned (text-removed, inpainted) page as PNG or JPG
 - [ ] **PROJ-03**: User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
 - [ ] **PROJ-04**: User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
@@ -90,7 +90,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEXT-03 | Phase 3 | Complete |
 | TEXT-04 | Phase 4 | Complete |
 | TEXT-05 | Phase 4 | Complete |
-| PROJ-01 | Phase 5 | Pending |
+| PROJ-01 | Phase 5 | Complete |
 | PROJ-02 | Phase 2 | Complete |
 | PROJ-03 | Phase 5 | Pending |
 | PROJ-04 | Phase 5 | Pending |

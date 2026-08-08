@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 5
+current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Phase 5 UI-SPEC approved
-last_updated: "2026-08-08T18:45:46.543Z"
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-08-08T19:02:21.073Z"
 last_activity: 2026-08-08
-last_activity_desc: Phase 04 complete, transitioned to Phase 5
+last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 29
+  completed_plans: 30
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 04 — ocr-recognition-text-editing
+**Current focus:** Phase 05 — Project Persistence, Image Ops & Export
 
 ## Current Position
 
-Phase: 5 — Project Persistence, Image Ops & Export
-Plan: Not started
+Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-08-08 — Phase 04 complete, transitioned to Phase 5
+Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [██████████] 100% (4/4 phases, 29/29 plans)
+Progress: [████████░░] 79% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -95,6 +95,7 @@ Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 | Phase 04 P08 | 6 | 2 tasks | 4 files |
 | Phase 04 P09 | 11 | 3 tasks | 6 files |
 | Phase 04 P10 | 12 | 2 tasks | 5 files |
+| Phase 05 P01 | 10 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -187,6 +188,12 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-10: badge digit-fit uses MEASURED digit geometry (this platform: 9.45x19 px/digit -> badges 17.45x23/26.9x23/36.36x23; the plan-probe 16x19/24x23/40x23 does not reproduce on this Qt/font stack) — tests derive expectations from the measured rect per the plan's NOTE; the plan's probe values remain docstring references
 - [Phase ?]: 04-10: Gap A carries 7 test cases (not 6) — the platform-robust placement tests cannot encode the fixed-size bug as hard-coded positions, so a separate cross-size ordering test (test_badge_tl_outside_tracks_size_across_digits) carries the RED gate; suite is 461 passed (451 + 10), a strict superset of the plan's 460
 - [Phase ?]: 04-10: 0 is the UNSET bubble sentinel (spinbox 0..9999 + setSpecialValueText em dash; load_box None->0; clear() resets 0; WR-01 guard unchanged); _on_inspector_bubble_committed maps 0 -> bubble_no=None + manual_override=False, 1..9999 -> assign + pin (D-16) — the model only ever receives None or 1..9999 (T-4-08 unchanged)
+- [Phase ?]: Container: custom header (magic MAS\x00 + version + entry count) + per-entry name_len u16/data_len u64 table, each payload LZMA2-compressed with FORMAT_XZ preset 6 (locked D-04; preset 9's ~800 MiB overhead rejected per RESEARCH A6)
+- [Phase ?]: Decompression bounded per entry at 512 MiB (MAX_ENTRY_DECOMPRESSED) with LZMAError->ProjectFormatError; header+entry-table unpack fully wrapped so no raw struct.error/IndexError escapes (T-05-01)
+- [Phase ?]: load_page_file and load_project reject format versions != 1 as ProjectFormatError (the newer-version corrupt-file copy, RESEARCH A9)
+- [Phase ?]: Manifest written plain UTF-8 JSON (ensure_ascii=False, indent=2) — human-readable + diffable per D-04; non-ASCII chapter names round-trip literally
+- [Phase ?]: PNG encode delegates to core/image_io.save_image_bytes (single source of truth) instead of duplicating PIL code in project_io
+- [Phase ?]: test_save_is_atomic fails os.replace on the 3rd call (after manifest + first page succeed) — proves the per-file temp+replace scheme never corrupts any target
 
 ### Pending Todos
 
@@ -213,8 +220,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T16:56:32.465Z
-Stopped at: Phase 5 UI-SPEC approved
-Resume file: C:/Src/Manga AI Studio/.planning/phases/05-project-persistence-image-ops-export/05-UI-SPEC.md
+Last session: 2026-08-08T19:02:07.587Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
