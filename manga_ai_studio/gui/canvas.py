@@ -545,6 +545,18 @@ class EditorCanvas(QGraphicsView):
         ph, pw = patch_np.shape[:2]
         if ph == 0 or pw == 0:
             return
+        # Full-frame geometry record (plan 05-04/05-06): a patch at (0, 0)
+        # whose frame differs from the current image can only be a geometry
+        # op's whole pre-op image — rotate/resize change the page dims, so
+        # the composite path below would CLIP it to the post-op frame and the
+        # undo could never restore the pre-op image. Replace the whole image
+        # instead (the faithful D-14 restore; the pre-op image is recoverable
+        # exactly this way). Non-origin patches keep the T-01-15 clip — a
+        # stale same-frame region entry after a crop must never overwrite the
+        # whole (smaller) image.
+        if (x, y) == (0, 0) and (ph, pw) != (h_img, w_img):
+            self.set_image_from_numpy(patch_np.copy())
+            return
         # Bounds check (T-01-15): clip the patch + destination rect to the
         # current image so a stale history entry after a crop cannot corrupt
         # the image array (a Phase 5 concern; defensive now).
@@ -611,7 +623,8 @@ class EditorCanvas(QGraphicsView):
     ) -> QImage:
         """Replace the image layer with ``rgb`` (or composite the ``bbox`` region).
 
-        Used by plan 05's inpaint result display. Input validation (T-01-13):
+        Used by plan 05's inpaint result display and the image-op apply path
+        (plan 05-06 ``_apply_geometry_op``). Input validation (T-01-13):
         ``rgb`` must be a ``(H, W, 3)`` uint8 array — a malformed worker result
         raises ValueError instead of constructing a corrupt QImage.
 
@@ -628,6 +641,47 @@ class EditorCanvas(QGraphicsView):
         ``.copy()`` and caused intermittent segfaults). The Pitfall-2 regression
         guard ``test_inpaint_result_display_uses_copy`` locks this.
         """
+        return self._set_image_from_numpy(rgb, bbox, capture_original=True)
+
+    def set_image_from_numpy_preview(
+        self, image_rgb: np.ndarray, capture_original: bool = False
+    ) -> QImage:
+        """Capture-suppressed display path (plan 05-06, RESEARCH Pitfall 5).
+
+        Identical to :meth:`set_image_from_numpy` (same validation, same
+        ``.copy()``-detached QImage) EXCEPT the ``_original_image_numpy``
+        capture is skipped when ``capture_original`` is False. Used by the
+        Levels dialog live preview so opening the dialog never poisons the
+        Show Original baseline — the pre-dialog image stays the D-14
+        "original" while the user drags the sliders (Pitfall 9: the preview
+        is a silent display mutation, never an undo entry).
+        """
+        return self._set_image_from_numpy(image_rgb, None, capture_original=capture_original)
+
+    def rebaseline_original(self) -> None:
+        """Re-baseline the Show Original cache to the current displayed image.
+
+        D-14 (plan 05-06, RESEARCH Pitfall 5): after EVERY image op the
+        pre-op image is recoverable only via Ctrl+Z — Show Original must show
+        the POST-op image as the "original". The op apply path
+        (``_apply_geometry_op``) calls this after its write-back so a second
+        op does not keep showing the first op's pre-image.
+        """
+        self._original_image_numpy = self.get_image_numpy()
+        self._showing_original = False
+
+    def _set_image_from_numpy(
+        self,
+        rgb: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        capture_original: bool,
+    ) -> QImage:
+        """The shared ``set_image_from_numpy`` implementation.
+
+        ``capture_original`` gates the ``_original_image_numpy`` capture
+        (True for the normal display path, False for the preview path — see
+        :meth:`set_image_from_numpy_preview`).
+        """
         if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
             raise ValueError(
                 f"expected (H,W,3) uint8 RGB array, got shape={rgb.shape} dtype={rgb.dtype}"
@@ -637,7 +691,9 @@ class EditorCanvas(QGraphicsView):
         # before/after preview toggle (captured once per page, reset on
         # set_image/clear). It is NOT used as the composite base — compositing
         # onto it would revert earlier inpaints on a second inpaint (CR-13).
-        if self._original_image_numpy is None:
+        # The preview path (capture_original=False) skips this so a live
+        # dialog preview never re-baselines Show Original (D-14, Pitfall 5).
+        if capture_original and self._original_image_numpy is None:
             self._original_image_numpy = self.get_image_numpy()
 
         full_rgb = rgb

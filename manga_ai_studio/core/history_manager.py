@@ -246,7 +246,16 @@ class HistoryManager:
         _stamp, (x, y, patch) = self._image_undo.pop()
         if current_img is not None:
             h, w = patch.shape[:2]
-            redo_patch = current_img[y : y + h, x : x + w].copy()
+            if (x, y) == (0, 0) and (h, w) != current_img.shape[:2]:
+                # Full-frame geometry record (plan 05-04/05-06): rotate/
+                # resize change the page dims, so the region slice below
+                # would clip the stash to the post-op frame and a redo could
+                # never restore the whole post-op image. Stash the full
+                # current image instead (the symmetric mirror of the
+                # full-frame replace in canvas.apply_undo_image).
+                redo_patch = current_img.copy()
+            else:
+                redo_patch = current_img[y : y + h, x : x + w].copy()
             if stash_stamp is None:
                 stash_stamp = self._stamp()
             self._image_redo.append((stash_stamp, (x, y, redo_patch)))
@@ -272,7 +281,13 @@ class HistoryManager:
         _stamp, (x, y, patch) = self._image_redo.pop()
         if current_img is not None:
             h, w = patch.shape[:2]
-            undo_patch = current_img[y : y + h, x : x + w].copy()
+            if (x, y) == (0, 0) and (h, w) != current_img.shape[:2]:
+                # Full-frame geometry record — mirror of pop_image_undo:
+                # a dims-changing patch must stash the full current image,
+                # never a dims-clipped region slice.
+                undo_patch = current_img.copy()
+            else:
+                undo_patch = current_img[y : y + h, x : x + w].copy()
             if stash_stamp is None:
                 stash_stamp = self._stamp()
             self._image_undo.append((stash_stamp, (x, y, undo_patch)))

@@ -597,6 +597,67 @@ def test_ctrl_z_undo_image_fires_when_canvas_focused(qtbot) -> None:
 
 
 # ===========================================================================
+# Plan 05-06 Task 1 — Show Original re-baseline (D-14) + preview suppression
+# ===========================================================================
+#
+# D-14 + RESEARCH Pitfall 5: `_original_image_numpy` captures once per page,
+# so after the SECOND image op the cache would hold the first op's pre-image.
+# `rebaseline_original()` re-points the cache at the post-op image after EVERY
+# op. The Levels live preview must NOT capture at all while the dialog is
+# open — `set_image_from_numpy_preview(capture_original=False)` suppresses the
+# capture so the pre-dialog image stays the "original".
+
+
+@pytest.mark.gui
+def test_rebaseline_original_after_op(qtbot) -> None:
+    """rebaseline_original() re-points Show Original at the POST-op image.
+
+    The Pitfall-5 scenario: two sequential image sets keep the FIRST capture
+    (capture-once); rebaseline_original() fixes the stale cache so Show
+    Original displays the current (post-op) image (D-14).
+    """
+    canvas = _canvas_with_image(qtbot)
+    first = canvas.get_image_numpy().copy()
+    assert canvas._original_image_numpy is None  # fresh page — nothing captured
+
+    alt = (first.astype(np.int16) + 10).clip(0, 255).astype(np.uint8)
+    canvas.set_image_from_numpy(alt)  # op 1: baseline captured = the pre-op image
+    assert np.array_equal(canvas._original_image_numpy, first)
+
+    alt2 = (alt.astype(np.int16) + 10).clip(0, 255).astype(np.uint8)
+    canvas.set_image_from_numpy(alt2)  # op 2: capture-once keeps the STALE baseline
+    assert np.array_equal(canvas._original_image_numpy, first)
+
+    canvas.rebaseline_original()  # D-14: re-baseline to the current image
+    assert np.array_equal(canvas._original_image_numpy, alt2)
+    assert canvas._showing_original is False
+    canvas.show_original(True)  # Show Original now displays the POST-op image
+    assert np.array_equal(canvas.get_image_numpy(), alt2)
+
+
+@pytest.mark.gui
+def test_preview_path_does_not_capture_original(qtbot) -> None:
+    """set_image_from_numpy_preview(capture_original=False) never captures.
+
+    The Levels live preview must not poison the Show Original baseline
+    (Pitfall 5/9): with capture suppressed the cache stays None even though
+    the display mutated; the capture-enabled path does capture the current
+    display.
+    """
+    canvas = _canvas_with_image(qtbot)
+    assert canvas._original_image_numpy is None
+    pre = canvas.get_image_numpy().copy()
+    alt = (pre.astype(np.int16) + 10).clip(0, 255).astype(np.uint8)
+
+    canvas.set_image_from_numpy_preview(alt, capture_original=False)
+    assert canvas._original_image_numpy is None  # preview never captures
+    # The normal display path captures the current display (the preview result).
+    canvas.set_image_from_numpy(alt)
+    assert canvas._original_image_numpy is not None
+    assert np.array_equal(canvas._original_image_numpy, alt)
+
+
+# ===========================================================================
 # Plan 04-04 Task 2 — Toggle Text Overlay (T) independent visibility layer
 # ===========================================================================
 #

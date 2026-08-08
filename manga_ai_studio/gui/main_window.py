@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
-from manga_ai_studio.core import project_io
+from manga_ai_studio.core import image_ops, project_io
 from manga_ai_studio.core.box_model import (
     DETECTED,
     USER,
@@ -670,6 +670,51 @@ class MainWindow(QMainWindow):
         self.action_cancel_batch.triggered.connect(self._cancel_batch)
         self.action_cancel_batch.setEnabled(False)
 
+        # Image section (plan 05-06, UI-SPEC surface 23/25/26): Rotate ▸
+        # (90° CW / 90° CCW / 180°), Levels…, Resize…. Rotate applies
+        # SILENTLY (D-14 — no confirmation); Levels/Resize open dialogs.
+        # All three are synchronous and enabled iff a page is open AND no
+        # async op is running (gated in _refresh_action_states). No shortcuts
+        # (menu-accelerable per UI-SPEC §Accessibility).
+        self.action_rotate_cw = QAction("Rotate 90\u00b0 CW", self)
+        self.action_rotate_cw.setToolTip(
+            "Rotate the page 90\u00b0 clockwise. Masks and text boxes rotate"
+            " with it. Undo via Ctrl+Z."
+        )
+        self.action_rotate_cw.triggered.connect(lambda: self._rotate_page(-1))
+        self.action_rotate_cw.setEnabled(False)
+
+        self.action_rotate_ccw = QAction("Rotate 90\u00b0 CCW", self)
+        self.action_rotate_ccw.setToolTip(
+            "Rotate the page 90\u00b0 counter-clockwise. Masks and text boxes"
+            " rotate with it. Undo via Ctrl+Z."
+        )
+        self.action_rotate_ccw.triggered.connect(lambda: self._rotate_page(1))
+        self.action_rotate_ccw.setEnabled(False)
+
+        self.action_rotate_180 = QAction("Rotate 180\u00b0", self)
+        self.action_rotate_180.setToolTip(
+            "Rotate the page 180\u00b0. Masks and text boxes rotate with it."
+            " Undo via Ctrl+Z."
+        )
+        self.action_rotate_180.triggered.connect(lambda: self._rotate_page(2))
+        self.action_rotate_180.setEnabled(False)
+
+        self.action_levels = QAction("Levels\u2026", self)
+        self.action_levels.setToolTip(
+            "Adjust the black/white points and gamma with a live preview."
+        )
+        self.action_levels.triggered.connect(self._on_levels)
+        self.action_levels.setEnabled(False)
+
+        self.action_resize = QAction("Resize\u2026", self)
+        self.action_resize.setToolTip(
+            "Resize the page with an aspect-ratio lock. Masks and text boxes"
+            " scale with it."
+        )
+        self.action_resize.triggered.connect(self._on_resize)
+        self.action_resize.setEnabled(False)
+
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
         tools_menu.addAction(self.action_detect_boxes_mode)
@@ -680,6 +725,13 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_rectangle)
         tools_menu.addAction(self.action_tool_lasso)
         tools_menu.addAction(self.action_tool_eraser)
+        tools_menu.addSeparator()
+        rotate_menu = tools_menu.addMenu("Rotate")
+        rotate_menu.addAction(self.action_rotate_cw)
+        rotate_menu.addAction(self.action_rotate_ccw)
+        rotate_menu.addAction(self.action_rotate_180)
+        tools_menu.addAction(self.action_levels)
+        tools_menu.addAction(self.action_resize)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_cancel_batch)
 
@@ -896,6 +948,220 @@ class MainWindow(QMainWindow):
         )
         self.action_auto_number_ltr.setEnabled(
             page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
+
+        # Plan 05-06 image ops (Tools -> Image section): Rotate/Levels/Resize
+        # are enabled iff a page is open AND no async op is running (UI-SPEC
+        # surfaces 23/25/26 gating — synchronous ops must not interleave with
+        # a model worker).
+        for act in (
+            self.action_rotate_cw,
+            self.action_rotate_ccw,
+            self.action_rotate_180,
+            self.action_levels,
+            self.action_resize,
+        ):
+            act.setEnabled(page_open and not self._op_running)
+
+    # -------------------------------------------------- image ops (plan 05-06)
+    # PROJ-04's GUI apply layer: Rotate / Levels / Resize all funnel through
+    # _apply_geometry_op — the ONE place the image-op contract lives (one undo
+    # entry, D-14 re-baseline, D-22 geometry flag). The pure pixel/geometry
+    # math is core/image_ops (plan 05-02); this section owns the canvas
+    # read/write bridges + the undo push (plan 05-04's push_geometry_state).
+    # The crop apply path (plan 05-07) reuses this exact orchestration.
+
+    def _apply_geometry_op(
+        self,
+        op_name: str,
+        geometry: bool,
+        transform_fn,
+        flash: str = "",
+    ) -> None:
+        """Apply a synchronous image op end-to-end (plan 05-06, PROJ-04).
+
+        1. Gate: >= 1 page open AND no async op running.
+        2. Flush the live canvas state into the outgoing ImageFile
+           (``_snapshot_current_page`` — the plan 05-05 save-side seam).
+        3. Capture the PRE-op state: image (detached ``.copy()``), mask QImage
+           (detached ``.copy()`` when one exists), boxes snapshot — the
+           one-press undo record.
+        4. ``transform_fn()`` -> ``(new_image, new_mask_bin, new_boxes)``:
+           the op's pure math (core/image_ops). A None mask/boxes means the op
+           does NOT touch that layer (levels is geometry-free, D-15).
+        5. Write back: ``set_image_from_numpy`` (the setter copies), ``set_mask``
+           via ``numpy_binary_to_mask_qimage`` when the op transformed an
+           existing mask, and ``set_boxes`` (split by origin) UNDER the
+           ``_suppress_boxes_push`` guard — the geometry undo entry is the ONLY
+           record (one press per op, never two).
+        6. Push ONE geometry undo entry (plan 05-04) and re-baseline Show
+           Original (D-14): the post-op image is now the "original"; the pre-op
+           image is recoverable only via Ctrl+Z.
+        7. Mark ``ImageFile.geometry_altered`` for geometry ops (rotate/resize/
+           crop per D-22; NEVER levels), dirty the session, flash the status
+           copy (UI-SPEC §Copywriting), and refresh the action states.
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        self._snapshot_current_page()
+        pre_image = self.canvas.get_image_numpy()
+        if pre_image is None:
+            return
+        pre_image = pre_image.copy()
+        pre_mask = self.canvas.get_mask().copy() if self.canvas.has_mask() else None
+        pre_boxes = self.canvas.boxes_snapshot()
+
+        result = transform_fn()
+        if result is None:
+            return
+        new_image, new_mask_bin, new_boxes = result
+
+        self.canvas.set_image_from_numpy(new_image)
+        transformed_mask = new_mask_bin is not None and pre_mask is not None
+        transformed_boxes = new_boxes is not None
+        if transformed_mask:
+            self.canvas.set_mask(numpy_binary_to_mask_qimage(new_mask_bin))
+        if transformed_boxes:
+            user_pbs = [pb for pb in new_boxes if pb.origin == USER]
+            detected_pbs = [pb for pb in new_boxes if pb.origin == DETECTED]
+            self._suppress_boxes_push = True
+            try:
+                self.canvas.set_boxes(user_pbs, detected_pbs)
+            finally:
+                self._suppress_boxes_push = False
+
+        self._record_geometry_op_name(op_name)
+        self.history.push_geometry_state(
+            pre_image,
+            mask_qimage=pre_mask if transformed_mask else None,
+            boxes=pre_boxes if transformed_boxes else None,
+        )
+        self.canvas.rebaseline_original()
+        idx = self._current_page_index()
+        if geometry and idx is not None and 0 <= idx < len(self.image_files):
+            self.image_files[idx].geometry_altered = True
+        self._set_session_dirty()
+        if flash:
+            self._show_transient_status(flash)
+        self._refresh_action_states()
+
+    def _rotate_page(self, k: int) -> None:
+        """Tools -> Rotate -> 90° CW / 90° CCW / 180° (UI-SPEC surface 23).
+
+        Silent apply (D-14 — no confirmation): image + mask + boxes rotate
+        together via ``image_ops.rotate_page`` / ``rotate_boxes`` with the ONE
+        convention (k=-1 CW, k=1 CCW, k=2 180 — np.rot90 semantics), one undo
+        entry, Show Original re-baselines, ``geometry_altered`` is set (D-22).
+        The menu actions call ``_rotate_page(-1/1/2)``.
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        flash = {
+            -1: "Rotated 90\u00b0 CW.",
+            1: "Rotated 90\u00b0 CCW.",
+            2: "Rotated 180\u00b0.",
+        }[k]
+
+        def _transform():
+            img = self.canvas.get_image_numpy()
+            if img is None:
+                return None
+            mask = self.canvas.get_mask()
+            if mask is not None:
+                mask_bin = mask_to_numpy_binary(mask)
+            else:
+                mask_bin = np.zeros(img.shape[:2], dtype=np.uint8)
+            new_img, new_mask = image_ops.rotate_page(img, mask_bin, k)
+            h, w = img.shape[:2]
+            new_boxes = image_ops.rotate_boxes(
+                self.canvas.boxes_snapshot(), w, h, k
+            )
+            return new_img, new_mask, new_boxes
+
+        self._apply_geometry_op(
+            "rotate", geometry=True, transform_fn=_transform, flash=flash
+        )
+
+    def _on_levels(self) -> None:
+        """Tools -> Levels… (plan 05-06, UI-SPEC surface 25): live preview.
+
+        The pre-dialog image is detached with ``.copy()`` BEFORE the dialog
+        opens (Pitfall 2 — the restore/apply base). The dialog is a collector
+        + preview driver: every control change re-renders the canvas through
+        the capture-suppressed preview path, so the Show Original baseline
+        stays pristine (RESEARCH Pitfall 5/9 — the preview never pushes and
+        never poisons). Cancel restores the base silently (no entry, no
+        flash); Apply commits ONE image-only geometry-free entry (D-15: masks
+        and boxes untouched, ``geometry_altered`` NOT set).
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        from manga_ai_studio.gui.levels_dialog import LevelsDialog
+
+        base = self.canvas.get_image_numpy()
+        if base is None:
+            return
+        base = base.copy()
+        dialog = LevelsDialog(
+            self,
+            page_image=base,
+            preview_callback=lambda values: self.canvas.set_image_from_numpy_preview(
+                image_ops.levels_page(base, *values), capture_original=False
+            ),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            # Cancel: restore the pre-dialog image exactly — silently (no
+            # undo entry, no status flash — UI-SPEC surface 25).
+            self.canvas.set_image_from_numpy(base.copy())
+            return
+        black, white, gamma = dialog.result_values
+
+        def _transform():
+            return image_ops.levels_page(base, black, white, gamma), None, None
+
+        self._apply_geometry_op(
+            "levels", geometry=False, transform_fn=_transform, flash="Levels applied."
+        )
+
+    def _on_resize(self) -> None:
+        """Tools -> Resize… (plan 05-06, UI-SPEC surface 26): dialog apply.
+
+        The dialog collects ``(new_w, new_h)`` (px or percent-resolved pixels);
+        Apply resizes image LANCZOS / mask NEAREST (D-18, A8) with boxes
+        scaled int, pushes ONE geometry entry, re-baselines Show Original
+        (D-14), marks ``geometry_altered`` (D-22), and flashes the resized
+        dims copy.
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        from manga_ai_studio.gui.resize_dialog import ResizeDialog
+
+        img = self.canvas.get_image_numpy()
+        if img is None:
+            return
+        h_img, w_img = img.shape[:2]
+        dialog = ResizeDialog(self, current_w=w_img, current_h=h_img)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_w, new_h = dialog.result_values
+
+        def _transform():
+            mask = self.canvas.get_mask()
+            if mask is not None:
+                mask_bin = mask_to_numpy_binary(mask)
+            else:
+                mask_bin = np.zeros(img.shape[:2], dtype=np.uint8)
+            new_img, new_mask = image_ops.resize_page(img, mask_bin, new_w, new_h)
+            new_boxes = image_ops.resize_boxes(
+                self.canvas.boxes_snapshot(), w_img, h_img, new_w, new_h
+            )
+            return new_img, new_mask, new_boxes
+
+        self._apply_geometry_op(
+            "resize",
+            geometry=True,
+            transform_fn=_transform,
+            flash=f"Resized to {new_w} \u00d7 {new_h}.",
         )
 
     def _current_page_index(self) -> int | None:
