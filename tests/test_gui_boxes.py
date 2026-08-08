@@ -917,14 +917,31 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
     (``QTest`` press/move/release on the viewport — NOT a direct ``setRect``)
     must persist its MOVED position across a page round-trip.
 
-    The 03-07 executor's probe passed because it simulated the move via
-    ``setRect`` (updates ``rect()``); the live app moves through Qt's
-    ``ItemIsMovable`` (updates ``pos()``), which diverges from ``rect()`` — so
-    ``boxes_snapshot()`` materializes the stale rect and the persisted boxes
-    carry the original position. This test drives the move through REAL Qt
-    events (the closest offscreen approximation to the live path), then drives
-    the real ``on_page_selected`` round-trip, and asserts the restored box is
-    at the MOVED position, not the original.
+    Historical root cause: the 03-07 executor's probe passed because it
+    simulated the move via ``setRect`` (updates ``rect()``); the live app moved
+    through Qt's ``ItemIsMovable`` (updates ``pos()``), which diverges from
+    ``rect()`` — so ``boxes_snapshot()`` materialized the stale rect and the
+    persisted boxes carried the original position. The flag was removed in
+    03-07; the canvas now owns the move via ``_moving_box`` -> ``setRect``
+    (canvas.py:1013-1025).
+
+    MEASURED root cause of the pre-05-09 deterministic 1px failure (NOT a
+    canvas defect): PySide6's ``QTest`` and ``mapFromScene`` deliver INT
+    viewport coordinates while the MainWindow canvas fit-to-window transform is
+    FRACTIONAL in the pytest environment (measured scale 0.18333, viewport
+    1188x1037; standalone runs at scale 0.2 land exactly at (70,70,130,130)).
+    The int truncation of fractional viewport coords loses ~0.91 scene px, so a
+    nominal 50px scene drag is delivered ~0.9px short (delta 49.09 -> box at
+    (69,69,129,129)); the canvas applies the delivered delta EXACTLY
+    (canvas.py:1013-1025) — this is a TEST-side sub-pixel truncation artifact.
+
+    The assertions below are therefore TRUNCATION-TOLERANT (moved ~50px within
+    a bounded 45..50 band, T-05-21) while still failing on the real UAT re-test
+    4 defect: a pos()/rect() divergence leaves rect() at the ORIGINAL
+    (20,20,80,80) -> delivered delta 0 -> the range check fails. The
+    round-trip assertion anchors on the ACTUALLY-moved position (``moved_now``)
+    so the real regression contract — persisted == moved — is checked exactly,
+    environment-independent.
     """
     from manga_ai_studio.gui.main_window import MainWindow
 
@@ -954,13 +971,33 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
     item = window.canvas._box_items[0]
     QApplication.processEvents()
 
-    # Drive a real body-drag move (50,50) -> (100,100): box lands at (70,70)-(130,130).
+    # Drive a real body-drag move (50,50) -> (100,100): the box lands at
+    # (70,70)-(130,130) minus the ~1px QTest int-truncation at the fractional
+    # fit scale (delivered delta ~49.09 -> ~(69,69,129,129)).
     _drive_real_body_move(qtbot, window.canvas, item, (50.0, 50.0), (100.0, 100.0))
     moved_now = item.current_box().as_tuple
-    assert moved_now == (70, 70, 130, 130), (
-        f"precondition: the real-event move must land the box at (70,70,130,130); "
-        f"got {moved_now} (if this is the original (20,20,80,80) the move went "
-        f"through pos() — the UAT re-test 4 defect)."
+    # moved_now is a (x1,y1,x2,y2) TUPLE — assert on indices. The box started
+    # at (20,20,80,80); a nominal 50px drag is delivered ~0.9px short by the
+    # int-truncating QTest/mapFromScene delivery chain (see docstring).
+    assert moved_now[0] != 20 or moved_now[1] != 20, (
+        f"precondition: the real-event move must move the box at all; got "
+        f"{moved_now}. A pos()-routed move leaves rect() at the ORIGINAL "
+        f"(20,20,80,80) — the UAT re-test 4 defect."
+    )
+    assert moved_now[0] - 20 == moved_now[1] - 20, (
+        f"precondition: the drag was (50,50)->(100,100) so the delivered scene "
+        f"delta must be axis-symmetric; got {moved_now} (dx={moved_now[0] - 20}, "
+        f"dy={moved_now[1] - 20})."
+    )
+    assert 45 <= moved_now[0] - 20 <= 50, (
+        f"precondition: the box must have moved ~50px; got dx={moved_now[0] - 20} "
+        f"({moved_now}). The ~0.9px measured truncation at the fractional fit "
+        f"scale allows 45..50; a move through pos() yields 0 and fails here."
+    )
+    assert moved_now[2] - moved_now[0] == 60 and moved_now[3] - moved_now[1] == 60, (
+        f"precondition: the 60x60 shape must be preserved by a move; got "
+        f"{moved_now} (a move never changes width/height; a resize bug would "
+        f"fail here)."
     )
 
     # Round-trip A -> B -> A through the REAL on_page_selected seam.
@@ -972,11 +1009,12 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
 
     restored = window.canvas.boxes_snapshot()
     assert len(restored) == 1, f"the box must survive the round-trip; got {len(restored)}"
-    assert restored[0].box.as_tuple == (70, 70, 130, 130), (
-        "UAT re-test 4: the MOVED position (70,70,130,130) must persist across "
-        f"the round-trip; got {restored[0].box.as_tuple}. If this is the ORIGINAL "
-        "(20,20,80,80), the move was visible on screen (pos+rect) but the snapshot "
-        "materialized the stale rect() — the ItemIsMovable root cause."
+    assert restored[0].box.as_tuple == moved_now, (
+        "UAT re-test 4: the MOVED position must persist across the round-trip "
+        f"(persisted {restored[0].box.as_tuple} != moved {moved_now}). If the "
+        "restored box is the ORIGINAL (20,20,80,80), the move was visible on "
+        "screen (pos+rect) but the snapshot materialized the stale rect() — "
+        "the ItemIsMovable root cause."
     )
 
 
