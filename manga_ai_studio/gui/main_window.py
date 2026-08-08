@@ -612,16 +612,18 @@ class MainWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         """Build the single top toolbar (UI-SPEC surface 1).
 
-        Phase 1 ships: Open | (sep) | Fit / 100% / Zoom Out / Zoom In | (sep) |
-        Toggle Mask Overlay. Other sections (Detect/Inpaint/Tools/Undo) are
-        added by their plans.
+        The toolbar's open action is Open Folder (Ctrl+Shift+O) — the
+        phase-2 manga-workflow default (open a folder of pages); Open Image
+        lives in the File menu (Ctrl+O). Rest: Fit / 100% / Zoom Out / Zoom
+        In | (sep) | Toggle Mask Overlay. Other sections (Detect/Inpaint/
+        Tools/Undo) are added by their plans.
         """
         self.toolbar = QToolBar("Main", self)
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
-        self.toolbar.addAction(self.action_open_image)
+        self.toolbar.addAction(self.action_open_folder)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.action_fit_to_window)
         self.toolbar.addAction(self.action_actual_size)
