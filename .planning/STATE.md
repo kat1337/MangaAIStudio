@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-08-08T19:32:32.613Z"
+stopped_at: Completed 05-09-PLAN.md
+last_updated: "2026-08-08T19:39:02.027Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 32
+  completed_plans: 33
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [████████░░] 84% (4/4 phases, 29/29 plans)
+Progress: [█████████░] 87% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -99,6 +99,7 @@ Progress: [████████░░] 84% (4/4 phases, 29/29 plans)
 | Phase 05-project-persistence-image-ops-export P05-02 | 25 | 3 tasks | 2 files |
 | Phase 05 P03 | 45m | 2 tasks | 2 files |
 | Phase 05 P03 | 30m | 2 tasks | 2 files |
+| Phase 05-project-persistence-image-ops-export P05-09 | 12 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -203,6 +204,9 @@ Recent decisions affecting current work:
 - [Phase ?]: _ocr.json writes are atomic (temp file + os.replace in same dir) - a crash never leaves a half-written published-contract file
 - [Phase ?]: Abort is lazy-imported inside batch_export_ocr (function body) to keep the module-top import graph Qt-free while preserving the exact worker_thread exception identity
 - [Phase ?]: img_w/img_h validated strictly as int (ValueError on non-int, T-05-02) - silent float truncation would export coordinates that lie about the current page state
+- [Phase ?]: 05-09: The 1px move shortfall is a TEST-side sub-pixel truncation artifact (PySide6 QTest/mapFromScene int viewport delivery at fractional fit scale 0.18333) — NOT a canvas defect; canvas.py:1013-1025 applies the delivered delta exactly; no production code changed
+- [Phase ?]: 05-09: Truncation-tolerant assertions anchor on the DELIVERED move position (moved_now): ~50px within 45..50 band + axis-symmetric + 60x60 shape + persisted == moved_now exactly — a pos()-divergence defect (delta 0) still fails; regression value preserved (T-05-21)
+- [Phase ?]: 05-09: Post-fix full-suite baseline re-measured: 493 collected / 493 passed, 0 failed (suite grew past the plan-time 462 — strict superset of the 462/462 target)
 
 ### Pending Todos
 
@@ -229,8 +233,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T19:31:46.450Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-08-08T19:39:01.388Z
+Stopped at: Completed 05-09-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

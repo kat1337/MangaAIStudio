@@ -201,7 +201,7 @@ Plans:
   2. User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
   3. User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
 
-**Plans**: 3/9 plans executed
+**Plans**: 4/9 plans executed
 
 Plans:
 
@@ -210,7 +210,7 @@ Plans:
 - [x] 05-01-PLAN.md — .mas serialization core: LZMA2 container + manifest + PageBox mapping + D-06 checksum + D-09 climb + validation (PROJ-01)
 - [x] 05-02-PLAN.md — core/image_ops.py: rotate/crop/resize/levels + box/line geometry transforms (PROJ-04)
 - [x] 05-03-PLAN.md — core/ocr_export.py: D-19 shape + D-20 \n-split + D-22 location + batch loop (PROJ-03)
-- [ ] 05-09-PLAN.md — [gap closure] remediate pre-existing tests/test_gui_boxes.py move-round-trip 1px regression (test-side QTest int-truncation; no production change; separate commit) (PROJ-04)
+- [x] 05-09-PLAN.md — [gap closure] remediate pre-existing tests/test_gui_boxes.py move-round-trip 1px regression (test-side QTest int-truncation; no production change; separate commit) (PROJ-04)
 
 **Wave 2** *(blocked on 05-02)*
 
@@ -251,7 +251,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
 | 4. OCR Recognition & Text Editing | 10/10 | Complete    | 2026-08-08 |
-| 5. Project Persistence, Image Ops & Export | 3/9 | In Progress|  |
+| 5. Project Persistence, Image Ops & Export | 4/9 | In Progress|  |
 
 ---
 *Roadmap created: 2026-07-11*
