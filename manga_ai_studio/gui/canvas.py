@@ -1626,6 +1626,11 @@ class EditorCanvas(QGraphicsView):
         h = max(r.height(), MIN_BOX_SIZE)
         item.setRect(QRectF(r.x(), r.y(), w, h))
         item._sync_handles()
+        # Resize-COMMIT re-wrap (plan 04-09 Gap 1): refresh the overlay ONCE per
+        # drag so the text re-wraps/re-fits to the final rect. The per-mousemove
+        # _advance_resize path stays setPos-only (RC-1 discipline — a full
+        # document rebuild must NOT run per-mousemove).
+        item.refresh_text_overlay()
         # WR-04 delta-check: only emit when the resize actually changed the rect.
         if item.rect() != self._resize_start_rect:
             self.boxes_modified.emit(before)

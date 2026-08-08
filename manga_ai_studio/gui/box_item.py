@@ -106,6 +106,17 @@ _OVERLAY_FONT = QFont("Liberation Sans", 14)  # 14 scene px (UI-SPEC §16)
 # this by the zoom to keep the RENDERED viewport-px size within [10, 28]
 # (UI-SPEC §16, plan 04-08 RC-2).
 _OVERLAY_FONT_BASE = 14.0
+# Plan 04-09 fit-in-box constants (UI-SPEC §16 amendment): the box min
+# dimension (scene px) that maps to the §16 14-viewport-px base — the
+# 04-08 reference box is exactly 100 min, so for it the box-adaptive base
+# reduces exactly to the 04-08 clamp formula. The bounded shrink-to-fit loop
+# constants bound the iteration count, the per-step reduction factor, and the
+# hard rendered-size floor (checked at loop TOP so no iteration ever renders
+# below it).
+_OVERLAY_BOX_REF_DIM = 100.0
+_OVERLAY_FIT_MAX_ITERS = 12
+_OVERLAY_FIT_STEP = 0.9
+_OVERLAY_FIT_FLOOR_VP = 5.0
 # Inner margin: text inset by the border width + 2px so it never touches the
 # box edge (UI-SPEC §16).
 _OVERLAY_INSET = 2.0
@@ -482,24 +493,55 @@ class BoxItem(QGraphicsRectItem):
         # document so every run carries both).
         self._text_overlay.setPlainText(text)
         doc = self._text_overlay.document()
-        fmt = QTextCharFormat()
-        # §16 font clamp + constant-viewport-px outline from the STORED zoom
-        # (RC-2/RC-3, plan 04-08). The clamp formula keeps the RENDERED
-        # viewport-px size within [10, 28] at every zoom (clamp(14*zoom, 10,
-        # 28)/zoom scene px); the outline stays a constant 2 viewport px
-        # (2/zoom scene px) — the RC-3 documented deviation (the scene-px
-        # reading renders a sub-pixel halo below 100% zoom).
+        # §16 fit-in-box wrap (plan 04-09 Gap 1): lay the document out at the
+        # box INNER width (rect width - 2x inset) so long recognized/translation
+        # text WRAPS inside the box instead of rendering on one unbounded
+        # horizontal line that overshoots the rect (the pre-fix defect the UAT
+        # test-1 user reported). The max() floor keeps a degenerate/negative
+        # width rect from producing an invalid text width (T-4-13g).
         zoom = self._overlay_zoom
-        viewport_px = _OVERLAY_FONT_BASE * zoom
-        clamped_vp = min(28.0, max(10.0, viewport_px))
-        font = QFont(_OVERLAY_FONT)
-        font.setPointSizeF(clamped_vp / zoom)
-        fmt.setFont(font)
-        fmt.setTextOutline(QPen(_OVERLAY_OUTLINE.color(), 2.0 / zoom))
-        fmt.setForeground(QBrush(_OVERLAY_FILL))
-        cursor = QTextCursor(doc)
-        cursor.select(QTextCursor.SelectionType.Document)
-        cursor.mergeCharFormat(fmt)
+        inset = self._overlay_inset()
+        inner_w = max(1.0, self.rect().width() - 2.0 * inset)
+        inner_h = max(1.0, self.rect().height() - 2.0 * inset)
+        self._text_overlay.setTextWidth(inner_w)
+        # §16 font clamp + constant-viewport-px outline from the STORED zoom
+        # (RC-2/RC-3, plan 04-08), amended by the 04-09 fit contract: the [10,28]
+        # clamp bounds the box-ADAPTIVE BASE (14 x min(box_w, box_h)/100
+        # viewport px — 14 for a 100 scene-px box, the §16 reference) and the
+        # bounded shrink-to-fit loop below may reduce the RENDERED size below
+        # 10 vp down to the 5 vp floor when the wrapped text still exceeds the
+        # inner height; the outline stays a constant 2 viewport px (2/zoom scene
+        # px — the RC-3 documented deviation).
+        base_vp = (
+            _OVERLAY_FONT_BASE
+            * min(self.rect().width(), self.rect().height())
+            / _OVERLAY_BOX_REF_DIM
+        )
+        target_vp = min(28.0, max(10.0, base_vp * zoom))
+        # Fit loop (04-09): re-merge the char format at the current target and
+        # shrink by the step factor until the wrapped document fits the inner
+        # height — or the hard floor stops the loop at its TOP, so no iteration
+        # ever renders below the floor. A box that cannot hold the text even at
+        # the floor keeps the §16 clipped-overflow fallback (the box is the
+        # text's container). The loop is bounded, so it always terminates; the
+        # division by zoom is safe because apply_overlay_zoom guards zoom <= 0
+        # (T-4-12g). The text stays PLAIN throughout (setPlainText only,
+        # re-merged QTextCharFormat — never setHtml, T-4-07).
+        for _ in range(_OVERLAY_FIT_MAX_ITERS):
+            if target_vp <= _OVERLAY_FIT_FLOOR_VP:
+                break
+            font = QFont(_OVERLAY_FONT)
+            font.setPointSizeF(target_vp / zoom)
+            fmt = QTextCharFormat()
+            fmt.setFont(font)
+            fmt.setTextOutline(QPen(_OVERLAY_OUTLINE.color(), 2.0 / zoom))
+            fmt.setForeground(QBrush(_OVERLAY_FILL))
+            cursor = QTextCursor(doc)
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.mergeCharFormat(fmt)
+            if doc.size().height() <= inner_h:
+                break
+            target_vp *= _OVERLAY_FIT_STEP
         # Geometry sync is delegated to the setPos-only _reposition_text_overlay
         # (RC-1, plan 04-08) so _sync_handles can reuse it per-mousemove without
         # rebuilding the document. The visible-state line stays here.
@@ -517,9 +559,19 @@ class BoxItem(QGraphicsRectItem):
         overlay inset by the border width + 2px so the text never touches the
         border (UI-SPEC §16).
         """
-        pen_w = self.pen().widthF() / 2.0
-        inset = pen_w + _OVERLAY_INSET
-        self._text_overlay.setPos(self.rect().x() + inset, self.rect().y() + inset)
+        self._text_overlay.setPos(
+            self.rect().x() + self._overlay_inset(),
+            self.rect().y() + self._overlay_inset(),
+        )
+
+    def _overlay_inset(self) -> float:
+        """The overlay inset: border half-width + 2px margin (UI-SPEC §16).
+
+        One formula shared by the overlay POSITION (:meth:`_reposition_text_overlay`)
+        and the fit-in-box wrap width (:meth:`refresh_text_overlay`) so the
+        position and the wrap width always agree.
+        """
+        return self.pen().widthF() / 2.0 + _OVERLAY_INSET
 
     def apply_overlay_zoom(self, zoom: float) -> None:
         """Re-apply the §16 font clamp + constant-viewport-px outline for ``zoom``.
