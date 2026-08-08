@@ -1589,48 +1589,54 @@ def test_badge_digit_shows_bubble_number(qtbot) -> None:
 
 # -- UAT test 4 gap closure round 3 (plan 04-10): badge digit-fit sizing --
 # The badge was a FIXED 20x14 rect with the digit at a hardcoded (3,-1): the
-# 14px-tall badge clipped the 19px-tall glyph (the user's "top half only") and
-# multi-digit numbers overflowed the 20px width. The 04-10 fix measures the
-# digit's tight glyph line box (document margin 0) after setPlainText, resizes
-# the badge rect to digit_w + 2x4 / digit_h + 2x2 padding, re-centers the
-# digit, and uses the ACTUAL badge size for the TL-outside placement + the
-# edge-flip decision.
+# 14px-tall badge clipped the ~19px-tall glyph (the user's "top half only")
+# and multi-digit numbers overflowed the 20px width. The 04-10 fix measures
+# the digit's tight glyph line box (document margin 0) after setPlainText,
+# resizes the badge rect to digit_w + 2x4 / digit_h + 2x2 padding, re-centers
+# the digit, and uses the ACTUAL badge size for the TL-outside placement + the
+# edge-flip decision. Assertions derive from the MEASURED digit rect (per the
+# plan's note: the badge-size pixel values are platform-font-dependent — the
+# plan-reference platform measures 16x19 per digit -> 24x23/40x23/56x23
+# badges; this platform measures 9.45x19 -> 17.45x23/26.9x23/36.36x23 — the
+# CONTRACT, digit + 4px/2px padding with full containment, is font-agnostic).
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize(
-    "number, badge_w, badge_h",
-    [(3, 24.0, 23.0), (12, 40.0, 23.0), (123, 56.0, 23.0)],
-)
-def test_badge_rect_sizes_to_digit(qtbot, number, badge_w, badge_h) -> None:
+@pytest.mark.parametrize("number", [3, 12, 123], ids=["1-digit", "2-digit", "3-digit"])
+def test_badge_rect_sizes_to_digit(qtbot, number) -> None:
     """The badge rect is DIGIT-SIZED: measured glyph line box + 4px/2px padding.
 
-    FAILS pre-fix: the badge rect is the fixed 20x14 and the digit (24x27 at
-    the default document margin 4, pos (3,-1)) overflows it — the local rect
-    (3,-1)-(27,26) is NOT contained (right 27 > 20, bottom 26 > 14), the
-    user's "top half only" clipping. The badge-size reference values are the
-    probed platform sizes (16x19 per digit at the 12pt semibold badge font);
-    the centering assertion uses the MEASURED digit rect so it holds on any
-    platform font.
+    FAILS pre-fix: the badge rect is the fixed 20x14 and the digit (margin-4
+    inflated rect, pos (3,-1)) overflows it — the local rect is NOT contained
+    (right > 20, bottom > 14), the user's "top half only" clipping, and the
+    digit is not re-centered.
     """
     pb = _pagebox_with_text(recognized="hello")
     pb.bubble_no = number
     _scene, item = _scene_with_box(pb)
     item.refresh_badge()
 
+    digit = item._badge_digit
+    dw = digit.boundingRect().width()
+    dh = digit.boundingRect().height()
+    # Contract: badge = digit glyph line box + 4px/side horizontal + 2px/side
+    # vertical padding (plan 04-10). Derived from the measured rect so the
+    # assertion holds on any platform font.
+    bw = dw + 2.0 * 4.0
+    bh = dh + 2.0 * 2.0
+
     r = item._badge.rect()
     assert r.x() == pytest.approx(0.0, abs=0.01)
     assert r.y() == pytest.approx(0.0, abs=0.01)
-    assert r.width() == pytest.approx(badge_w, abs=0.01)
-    assert r.height() == pytest.approx(badge_h, abs=0.01)
+    assert r.width() == pytest.approx(bw, abs=0.01)
+    assert r.height() == pytest.approx(bh, abs=0.01)
 
     # Measurement basis: the tight glyph line box (document margin 0), so the
     # default QTextDocument margin (4.0) cannot inflate the badge.
-    assert item._badge_digit.document().documentMargin() == pytest.approx(0.0)
+    assert digit.document().documentMargin() == pytest.approx(0.0)
 
     # The digit's LOCAL rect is fully contained in the badge rect (no
     # top/bottom/right clipping at any digit count).
-    digit = item._badge_digit
     digit_local = QRectF(digit.pos(), digit.boundingRect().size())
     badge_rect = QRectF(0.0, 0.0, r.width(), r.height())
     assert digit_local.left() >= 0.0, f"digit left {digit_local.left()} must not clip"
@@ -1643,46 +1649,57 @@ def test_badge_rect_sizes_to_digit(qtbot, number, badge_w, badge_h) -> None:
     )
 
     # The digit is re-centered from the MEASURED digit size.
-    dw = digit.boundingRect().width()
-    dh = digit.boundingRect().height()
     assert digit.pos().x() == pytest.approx((r.width() - dw) / 2.0, abs=0.01)
     assert digit.pos().y() == pytest.approx((r.height() - dh) / 2.0, abs=0.01)
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize(
-    "number, expect_x, expect_y",
-    [(3, -7.0, -6.0), (12, -23.0, -6.0)],
-)
-def test_badge_tl_outside_uses_actual_badge_size(qtbot, number, expect_x, expect_y) -> None:
+def test_badge_tl_outside_uses_actual_badge_size(qtbot) -> None:
     """The TL-outside placement uses the ACTUAL badge size (badge + 2px offset).
 
-    FAILS pre-fix: the fixed 20x14 constants place the badge at (-3,3) for
-    BOTH digits — the badge does not track its own size. Post-fix: for the
-    reference box (rect 20,20,200,100, unselected 2px pen -> sceneBoundingRect
-    (19,19,202,102)) a 24x23 badge sits at (-7,-6) and a 40x23 badge at
-    (-23,-6) — the multi-digit badge keeps the same 2px gap as the single-digit.
+    FAILS pre-fix: the fixed 20x14 constants place BOTH badges at (-3,3) — a
+    multi-digit badge does not track its own size (the cross-size ordering
+    assertion fails RED). Post-fix: for the reference box (rect 20,20,200,100,
+    unselected 2px pen -> sceneBoundingRect (19,19,202,102)) each badge sits
+    exactly badge_w+2 / badge_h+2 TL-outside (probe platform: 24x23 at (-7,-6),
+    40x23 at (-23,-6); this platform: 17.45x23 at (-0.45,-6), 26.9x23 at
+    (-9.9,-6)) — the multi-digit badge keeps the same 2px gap as the single-digit.
     """
-    pb = _pagebox_with_text(recognized="hello")
-    pb.bubble_no = number
-    _scene, item = _scene_with_box(pb)
-    item.refresh_badge()
+    pb3 = _pagebox_with_text(recognized="hello")
+    pb3.bubble_no = 3
+    _scene3, item3 = _scene_with_box(pb3)
+    item3.refresh_badge()
+
+    pb12 = _pagebox_with_text(recognized="hello")
+    pb12.bubble_no = 12
+    _scene12, item12 = _scene_with_box(pb12)
+    item12.refresh_badge()
 
     # Precondition: the reference box's scene rect (2px unselected pen).
-    sbr = item.sceneBoundingRect()
+    sbr = item3.sceneBoundingRect()
     assert sbr.left() == pytest.approx(19.0, abs=0.01)
     assert sbr.top() == pytest.approx(19.0, abs=0.01)
 
-    pos = item._badge.scenePos()
-    assert pos.x() == pytest.approx(expect_x, abs=0.01), (
-        f"badge x {pos.x()} must be sceneBoundingRect.left() - badge_w - 2 ({expect_x})"
+    # Each badge sits exactly badge_w+2 / badge_h+2 TL-outside its box,
+    # computed from the ACTUAL (just-measured) badge rect.
+    for item in (item3, item12):
+        r = item._badge.rect()
+        pos = item._badge.scenePos()
+        assert pos.x() == pytest.approx(sbr.left() - r.width() - 2.0, abs=0.01), (
+            f"badge x {pos.x()} must be sceneBoundingRect.left() - badge_w - 2"
+        )
+        assert pos.y() == pytest.approx(sbr.top() - r.height() - 2.0, abs=0.01), (
+            f"badge y {pos.y()} must be sceneBoundingRect.top() - badge_h - 2"
+        )
+        # The badge remains TL-outside the box's scene rect.
+        assert pos.x() < sbr.left()
+        assert pos.y() < sbr.top()
+
+    # The badge tracks its size: the multi-digit badge sits further left than
+    # the single-digit one (pre-fix both sit at (-3,3) — this fails RED).
+    assert item12._badge.scenePos().x() < item3._badge.scenePos().x(), (
+        "the multi-digit badge must sit further TL than the single-digit badge"
     )
-    assert pos.y() == pytest.approx(expect_y, abs=0.01), (
-        f"badge y {pos.y()} must be sceneBoundingRect.top() - badge_h - 2 ({expect_y})"
-    )
-    # The badge remains TL-outside the box's scene rect.
-    assert pos.x() < sbr.left()
-    assert pos.y() < sbr.top()
 
 
 @pytest.mark.gui
@@ -1690,11 +1707,11 @@ def test_badge_edge_flip_uses_actual_size(qtbot) -> None:
     """The edge-flip uses the ACTUAL badge size and the digit stays contained.
 
     A box at (0,0,50,50) in a 1000x1000 scene: sceneBoundingRect is
-    (-1,-1,52,52) (2px pen); the 40x23 outside candidate (-43,-26) would clip
-    off the page TL edge, so the badge flips INSIDE at (1,1). FAILS pre-fix on
-    the containment half: the digit ('12' at margin 4, pos (3,-1)) overflows
-    the fixed 20x14 badge even though the (size-independent) inside-flip inset
-    lands at (1,1) either way.
+    (-1,-1,52,52) (2px pen); the outside candidate (actual badge size) would
+    clip off the page TL edge, so the badge flips INSIDE at (1,1). FAILS
+    pre-fix on the containment half: the digit ('12' at margin 4, pos (3,-1))
+    overflows the fixed 20x14 badge even though the (size-independent)
+    inside-flip inset lands at (1,1) either way.
     """
     pb = PageBox(box=Box(0, 0, 50, 50), origin=DETECTED)  # the page TL corner
     pb.bubble_no = 12
@@ -1713,11 +1730,11 @@ def test_badge_edge_flip_uses_actual_size(qtbot) -> None:
     assert pos.x() == pytest.approx(1.0, abs=0.01)
     assert pos.y() == pytest.approx(1.0, abs=0.01)
 
-    # The badge is the ACTUAL 40x23 size and the digit is fully contained.
-    r = item._badge.rect()
-    assert r.width() == pytest.approx(40.0, abs=0.01)
-    assert r.height() == pytest.approx(23.0, abs=0.01)
+    # The badge is the ACTUAL digit-sized rect and the digit is fully contained.
     digit = item._badge_digit
+    r = item._badge.rect()
+    assert r.width() == pytest.approx(digit.boundingRect().width() + 2.0 * 4.0, abs=0.01)
+    assert r.height() == pytest.approx(digit.boundingRect().height() + 2.0 * 2.0, abs=0.01)
     digit_local = QRectF(digit.pos(), digit.boundingRect().size())
     assert digit_local.left() >= 0.0
     assert digit_local.top() >= 0.0

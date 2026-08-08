@@ -120,11 +120,16 @@ _OVERLAY_FIT_FLOOR_VP = 5.0
 # Inner margin: text inset by the border width + 2px so it never touches the
 # box edge (UI-SPEC §16).
 _OVERLAY_INSET = 2.0
-# Bubble-badge style + geometry (UI-SPEC §17). Constant 20x14 viewport px (fits
-# 1-2 digits + future 3-digit padding); 12px semibold digit; badge fill near-
-# opaque black so the digit reads against any artwork.
-_BADGE_W = 20.0
-_BADGE_H = 14.0
+# Bubble-badge style + geometry (UI-SPEC §17). The badge is DIGIT-SIZED (plan
+# 04-10, gap closure round 3): refresh_badge measures the digit glyph line box
+# after setPlainText (document margin 0; probed 16x19 px per digit at the 12pt
+# semibold Liberation Sans badge font) and resizes the rect to
+# digit_w + 2*_BADGE_PAD_W by digit_h + 2*_BADGE_PAD_H, so the badge always
+# hugs its number (single digit ~24x23, two digits 40x23, three 56x23, four
+# 72x23 viewport px). 12px semibold digit; badge fill near-opaque black so the
+# digit reads against any artwork.
+_BADGE_PAD_W = 4.0
+_BADGE_PAD_H = 2.0
 _BADGE_FILL = QColor.fromRgbF(0.0, 0.0, 0.0, 0.72)
 _BADGE_DIGIT_COLOR = QColor("#e8e8ea")
 _BADGE_OUTLINE_AUTO = QPen(QColor("#0b0b0e"), 2)  # matte — auto-numbered badge
@@ -330,7 +335,8 @@ class BoxItem(QGraphicsRectItem):
         # box incl. text + badges; the text-overlay toggle T hides ONLY the
         # text children, D-12). The overlay is PLAIN text (ASVS V5 — never
         # setHtml on OCR output); the badge ignores transformations so it stays
-        # a constant 20x14 viewport px at any zoom (like the handles).
+        # constant viewport px at any zoom (digit-sized since plan 04-10, like
+        # the handles).
         self._text_overlay = QGraphicsTextItem(self)
         self._text_overlay.setZValue(_TEXT_OVERLAY_Z)
         self._text_overlay.setFont(_OVERLAY_FONT)
@@ -343,8 +349,11 @@ class BoxItem(QGraphicsRectItem):
         self._overlay_zoom = 1.0
         # The badge = a background rect + a digit text child, both ignoring
         # transformations (constant viewport px). Digit is a child of the rect
-        # so it inherits the rect's position/visibility.
-        self._badge = QGraphicsRectItem(0.0, 0.0, _BADGE_W, _BADGE_H, self)
+        # so it inherits the rect's position/visibility. The initial 1x1 rect
+        # is never rendered with a number — refresh_badge (below) sizes the
+        # rect from the digit measurement (plan 04-10) and hides the badge
+        # while bubble_no is None.
+        self._badge = QGraphicsRectItem(0.0, 0.0, 1.0, 1.0, self)
         self._badge.setFlag(
             QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
         )
@@ -358,8 +367,14 @@ class BoxItem(QGraphicsRectItem):
         )
         self._badge_digit.setDefaultTextColor(_BADGE_DIGIT_COLOR)
         self._badge_digit.setFont(_BADGE_DIGIT_FONT)
-        # Centre the digit inside the badge rect.
-        self._badge_digit.setPos(3.0, -1.0)
+        # Measurement basis: the tight glyph line box — with the default
+        # QTextDocument margin (4.0) the bounding rect is inflated by 8px per
+        # axis (probed: '1' is 24x27 at margin 4 vs 16x19 at margin 0), which
+        # would over-size the badge (plan 04-10).
+        self._badge_digit.document().setDocumentMargin(0.0)
+        # The centered position is computed dynamically by refresh_badge from
+        # the measured digit size (plan 04-10).
+        self._badge_digit.setPos(0.0, 0.0)
         # Plan 04-05 edit-mode state (UI-SPEC §15, D-07): while the inline
         # editor is active the box cannot be moved or resized. The canvas's
         # mouse-press dispatch guard is the PRIMARY disable; this flag + the
@@ -595,23 +610,45 @@ class BoxItem(QGraphicsRectItem):
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
 
-        Hidden when ``pagebox.bubble_no`` is None. Otherwise shown at the
-        **TL corner, OUTSIDE the box rect** (offset ``(-badge_w-2, -badge_h-2)``)
-        so it never overlaps the TL handle hit area (RESEARCH Pitfall 7). If the
-        outside position would clip off-canvas at the page TL edge, the badge
-        flips to inside-top-left (inset 2px) per UI-SPEC §17. The border pen is
-        amber (``#f5a623``) for a manual-override badge (D-16), matte
-        (``#0b0b0e``) for an auto-numbered one.
+        Hidden when ``pagebox.bubble_no`` is None. Otherwise DIGIT-SIZED (plan
+        04-10): the digit text is set FIRST, measured via its LOCAL bounding
+        rect (document margin 0 = the tight glyph line box, so the badge hugs
+        its number instead of clipping like the old fixed 20x14 rect), and the
+        badge rect is resized to digit_w + 2x4 by digit_h + 2x2 padding with
+        the digit re-centered. Then shown at the **TL corner, OUTSIDE the box
+        rect** (offset ``(-badge_w-2, -badge_h-2)`` computed from the ACTUAL
+        badge size) so it never overlaps the TL handle hit area (RESEARCH
+        Pitfall 7). If the outside position would clip off-canvas at the page
+        TL edge, the badge flips to inside-top-left (inset 2px) per UI-SPEC
+        §17. The border pen is amber (``#f5a623``) for a manual-override badge
+        (D-16), matte (``#0b0b0e``) for an auto-numbered one.
         """
         if self.pagebox.bubble_no is None:
             self._badge.setVisible(False)
             return
+        # Measure + size + center FIRST, then place — the placement reads the
+        # ACTUAL badge size (one source of truth with the setRect above, so
+        # the TL-outside offset and the edge-flip decision always match the
+        # rendered geometry). The digit's LOCAL bounding rect is viewport px
+        # (the badge/digit ignore transformations) — never sceneBoundingRect
+        # on the ignores-transformations child.
+        self._badge_digit.setPlainText(str(self.pagebox.bubble_no))
+        dbr = self._badge_digit.boundingRect()
+        # Floor the measured size (degenerate-measurement guard, T-4-16g — a
+        # zero/negative rect must not produce an invalid badge rect, mirroring
+        # the T-4-13g floor discipline).
+        dw = max(1.0, dbr.width())
+        dh = max(1.0, dbr.height())
+        bw = dw + 2.0 * _BADGE_PAD_W
+        bh = dh + 2.0 * _BADGE_PAD_H
+        self._badge.setRect(0.0, 0.0, bw, bh)
+        self._badge_digit.setPos((bw - dw) / 2.0, (bh - dh) / 2.0)
         # Position at the TL corner, OUTSIDE the box rect (UI-SPEC §17). The
         # badge ignores transformations, so pos() is in SCENE coords; use the
         # scene-space rect so a moved/resized box keeps the badge tracking.
         rect = self.sceneBoundingRect()
-        bx = rect.left() - _BADGE_W - _BADGE_OFFSET
-        by = rect.top() - _BADGE_H - _BADGE_OFFSET
+        bx = rect.left() - bw - _BADGE_OFFSET
+        by = rect.top() - bh - _BADGE_OFFSET
         # Edge-flip: if the outside position would clip off the page TL edge,
         # flip to inside-top-left (inset 2px). sceneRect reflects the image
         # bounds (set_image -> setSceneRect); falls back to no-flip when the
@@ -628,7 +665,6 @@ class BoxItem(QGraphicsRectItem):
             self._badge.setPen(_BADGE_OUTLINE_OVERRIDE)
         else:
             self._badge.setPen(_BADGE_OUTLINE_AUTO)
-        self._badge_digit.setPlainText(str(self.pagebox.bubble_no))
         self._badge.setVisible(True)
 
     def set_text_overlay_visible(self, visible: bool) -> None:
