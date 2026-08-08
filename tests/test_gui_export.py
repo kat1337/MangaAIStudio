@@ -259,3 +259,164 @@ def test_export_action_gating(qtbot, tmp_path) -> None:
     assert window.action_export_ocr_json.isEnabled() is False, (
         "async op running -> action must be disabled"
     )
+
+
+# ===========================================================================
+# Task 2 — Batch Export OCR JSON: Worker dispatch + progress + Cancel +
+# mixed-result copy (runs the REAL batch_export_ocr on a QThreadPool worker)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_batch_export_writes_all_pages(qtbot, tmp_path) -> None:
+    """The batch writes every page with per-page D-22 placement + dims.
+
+    3-page session with page 2 geometry-altered: 3 JSON files total — 2
+    sidecars beside their sources + 1 inside cleaned/ (created if missing);
+    each parses with the current dims; the completion flash shows the ok
+    count.
+    """
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+    _seed_box_on_canvas(window)  # box on the current page (page 1)
+    window.image_files[1].geometry_altered = True  # page 2 -> cleaned/
+
+    window.action_batch_export_ocr.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    sidecar_1 = folder / "page_01_ocr.json"
+    sidecar_3 = folder / "page_03_ocr.json"
+    cleaned_out = folder / "cleaned" / "page_02_ocr.json"
+    assert sidecar_1.is_file(), "pristine page 1 -> sidecar beside the source"
+    assert cleaned_out.is_file(), "altered page 2 -> cleaned/ (created)"
+    assert sidecar_3.is_file(), "pristine page 3 -> sidecar beside the source"
+
+    canvas_dims = window.canvas.get_image_numpy().shape[:2]
+    for path, expected_dims in (
+        (sidecar_1, canvas_dims),  # current page: dims from the canvas
+        (cleaned_out, (16, 16)),  # non-current: source dims (16x16 page)
+        (sidecar_3, (16, 16)),
+    ):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["version"] == "1"
+        assert data["img_width"] == expected_dims[1]
+        assert data["img_height"] == expected_dims[0]
+    # The current page's box made it into its own JSON only.
+    assert len(json.loads(sidecar_1.read_text(encoding="utf-8"))["blocks"]) == 1
+    assert json.loads(cleaned_out.read_text(encoding="utf-8"))["blocks"] == []
+
+    # Completion flash: the clean-run copy with the ok count.
+    assert "Exported OCR JSON for 3 page(s)." in window.status_bar_left.text()
+    assert "failed" not in window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_batch_export_mixed_failure_count(qtbot, tmp_path) -> None:
+    """A page that fails mid-batch is isolated: the completion flash carries
+    the failure count, the other files still write, and no modal opens."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+    window.image_files[1].geometry_altered = True  # page 2's target = cleaned/
+
+    # Sabotage page 2's D-22 target: a FILE named "cleaned" blocks the mkdir
+    # (FileExistsError, an OSError) -> that page fails through the REAL
+    # per-page isolation path; pages 1 + 3 (sidecars) are unaffected.
+    blocker = folder / "cleaned"
+    blocker.write_text("i am a file, not a directory", encoding="utf-8")
+
+    window.action_batch_export_ocr.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    assert (folder / "page_01_ocr.json").is_file()
+    assert (folder / "page_03_ocr.json").is_file()
+    assert blocker.exists() and blocker.read_text(
+        encoding="utf-8"
+    ) == "i am a file, not a directory", "the sabotaged target stays untouched"
+
+    # Completion flash: the mixed-run copy carries the failure count (the
+    # batch path never opens a modal — per-page isolation, D-04).
+    status = window.status_bar_left.text()
+    assert "Exported OCR JSON for 2 page(s)." in status
+    assert "1 page(s) failed \u2014 see the log." in status
+
+
+@pytest.mark.gui
+def test_batch_export_cancel(qtbot, tmp_path, monkeypatch) -> None:
+    """Cancel mid-batch: partial files written, "Cancelled" status, no crash,
+    _op_running cleared after (the Phase 2 Cancel Batch path)."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+
+    # Capture the worker-injected abort flag so the blocking write wrapper can
+    # hold the worker until cancel flips it (test_gui_batch.py's cancel-test
+    # pattern).
+    captured: dict = {}
+    real_batch = ocr_export.batch_export_ocr
+
+    def _recording_batch(pages, progress_callback=None, abort_flag=None):
+        captured["abort_flag"] = abort_flag
+        return real_batch(pages, progress_callback=progress_callback,
+                          abort_flag=abort_flag)
+
+    monkeypatch.setattr(ocr_export, "batch_export_ocr", _recording_batch)
+
+    real_write = ocr_export.write_page_ocr_json
+
+    def _blocking_write(*args, **kwargs):
+        result = real_write(*args, **kwargs)  # page 1's file lands for real
+        flag = captured.get("abort_flag")
+        if flag is not None:
+            for _ in range(400):  # hold the worker until cancel flips the flag
+                if flag.get():
+                    break
+                time.sleep(0.005)
+        return result
+
+    monkeypatch.setattr(ocr_export, "write_page_ocr_json", _blocking_write)
+
+    window.action_batch_export_ocr.trigger()
+    # Page 1's JSON existing means the worker is now holding in the wrapper.
+    qtbot.waitUntil(
+        lambda: (folder / "page_01_ocr.json").exists(), timeout=5000
+    )
+    window._cancel_batch()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # Partial work: page 1 wrote; pages 2/3 never started (abort at loop top).
+    assert (folder / "page_01_ocr.json").is_file()
+    assert not (folder / "page_02_ocr.json").exists()
+    assert not (folder / "page_03_ocr.json").exists()
+    # Bug B pattern: the stale per-page progress text is gone; "Cancelled".
+    assert "Cancelled" in window.status_bar_left.text()
+    assert "Exporting OCR JSON" not in window.status_bar_left.text()
+    assert window._op_running is False and window._batch_active is False
+
+
+@pytest.mark.gui
+def test_batch_export_gating_and_progress(qtbot, tmp_path) -> None:
+    """The batch action is disabled while another batch runs; the progress
+    handler renders {done}/{total} and the determinate bar advances."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+    assert window.action_batch_export_ocr.isEnabled() is True
+
+    window.action_batch_export_ocr.trigger()
+    # Synchronous at dispatch: the batch is live -> the action re-disables
+    # (the _batch_active gate), and the single-page export also blocks.
+    assert window.action_batch_export_ocr.isEnabled() is False, (
+        "the batch action must be disabled while a batch runs (_batch_active)"
+    )
+    assert window.action_export_ocr_json.isEnabled() is False, (
+        "Export OCR JSON… must be disabled while a batch runs (_op_running)"
+    )
+
+    # The progress handler renders the UI-SPEC {done}/{total} copy + the
+    # determinate bar advances (invoked directly — the queued worker signal
+    # is racy to capture, the test_gui_batch.py precedent).
+    window._batch_ocr_total = 3
+    window._on_batch_ocr_export_progress((33, "page_02.png"))
+    status = window.status_bar_left.text()
+    assert "Exporting OCR JSON\u2026" in status
+    assert "1/3" in status and "page_02.png" in status
+    assert window.progress_bar.value() == 33
+
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert window.action_batch_export_ocr.isEnabled() is True, (
+        "the batch action must re-enable after the batch finishes"
+    )

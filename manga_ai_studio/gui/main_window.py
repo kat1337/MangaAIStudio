@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import math
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 
@@ -128,6 +129,11 @@ class MainWindow(QMainWindow):
         # single-page detect/inpaint). Cleared unconditionally in
         # ``_on_batch_cleanup`` (Pitfall 7).
         self._batch_active = False
+        # Plan 05-08: the page count of the running OCR-JSON batch — the
+        # progress handler derives {done}/{total} from the worker's
+        # (percent, name) emissions (batch_export_ocr emits per-page percent,
+        # not a done count). 0 while no OCR batch runs.
+        self._batch_ocr_total = 0
 
         # Bug A (checkpoint rework): the current batch's mode ("detect" /
         # "clean" / "detect_and_clean") so ``_on_batch_progress`` can render
@@ -382,6 +388,24 @@ class MainWindow(QMainWindow):
         self.batch_menu.addAction(self.action_batch_detect)
         self.batch_menu.addAction(self.action_batch_clean)
         self.batch_menu.addAction(self.action_batch_detect_and_clean)
+
+        # Batch Export OCR JSON (D-21, plan 05-08): PROJ-03 batch export of
+        # every open page's D-19 _ocr.json (fast, model-free). No ellipsis —
+        # starts immediately, mirroring the three cleaning batch actions
+        # (UI-SPEC §Copywriting). Per-page D-22 placement + the Phase 2 batch
+        # progress surface (status-left + determinate bar + Cancel Batch).
+        self.action_batch_export_ocr = QAction("Batch Export OCR JSON", self)
+        self.action_batch_export_ocr.setStatusTip(
+            "Export every page of the open folder as _ocr.json (fast, no"
+            " models)."
+        )
+        self.action_batch_export_ocr.triggered.connect(
+            self._dispatch_batch_ocr_export
+        )
+        # Enabled iff a folder is open AND no op is running AND no batch is
+        # already running (refreshed in _refresh_action_states).
+        self.action_batch_export_ocr.setEnabled(False)
+        self.batch_menu.addAction(self.action_batch_export_ocr)
 
         # UI-SPEC surface 21 (executor-authoritative order): Open Image… /
         # Open Folder… / ─ / Open Project… / Recent Projects ▸ / Recent
@@ -1027,10 +1051,16 @@ class MainWindow(QMainWindow):
             page_open and self.canvas.box_count() > 0 and not self._op_running
         )
 
-        # Plan 05-08 (D-21): Export OCR JSON… needs a page open + no async op
-        # (the UI-SPEC §27 gate).
+        # Plan 05-08 (D-21): Export OCR JSON… needs a page open + no async op;
+        # Batch Export OCR JSON needs a folder open + no op running + no batch
+        # already running (the UI-SPEC §27 gate — _batch_active blocks a
+        # second batch while one runs, mirroring the three cleaning batch
+        # actions).
         self.action_export_ocr_json.setEnabled(
             page_open and not self._op_running
+        )
+        self.action_batch_export_ocr.setEnabled(
+            folder_open and not self._op_running and not self._batch_active
         )
 
         # Plan 05-06 image ops (Tools -> Image section): Rotate/Levels/Resize
@@ -4328,6 +4358,166 @@ class MainWindow(QMainWindow):
             )
             return
         self._show_transient_status(f"Exported OCR JSON for page {idx + 1}.")
+
+    def _dispatch_batch_ocr_export(self) -> None:
+        """Batch menu -> Batch Export OCR JSON: dispatch ``batch_export_ocr``
+        on a single Worker (D-21, UI-SPEC surface 27 + §E6/E9 rows).
+
+        Mirrors ``_dispatch_batch`` exactly (main_window.py's FLOW-03
+        template): the flush seam runs BEFORE the pages are projected
+        (Pitfall 7 — ``_snapshot_current_page`` + the Bug-D mask flush make
+        the batch describe the live canvas), each page projects to an
+        ``ExportPage`` (dims per page: the current page from the canvas, the
+        others from the ``ImageFile``'s known current-image numpy when
+        present, else the source-file dims via PIL), the Worker runs the
+        model-free loop with ``abort_signal`` auto-injection, and the Phase 2
+        batch surface drives the status/progress/Cancel machinery
+        (``_op_running`` + ``_batch_active`` + determinate bar + Cancel Batch
+        enablement).
+
+        ``batch_export_ocr`` performs per-page failure isolation (D-04) and
+        logs only page stems + error strings (T-05-05), so no per-page modal
+        ever opens; the completion copy carries the failure count instead.
+        """
+        if self._op_running or self._batch_active:
+            return
+        if not self.image_files:
+            return
+
+        # Pitfall 7 flush seam: the D-11 seam only persists the outgoing page
+        # on NAVIGATION; dispatching from the current page skips it. Flush the
+        # canvas state (boxes + current image + mask) into the data model
+        # BEFORE projecting the pages, so the export describes the live canvas.
+        self._snapshot_current_page()
+        self._flush_current_canvas_mask_to_data_model()
+
+        from manga_ai_studio.core.ocr_export import ExportPage, batch_export_ocr
+
+        current_idx = self._current_page_index()
+        pages = []
+        for i, imf in enumerate(self.image_files):
+            if i == current_idx:
+                img_np = self.canvas.get_image_numpy()
+                if img_np is None:
+                    return
+                img_h, img_w = img_np.shape[:2]
+            elif imf.current_image is not None:
+                img_h, img_w = imf.current_image.shape[:2]
+            else:
+                # D-22: dims describe the CURRENT page state — for a never-
+                # flushed page that is the source image's dims (read via PIL).
+                with Image.open(imf.path) as src:
+                    img_w, img_h = src.size
+            pages.append(
+                ExportPage(
+                    path=imf.path,
+                    boxes=imf.boxes if imf.boxes is not None else [],
+                    img_w=img_w,
+                    img_h=img_h,
+                    geometry_altered=imf.geometry_altered,
+                )
+            )
+
+        # The task fn is a partial over the projected pages; Worker injects
+        # progress_callback + abort_flag as the last two kwargs
+        # (worker_thread.py:103-140 — the batch_export_ocr contract).
+        task_fn = partial(batch_export_ocr, pages)
+        worker = Worker(task_fn, abort_signal=self.batch_abort_requested)
+        worker.signals.progress.connect(self._on_batch_ocr_export_progress)
+        worker.signals.result.connect(self._on_batch_ocr_export_finished)
+        worker.signals.error.connect(self._on_batch_ocr_export_error)
+        # Pitfall 7: finished ALWAYS fires (Worker.run's finally), so cleanup
+        # always runs even on abort/error; aborted also routes to the same
+        # idempotent cleanup handler.
+        worker.signals.aborted.connect(self._on_batch_ocr_export_cleanup)
+        worker.signals.finished.connect(self._on_batch_ocr_export_cleanup)
+        worker.setAutoDelete(True)
+
+        # D-08: the batch blocks the editor. Disable navigation (T-02-05 race
+        # mitigation) + set the op-running flags; the canvas stays visible.
+        self._op_running = True
+        self._batch_active = True
+        self._batch_ocr_total = len(pages)
+        self._batch_cancelled = False
+        self.file_table.setEnabled(False)
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText(f"Exporting OCR JSON\u2026 0/{len(pages)}")
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_batch_ocr_export_progress(self, payload) -> None:
+        """Update the status bar + progress bar per page (UI-SPEC §E9).
+
+        The worker emits ``(percent, name)`` once per page
+        (batch_export_ocr's D-10 shape); the {done}/{total} copy is derived
+        from the percent against the dispatched page count.
+        """
+        if isinstance(payload, tuple) and len(payload) == 2:
+            percent, name = payload
+        else:
+            return
+        total = self._batch_ocr_total or 0
+        done = round(int(percent) * total / 100) if total else 0
+        self.progress_bar.setValue(int(percent))
+        self.status_bar_left.setText(
+            f"Exporting OCR JSON\u2026 {done}/{total} \u2014 {name}"
+        )
+
+    def _on_batch_ocr_export_finished(self, result: dict) -> None:
+        """Flash the batch completion copy (UI-SPEC §Copywriting batch rows).
+
+        Clean run: "Exported OCR JSON for {n} page(s)." Mixed run: the
+        failure-count form appended. Per-page failures are ALREADY logged by
+        ``batch_export_ocr`` (stems + error strings only — T-05-05), so the
+        handler stays UI-only; no per-page modal (Phase 2 batch-report
+        discipline).
+        """
+        ok = result.get("ok", 0) if isinstance(result, dict) else 0
+        failed = result.get("failed", []) if isinstance(result, dict) else []
+        if failed:
+            self._show_transient_status(
+                f"Exported OCR JSON for {ok} page(s)."
+                f" {len(failed)} page(s) failed \u2014 see the log."
+            )
+        else:
+            self._show_transient_status(f"Exported OCR JSON for {ok} page(s).")
+        self._refresh_action_states()
+
+    def _on_batch_ocr_export_error(self, worker_error) -> None:
+        """Log the OCR-export batch failure + show the error chip (T-01-08
+        mirror). The full ``WorkerError`` (traceback included) goes to loguru;
+        ``_on_batch_ocr_export_cleanup`` (finished always fires) re-enables
+        the editor.
+        """
+        logger.error(f"OCR batch export failed: {worker_error}")
+        self._show_error_chip("Batch export error")
+        self.status_bar_left.setText("Batch export failed")
+
+    def _on_batch_ocr_export_cleanup(self, _args) -> None:
+        """Unconditionally clear the OCR-export batch state (Pitfall 7).
+
+        Connected to BOTH ``aborted`` and ``finished`` (Worker.run's
+        ``finally`` always emits ``finished``), so the editor is never stuck
+        disabled. On a cancel the ``aborted`` signal fires instead of
+        ``result``, so this cleanup is the only place to render the
+        "Cancelled" status (the Bug B pattern — the stale per-page progress
+        text must not linger). The OCR-export batch mutates no canvas state,
+        so there is no mode-aware post-batch refresh to run (unlike the
+        cleaning batches).
+        """
+        cancelled = self._batch_cancelled
+        self._op_running = False
+        self._batch_active = False
+        self._batch_ocr_total = 0
+        self.file_table.setEnabled(True)  # T-02-05: re-enable navigation
+        self.progress_bar.hide()
+        self._refresh_action_states()
+        if cancelled:
+            self.status_bar_left.setText("Cancelled")
+            self._batch_cancelled = False
 
     def batch_detect(self) -> None:
         """File -> Batch -> Batch Detect: dispatch ``batch_detect`` (FLOW-03)."""
