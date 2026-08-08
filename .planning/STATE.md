@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-08-08T19:19:29.866Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-08-08T19:31:56.952Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 31
+  completed_plans: 32
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [████████░░] 82% (4/4 phases, 29/29 plans)
+Progress: [████████░░] 84% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -97,6 +97,7 @@ Progress: [████████░░] 82% (4/4 phases, 29/29 plans)
 | Phase 04 P10 | 12 | 2 tasks | 5 files |
 | Phase 05 P01 | 10 | 3 tasks | 4 files |
 | Phase 05-project-persistence-image-ops-export P05-02 | 25 | 3 tasks | 2 files |
+| Phase 05 P03 | 45m | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -197,6 +198,10 @@ Recent decisions affecting current work:
 - [Phase ?]: test_save_is_atomic fails os.replace on the 3rd call (after manifest + first page succeed) — proves the per-file temp+replace scheme never corrupts any target
 - [Phase ?]: Image ops core: crop geometry translated into POST-crop page coordinates (bbox + lines stay in one frame; TextBlock.xyxy == Box.as_tuple invariant)
 - [Phase ?]: levels_lut normalizes [min(black,white), max(black,white)] so white<=black can never render an inverted map (T-05-07; black==white degenerates to a monotone threshold)
+- [Phase ?]: ExportPage dataclass (path/boxes/img_w/img_h/geometry_altered) is the batch_export_ocr input shape - model-free projection so the exporter stays pure and 05-08 builds it from boxes_snapshot() + canvas dims
+- [Phase ?]: _ocr.json writes are atomic (temp file + os.replace in same dir) - a crash never leaves a half-written published-contract file
+- [Phase ?]: Abort is lazy-imported inside batch_export_ocr (function body) to keep the module-top import graph Qt-free while preserving the exact worker_thread exception identity
+- [Phase ?]: img_w/img_h validated strictly as int (ValueError on non-int, T-05-02) - silent float truncation would export coordinates that lie about the current page state
 
 ### Pending Todos
 
@@ -223,8 +228,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T19:19:29.835Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-08-08T19:31:46.450Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
