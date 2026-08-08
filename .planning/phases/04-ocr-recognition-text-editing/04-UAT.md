@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:40:00Z"
+updated: "2026-08-08T02:50:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -78,7 +78,9 @@ expected: |
   translation), the report shows applied + skipped counts; undo reverts in one batch
   entry; Load from File… reads a .txt into the paste area; a corrupt/non-UTF-8 file
   shows the "Couldn't read" dialog without crashing.
-result: [pending]
+result: issue
+reported: "The import works as expected EXCEPT bubble 1 can never be applied no matter what — even deleting and re-inputting 1 and pressing Enter, bubble 1 never gets assigned manually."
+severity: minor
 
 ### 7. Vertical-metadata toggle fallback
 expected: |
@@ -90,13 +92,29 @@ result: [pending]
 
 total: 7
 passed: 3
-issues: 2
-pending: 2
+issues: 3
+pending: 1
 skipped: 0
 blocked: 0
 ## Gaps
 
-- truth: "Manga RTL reading order matches actual panel flow on real layouts (side-by-side top panels, wide top panel, panel-within-panel)"
+- truth: "Bubble # 1 is assignable: a box can be manually numbered 1 via the Inspector (and [1]: translations match it)"
+  status: failed
+  reason: "User reported: bubble 1 can never be applied no matter what — deleting and re-inputting 1 + Enter never assigns it manually"
+  severity: minor
+  test: 6
+  artifacts: [manga_ai_studio/gui/inspector_panel.py]
+  missing: [unset sentinel != valid bubble 1]
+  diagnosis: |
+    Sentinel collision (inspector_panel.py): the spinbox range is 1..9999 and load_box
+    displays bubble_no=None as value 1 (line 221) with _loaded_bubble=1 (line 225). The
+    WR-01 no-op guard (_emit_bubble_if_changed, lines 355-364) then treats a user-entered
+    1 as "unchanged focus cycle" (number == _loaded_bubble) and drops the commit. Bubble 1
+    is a legitimate manga number but is indistinguishable from the unset placeholder.
+    Fix direction: use 0 as the unset sentinel (setRange(0, 9999) + setSpecialValueText
+    for 0), load None as 0, and let 1 pass the WR-01 guard; _on_inspector_bubble_committed
+    maps 0 → bubble_no=None (clearing) with 1..9999 → assign; keep D-16 manual_override
+    semantics (0 → no override pin; >=1 → pin True).
   status: failed
   reason: "User reported: Auto-Number RTL (Manga) misorders real panels — e.g. panel 1 at top correct, but panel 2 detected as the panel under bubble 1, panel 3 as the panel right of panel 2 below, actual panel 2 numbered 4. Manhwa LTR works. XY-Cut column algorithm does not handle complex manga layouts (side-by-side top panels, wide top panel, etc.). User requests: log this (bigger than fixable now); future 'draw panel' function so boxes can be placed within a panel."
   severity: major
