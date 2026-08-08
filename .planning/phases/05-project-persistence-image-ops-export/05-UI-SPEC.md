@@ -1,7 +1,8 @@
 ---
 phase: 5
 slug: project-persistence-image-ops-export
-status: draft
+status: approved
+reviewed_at: 2026-08-08
 shadcn_initialized: false
 preset: none
 created: 2026-08-08
@@ -166,26 +167,77 @@ No third-party UI component registries. No `npx shadcn` operations. The Phase 5 
 ## UI Considerations
 
 > Shape-rooted UI *state* coverage for the Phase 5 surfaces (empty / loading /
-> error / populated / partial / overflow / zero-one-many / long-text). Empty and
-> error COPY live in `## Copywriting Contract` above; this section covers state
-> coverage and references those rows (de-dup).
+> error / populated / partial / overflow / zero-one-many / long-text),
+> verified by the ui-consideration-probe (2026-08-08, post-checker-approval).
+> Empty and error COPY live in `## Copywriting Contract` above; this section
+> covers state coverage and references those rows (de-dup). Resolution model:
+> `covered` = truth string (lifts into plan-phase `must_haves`); `dismissed` =
+> reason-recorded non-applicability (audit trail). 10 elements probed; kinds
+> confirmed with the user (E6 = form+list+control, E8 = static-content, E10 =
+> media+control author overrides after unclassified detection).
 
-Applicable state considerations resolved: **12 covered, 0 backstop, 0 unresolved**
+Applicable state considerations resolved: **32 covered, 0 backstop, 0 unresolved, 25 dismissed**
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
-| empty | Recent Projects submenu | ✅ covered | Zero entries render the disabled "No recent projects yet." item + the always-present "Clear Menu" (mirrors Recent Files). Truth: `recent_projects` menu shows the empty label when the list is empty. |
-| empty | Save Project… with no session | ✅ covered | Action disabled in `_refresh_action_states` when zero pages are open; clean-session Save shows "No changes to save." Truth: action enabled iff ≥1 page open. |
-| loading | Batch Export OCR JSON | ✅ covered | Reuses the Phase 2 batch progress surface: "Exporting OCR JSON… {done}/{total}" + thin 3px determinate bar + Cancel Batch affordance. Model-free → fast; threading (Worker vs inline) is the planner's call (CONTEXT Claude's Discretion) — the UI surface is contracted either way. |
-| error | Open Project (corrupt/missing) | ✅ covered | "Couldn't open '{filename}'." + corrupt/newer-version path; `QMessageBox::Critical`; the previous session is NOT mutated (no partial load). |
-| error | Save/export write failure | ✅ covered | "Couldn't save '{name}'." + writable-folder path; loguru traceback; no data loss (the in-memory session stays intact and still dirty). |
-| error | Original file missing/mismatched (D-06) | ✅ covered | Non-fatal by design: page opens from the embedded image; `Show Original` (`P`) disabled + tooltip note; open-status flash "Original file not found — using the saved image." |
-| partial | Levels dialog (black ≥ white) | ✅ covered | Independent sliders; the live preview clamps internally so white > black always (executor: clamp white's slider minimum to black+1 and vice versa, or guard at apply — one mechanism, contracted behavior: preview never renders an inverted map). |
-| partial | Resize dialog (empty/zero fields, aspect lock) | ✅ covered | QSpinBox ranges enforce ≥1 px (1…100000); % mode 1…1000; aspect lock keeps ratio (width drives height, height follows); the "Result: {w} × {h} px" label always shows a valid size. |
-| partial | Crop dialog (out-of-bounds x/y/w/h) | ✅ covered | Spinbox ranges tie w ≤ W−x, h ≤ H−y (bounds recompute when x/y change); apply-time re-validation rejects anything out of range (dialog stays open with the range-corrected values). |
-| zero-one-many | Page `.mas` vs manifest open (D-09) | ✅ covered | One page file with a sibling manifest → chapter-climb prompt (Open Project / Open Page Only); zero pages in a manifest → error dialog (corrupt-project copy); many pages → manifest session restores the full sidebar (D-08). |
-| long-text | Project/page names in window title + Recent Projects | ✅ covered | OS title-bar truncation is native; Recent Projects entries elide with the full path in the tooltip; the dirty `*` suffix always renders last. |
-| overflow | Status-bar transient flashes | ✅ covered | Inherited 3-field status bar; save/export/image-op flashes overwrite the left field then revert to the box-count/idle line (existing pattern). |
+| empty | Recent Projects submenu (E1) | ✅ covered | Zero entries render the disabled "No recent projects yet." item + the always-present "Clear Menu" (mirrors Recent Files). Truth: `recent_projects` menu shows the empty label when the list is empty. |
+| loading | Project-persistence menu actions (E1) | ✅ covered | Save Project… / Save Project As… / Open Project… / Recent Projects entries disabled via `_refresh_action_states` while `_op_running`; progress surfaces live on the status bar (§E9). Truth: menu actions enabled iff no async op is running. |
+| error | Open Project (corrupt/missing) (E1) | ✅ covered | "Couldn't open '{filename}'." + corrupt/newer-version path; `QMessageBox::Critical`; the previous session is NOT mutated (no partial load). |
+| populated | Recent Projects with entries (E1) | ✅ covered | Non-empty list: "Project — {folder-name}" entries, max 8, full path in tooltip, plus Clear Menu. Truth: entries render per contract when the list is non-empty. |
+| partial | Dirty gate / Unsaved Changes prompt (E1) | ✅ covered | Quit, window close, Open Project…, Open Image…, Open Folder… all run the [Save] [Discard] [Cancel] prompt first when any page is dirty (D-07). Truth: prompt shown iff session dirty and about to be replaced. |
+| overflow | Recent Projects list cap (E1) | ✅ covered | List capped at 8 (`QSettings`-persisted, mirroring Recent Files); older entries drop off. Truth: submenu renders max 8 entries. |
+| zero-one-many | Page `.mas` vs manifest open (D-09) (E1) | ✅ covered | One page file with a sibling manifest → chapter-climb prompt (Open Project / Open Page Only); zero pages in a manifest → error dialog (corrupt-project copy); many pages → manifest session restores the full sidebar (D-08). |
+| long-text | Project/page names in window title + Recent Projects (E1) | ✅ covered | OS title-bar truncation is native; Recent Projects entries elide with the full path in the tooltip; the dirty `*` suffix always renders last. |
+| loading | Canvas Crop tool (E2) | dismissed | Crop is a synchronous local drag interaction with no async work — no in-flight surface exists. |
+| error | Canvas Crop tool (E2) | dismissed | No failure mode: the slice is a synchronous local op, silent by D-14, recoverable via Ctrl+Z. |
+| overflow | Canvas Crop tool (E2) | dismissed | Scene-px geometry is page-bounded — a drag beyond the canvas clamps to the page; no container overflow. |
+| long-text | Canvas Crop tool (E2) | dismissed | No text on the crop surface (dashed border + dim-out overlay only). |
+| empty | Numeric Crop dialog (E3) | ✅ covered | Spinboxes are initialized to the FULL current page bounds (x=0, y=0, w=W, h=H) — the form is never empty. Truth: dialog opens with full-bounds values. |
+| loading | Numeric Crop dialog (E3) | dismissed | Synchronous modal dialog — no in-flight surface. |
+| error | Numeric Crop dialog (E3) | ✅ covered | Apply-time re-validation rejects anything out of range; the dialog stays open with range-corrected values (copy: none needed — spinbox ranges make invalid input near-impossible; guard covers programmatic edge cases). |
+| populated | Numeric Crop dialog (E3) | ✅ covered | Default state = full page bounds; [Apply] applies image+mask slice, drops/clips boxes with count in the status flash. Truth: dialog defaults to the current page bounds. |
+| partial | Numeric Crop dialog (E3) | ✅ covered | Width range 1…W−x recomputed when X changes; Height 1…H−y recomputed when Y changes. Truth: spinbox bounds always respect W−x / H−y. |
+| overflow | Numeric Crop dialog (E3) | ✅ covered | Spinbox ranges clamp (w ≤ W−x, h ≤ H−y); out-of-range is impossible via the widgets. Truth: bounds never exceed the page. |
+| zero-one-many | Numeric Crop dialog (E3) | dismissed | Fixed 4-field form — no item-count semantics apply. |
+| long-text | Numeric Crop dialog (E3) | dismissed | Numeric-only spinbox fields — no free text. |
+| empty | Levels dialog (E4) | dismissed | Controls always carry defaults (black 0 / white 255 / gamma 1.00) — no empty state. |
+| loading | Levels dialog (E4) | dismissed | Live preview is a synchronous numpy transform in the modal's nested event loop — no in-flight surface. |
+| error | Levels dialog (E4) | dismissed | No failure path: Cancel restores the detached pre-dialog image copy exactly; Apply pushes one `levels` entry. |
+| populated | Levels dialog (E4) | ✅ covered | Defaults (0 / 255 / 1.00) + live in-place canvas preview on every control change. Truth: controls open at defaults and the preview shows the transform live. |
+| partial | Levels dialog — black ≥ white (E4) | ✅ covered | Independent sliders; the preview clamps internally so white > black always (executor: clamp white's slider minimum to black+1 and vice versa, or guard at apply — one mechanism, contracted behavior: preview never renders an inverted map). |
+| overflow | Levels dialog (E4) | dismissed | Slider + spinbox ranges bound all inputs (0…255, 0.10…4.00) — no overflow. |
+| long-text | Levels dialog (E4) | dismissed | Numeric controls only — no free text. |
+| empty | Resize dialog (E5) | ✅ covered | QSpinBox ranges enforce ≥1 px (1…100000; % mode 1…1000) — zero/empty fields are impossible. Truth: width/height always ≥1. |
+| loading | Resize dialog (E5) | dismissed | Synchronous modal — no in-flight surface. |
+| error | Resize dialog (E5) | dismissed | No failure path: ranges prevent invalid input; apply is a synchronous local op (D-14 silent + Ctrl+Z). |
+| populated | Resize dialog (E5) | ✅ covered | Live preview label "Result: {w} × {h} px" updates on every change and always shows a valid size. Truth: the label renders the current width × height. |
+| partial | Resize dialog — aspect lock (E5) | ✅ covered | Aspect lock (checked by default, D-13) keeps the ratio: the dominant field drives, the other recomputes (rounded, ≥1). Truth: editing Width recomputes Height and vice versa while locked. |
+| overflow | Resize dialog (E5) | ✅ covered | Ranges clamp (1…100000 px / 1…1000 %) — no overflow past bounds. Truth: spinbox ranges enforce the caps. |
+| zero-one-many | Resize dialog (E5) | dismissed | Fixed 2-field form + toggle — no item-count semantics. |
+| long-text | Resize dialog (E5) | dismissed | Numeric fields + short muted label — no free text. |
+| empty | `_ocr.json` export — zero-box pages (E6) | ✅ covered | Zero-box pages still export (empty `blocks[]`/`lines[]`) — no gate, no confirm. Truth: export writes an empty-block JSON for a box-free page. |
+| loading | Batch Export OCR JSON (E6) | ✅ covered | Reuses the Phase 2 batch progress surface: "Exporting OCR JSON… {done}/{total}" + thin 3px determinate bar + Cancel Batch affordance. Model-free → fast; threading (Worker vs inline) is the planner's call (CONTEXT Claude's Discretion) — the UI surface is contracted either way. |
+| error | Export write failure (E6) | ✅ covered | Save-failure dialog copy ("Couldn't save '{name}'." + writable-folder path); batch completion reports "…{m} page(s) failed — see the log." (no per-page modal). Truth: failures surface in the shared error copy. |
+| populated | Export success (E6) | ✅ covered | Transient "Exported OCR JSON for page {n}." / batch "Exported OCR JSON for {n} page(s)." Truth: success flashes on completion. |
+| partial | D-22 location rule (E6) | ✅ covered | Pristine page → source page folder (sidecar); geometry-altered page (crop/rotate/resize since load) → `cleaned/` sibling folder (created if missing); user may override in the dialog. Truth: default directory follows the D-22 rule. |
+| overflow | Export filename (E6) | dismissed | Native `QFileDialog.getSaveFileName` handles long paths; default name is page-stem based ({page-stem}_ocr.json). |
+| zero-one-many | Single vs batch export (E6) | ✅ covered | Single-page export (Ctrl+Shift+E, Text menu) and Batch Export OCR JSON (Batch menu) are distinct surfaces with distinct feedback. Truth: both surfaces exist per §27. |
+| long-text | Export filenames/paths (E6) | dismissed | Native Qt file dialog wraps/elides long paths — no custom layout at risk. |
+| loading | Chapter Detected prompt (E7) | dismissed | Modal synchronous prompt — no in-flight surface. |
+| error | Chapter Detected prompt — corrupt/missing manifest (E7) | ✅ covered | Corrupt/newer-version manifest → corrupt-project error dialog; Esc cancels the action entirely, returning to the previous session unchanged. Truth: no sibling manifest opens the page standalone; corrupt manifest errors. |
+| long-text | Chapter Detected prompt (E7) | dismissed | `QMessageBox` wraps the body natively ("'{filename}' is part of the project '{project-name}' ({n} pages)."). |
+| overflow | Error dialogs (E8) | dismissed | Single `QMessageBox::Critical` box — no list/container with overflow risk. |
+| long-text | Error dialogs (E8) | dismissed | Native QMessageBox wraps long filenames/paths — copy is short and specific. |
+| empty | Status bar — idle left field (E9) | ✅ covered | Flashes overwrite the left field then revert to the box-count/idle line; a clean-session Save shows "No changes to save." Truth: the left field reverts to the idle line after each transient flash. |
+| loading | Status bar — batch progress (E9) | ✅ covered | "Exporting OCR JSON… {done}/{total}" overwrites status-bar left for the duration; reverts on completion (inherited Phase 2 batch-progress pattern). Truth: progress overwrites then reverts. |
+| error | Status bar (E9) | dismissed | Errors surface in dialogs (E8 copy), not the status bar — by design. |
+| partial | Status bar — mixed batch result (E9) | ✅ covered | Completion with failures: "Exported OCR JSON for {n} page(s). {m} page(s) failed — see the log." Truth: failure count is appended to the completion flash. |
+| long-text | Status bar — transient flashes (E9) | ✅ covered | Flash text is short and fixed-form; long content never enters the bar (details go to the log). Truth: flashes are fixed-form strings. |
+| empty | Show Original — no page open (E10) | ✅ covered | Action is disabled when no page is open (`_refresh_action_states` gating). Truth: `P` disabled with zero pages. |
+| loading | Show Original toggle (E10) | dismissed | Synchronous preview toggle — no in-flight surface. |
+| error | Show Original — original missing/mismatched (D-06) (E10) | ✅ covered | Non-fatal by design: page opens from the embedded image; `Show Original` (`P`) disabled + tooltip "Show Original (P) — original file not found."; open-status flash "Original file not found — using the saved image." |
+| populated | Show Original — normal sessions (E10) | ✅ covered | Image/folder/project-open sessions with verified originals: `P` toggles the original preview; after an image op the `_original_image_numpy` cache re-baselines to the post-op image (D-14). Truth: `P` toggles when the checksum verifies. |
+| long-text | Show Original tooltip (E10) | dismissed | Short fixed-form tooltip — no long-text risk. |
 
 ## Interaction & Surface Contracts (Phase 5 — the new + extended surfaces)
 
@@ -427,14 +479,14 @@ These are stack/implementation unknowns the UI-SPEC has *contracted around* (giv
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** {pending}
+**Approval:** APPROVED — gsd-ui-checker, 2026-08-08 (6/6 PASS, no FLAGs, no BLOCKs; UI-consideration probe: 32 covered / 0 backstop / 0 unresolved / 25 dismissed)
 
 ---
 
