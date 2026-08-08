@@ -185,7 +185,7 @@ Plans:
 
 **Gap-closure waves** (UAT round 3 — run via `/gsd-execute-phase 4 --gaps-only`)
 
-- [ ] 04-10-PLAN.md — *(Wave 1)* Badge sized to its number (digit measurement + re-center + actual-size placement) + bubble # 1 manually assignable (0-sentinel) — TEXT-05
+- [x] 04-10-PLAN.md — *(Wave 1)* Badge sized to its number (digit measurement + re-center + actual-size placement) + bubble # 1 manually assignable (0-sentinel) — TEXT-05
 
 **UI hint**: yes
 
@@ -225,7 +225,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 9/9 | In Progress|  |
+| 4. OCR Recognition & Text Editing | 10/10 | In Progress|  |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---

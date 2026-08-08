@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: verifying
-stopped_at: "Completed 04-09-PLAN.md (UAT test 1 round-2 gap closure: overlay fit-in-box + menu structure + toolbar)"
-last_updated: "2026-08-08T01:51:55.399Z"
+stopped_at: "Completed 04-10-PLAN.md (round-3 gap closure: badge digit-fit + bubble-1 sentinel)"
+last_updated: "2026-08-08T03:30:13.627Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
   completed_phases: 4
-  total_plans: 28
-  completed_plans: 28
+  total_plans: 29
+  completed_plans: 29
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 04 (ocr-recognition-text-editing) — EXECUTING
-Plan: 7 of 7
+Plan: 10 of 10
 Status: Phase complete — ready for verification
 Last activity: 2026-08-07 — Phase 04 execution started
 
-Progress: [██████████] 100% (3/4 phases, 21/26 plans)
+Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -93,6 +93,7 @@ Progress: [██████████] 100% (3/4 phases, 21/26 plans)
 | Phase 04 P07 | 7 | 2 tasks | 3 files |
 | Phase 04 P08 | 6 | 2 tasks | 4 files |
 | Phase 04 P09 | 11 | 3 tasks | 6 files |
+| Phase 04 P10 | 12 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -182,6 +183,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Overlay fit-in-box tests use platform-robust texts: Test A 'word ' x 59 + 'word' (Qt trims trailing whitespace at line ends) and Test E 'hello world' (wraps at 40pt on this platform; 'hello' would not — glyph metrics are narrower than the plan-reference platform). Assertions stay range-based.
 - [Phase ?]: Recent Files + Batch are standalone QMenu(title, self) children, never menuBar().addMenu(): the menubar-factory path leaves their menuActions in the top-level action list (Qt does not remove the action when addMenu re-parents a QMenu) — tests assert action-list membership, not parent().
 - [Phase ?]: Toolbar swap is a pure action swap (action_open_folder replaces action_open_image): _refresh_action_states gates neither open action and no icons are set, so the toolbar renders the text label exactly as before.
+- [Phase ?]: 04-10: badge digit-fit uses MEASURED digit geometry (this platform: 9.45x19 px/digit -> badges 17.45x23/26.9x23/36.36x23; the plan-probe 16x19/24x23/40x23 does not reproduce on this Qt/font stack) — tests derive expectations from the measured rect per the plan's NOTE; the plan's probe values remain docstring references
+- [Phase ?]: 04-10: Gap A carries 7 test cases (not 6) — the platform-robust placement tests cannot encode the fixed-size bug as hard-coded positions, so a separate cross-size ordering test (test_badge_tl_outside_tracks_size_across_digits) carries the RED gate; suite is 461 passed (451 + 10), a strict superset of the plan's 460
+- [Phase ?]: 04-10: 0 is the UNSET bubble sentinel (spinbox 0..9999 + setSpecialValueText em dash; load_box None->0; clear() resets 0; WR-01 guard unchanged); _on_inspector_bubble_committed maps 0 -> bubble_no=None + manual_override=False, 1..9999 -> assign + pin (D-16) — the model only ever receives None or 1..9999 (T-4-08 unchanged)
 
 ### Pending Todos
 
@@ -208,8 +212,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T01:51:44.768Z
-Stopped at: Completed 04-09-PLAN.md (UAT test 1 round-2 gap closure: overlay fit-in-box + menu structure + toolbar)
+Last session: 2026-08-08T03:30:13.600Z
+Stopped at: Completed 04-10-PLAN.md (round-3 gap closure: badge digit-fit + bubble-1 sentinel)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
