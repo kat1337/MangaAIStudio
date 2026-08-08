@@ -607,12 +607,31 @@ class MainWindow(QMainWindow):
         # _refresh_action_states).
         self.action_load_translations.setEnabled(False)
 
+        # Export OCR JSON (D-21, plan 05-08): PROJ-03 single-page export of
+        # the CURRENT page's D-19 _ocr.json via a Save As dialog (UI-SPEC
+        # surface 27). Shortcut: the Shift-modified E sequence — plain Ctrl+E
+        # is Export Page; the Shift-modified one is distinct (UI-SPEC
+        # §Keyboard Shortcut Reference). Default target follows D-22
+        # (pristine -> sidecar beside the source; geometry-altered ->
+        # cleaned/).
+        self.action_export_ocr_json = QAction("Export OCR JSON\u2026", self)
+        self.action_export_ocr_json.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.action_export_ocr_json.setStatusTip(
+            "Export the current page's boxes and text as a mokuro-style"
+            " _ocr.json for downstream typesetting tools."
+        )
+        self.action_export_ocr_json.triggered.connect(self._export_ocr_json)
+        # Enabled iff a page is open AND no async op is running (refreshed in
+        # _refresh_action_states).
+        self.action_export_ocr_json.setEnabled(False)
+
         text_menu.addAction(self.action_run_ocr)
         text_menu.addAction(self.action_ocr_all)
         text_menu.addSeparator()
         text_menu.addMenu(self.auto_number_menu)
         text_menu.addSeparator()
         text_menu.addAction(self.action_load_translations)
+        text_menu.addAction(self.action_export_ocr_json)
 
     def _build_tools_menu(self) -> None:
         # Detect Text (D) — wired in plan 03 (async CTD detection).
@@ -1006,6 +1025,12 @@ class MainWindow(QMainWindow):
         )
         self.action_auto_number_ltr.setEnabled(
             page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
+
+        # Plan 05-08 (D-21): Export OCR JSON… needs a page open + no async op
+        # (the UI-SPEC §27 gate).
+        self.action_export_ocr_json.setEnabled(
+            page_open and not self._op_running
         )
 
         # Plan 05-06 image ops (Tools -> Image section): Rotate/Levels/Resize
@@ -4232,6 +4257,77 @@ class MainWindow(QMainWindow):
         from manga_ai_studio.core.image_io import save_image_optimized
 
         save_image_optimized(image_rgb, Path(path), original=current)
+
+    def _export_ocr_json(self) -> None:
+        """Text menu -> Export OCR JSON… (the Shift-modified E shortcut):
+        write the CURRENT page's D-19 ``_ocr.json`` via the Save As dialog
+        (UI-SPEC surface 27, D-21/D-22, PROJ-03).
+
+        The flush seam runs FIRST (Pitfall 7): ``_snapshot_current_page()``
+        writes the live canvas state (boxes + current-image + mask) into the
+        outgoing ``ImageFile``, so the export always describes the CURRENT
+        page state (D-22) — including boxes the user drew/edited since the
+        last navigation. The current page is read from the stored
+        ``_last_page_index`` (the D-11 seam rule — never ``_current_page_index``
+        mid-navigation).
+
+        The dialog's default target follows D-22 via
+        ``default_ocr_json_path`` (pristine -> ``<stem>_ocr.json`` beside the
+        source; geometry-altered -> ``cleaned/``); the user may override.
+        Cancelling the dialog is a no-op. Write failures surface the
+        save-failure critical dialog (the T-05-12 copy) with the traceback
+        logged; success flashes the single-page copy (UI-SPEC §Copywriting,
+        page number 1-indexed matching the status-bar convention).
+        """
+        if self._op_running:
+            return
+        idx = self._last_page_index
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        # Pitfall 7: flush BEFORE reading — the export must describe the live
+        # canvas, not the last-navigation state.
+        self._snapshot_current_page()
+        imf = self.image_files[idx]
+        page_path = imf.path
+        boxes = imf.boxes if imf.boxes is not None else []
+        # D-22: the dims describe the CURRENT page state — read them from the
+        # just-flushed canvas, never from the source file.
+        img_np = self.canvas.get_image_numpy()
+        if img_np is None:
+            return
+        img_h, img_w = img_np.shape[:2]
+
+        from manga_ai_studio.core.ocr_export import (
+            default_ocr_json_path,
+            write_page_ocr_json,
+        )
+
+        default_target = default_ocr_json_path(page_path, imf.geometry_altered)
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Export OCR JSON", str(default_target), "OCR JSON (*_ocr.json)"
+        )
+        if not chosen:
+            return
+        chosen_path = Path(chosen)
+        try:
+            write_page_ocr_json(
+                boxes,
+                img_w,
+                img_h,
+                page_path,
+                imf.geometry_altered,
+                path_override=chosen_path,
+            )
+        except OSError as exc:
+            # T-05-12: the save-failure copy; the traceback goes to loguru.
+            logger.error(f"Export OCR JSON failed: {exc}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{chosen_path.name}'.",
+                "Check that the folder is writable and see the log for details.",
+            )
+            return
+        self._show_transient_status(f"Exported OCR JSON for page {idx + 1}.")
 
     def batch_detect(self) -> None:
         """File -> Batch -> Batch Detect: dispatch ``batch_detect`` (FLOW-03)."""
