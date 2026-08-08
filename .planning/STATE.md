@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: ocr-recognition-text-editing
 status: verifying
-stopped_at: "Completed 04-08-PLAN.md (UAT test 1 gap closure: overlay geometry tracking + zoom legibility)"
-last_updated: "2026-08-08T00:53:25.160Z"
+stopped_at: "Completed 04-09-PLAN.md (UAT test 1 round-2 gap closure: overlay fit-in-box + menu structure + toolbar)"
+last_updated: "2026-08-08T01:51:55.399Z"
 last_activity: 2026-08-07
 last_activity_desc: Phase 04 execution started
 progress:
   total_phases: 4
   completed_phases: 4
-  total_plans: 27
-  completed_plans: 27
+  total_plans: 28
+  completed_plans: 28
 ---
 
 # Project State
@@ -92,6 +92,7 @@ Progress: [██████████] 100% (3/4 phases, 21/26 plans)
 | Phase 04 P06 | 13 | 2 tasks | 3 files |
 | Phase 04 P07 | 7 | 2 tasks | 3 files |
 | Phase 04 P08 | 6 | 2 tasks | 4 files |
+| Phase 04 P09 | 11 | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -177,6 +178,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 04-08: RC-2/RC-3 apply on the single canvas zoom_changed slot — _on_zoom_changed_reposition_handles now forwards its (previously discarded) zoom to item.apply_overlay_zoom(zoom); covers wheel (820) / zoom_reset (827) / fit_to_window (851), the app default on every page load
 - [Phase ?]: 04-08: section-16 clamp scales the SCENE font (clamp(14*zoom,10,28)/zoom scene px) instead of the ItemIgnoresTransformations fallback — same rendered [10,28] viewport-px contract, overlay stays a normal zoom-scaling child
 - [Phase ?]: 04-08: the 2px overlay outline is reinterpreted as VIEWPORT-px (2/zoom scene px) — scene-px renders a sub-pixel halo below 100% (0 dark px at 0.25 zoom, measured); documented as a spec deviation note in 04-UI-SPEC.md; UAT test-1 legibility truth is the acceptance contract
+- [Phase ?]: The [10,28] viewport-px clamp bounds the box-adaptive BASE (14 x min(box_w, box_h)/100 vp); the RENDERED font may go below 10 vp down to the 5 vp floor via the bounded shrink-to-fit loop (plan 04-09, the plan's intentional contract change).
+- [Phase ?]: Overlay fit-in-box tests use platform-robust texts: Test A 'word ' x 59 + 'word' (Qt trims trailing whitespace at line ends) and Test E 'hello world' (wraps at 40pt on this platform; 'hello' would not — glyph metrics are narrower than the plan-reference platform). Assertions stay range-based.
+- [Phase ?]: Recent Files + Batch are standalone QMenu(title, self) children, never menuBar().addMenu(): the menubar-factory path leaves their menuActions in the top-level action list (Qt does not remove the action when addMenu re-parents a QMenu) — tests assert action-list membership, not parent().
+- [Phase ?]: Toolbar swap is a pure action swap (action_open_folder replaces action_open_image): _refresh_action_states gates neither open action and no icons are set, so the toolbar renders the text label exactly as before.
 
 ### Pending Todos
 
@@ -203,8 +208,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T00:53:25.126Z
-Stopped at: Completed 04-08-PLAN.md (UAT test 1 gap closure: overlay geometry tracking + zoom legibility)
+Last session: 2026-08-08T01:51:44.768Z
+Stopped at: Completed 04-09-PLAN.md (UAT test 1 round-2 gap closure: overlay fit-in-box + menu structure + toolbar)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

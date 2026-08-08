@@ -152,7 +152,7 @@ Plans:
   2. User can edit the recognized OCR text inline in a box to correct recognition mistakes
   3. User can add a manual translation as a second text field per box (clean seam for future machine translation)
 
-**Plans**: 8/8 plans executed
+**Plans**: 9/9 plans executed
 
 Plans:
 
@@ -181,7 +181,7 @@ Plans:
 
 **Gap-closure waves** (UAT test 1 round 2 — run via `/gsd-execute-phase 4 --gaps-only`)
 
-- [ ] 04-09-PLAN.md — *(Wave 1)* Overlay fit-in-box (wrap + box-adaptive font + shrink-to-fit) + menu-bar structure (Recent/Batch = File submenus) + toolbar Open Folder — TEXT-04
+- [x] 04-09-PLAN.md — *(Wave 1)* Overlay fit-in-box (wrap + box-adaptive font + shrink-to-fit) + menu-bar structure (Recent/Batch = File submenus) + toolbar Open Folder — TEXT-04
 
 **UI hint**: yes
 
@@ -221,7 +221,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Cleaning Workspace | 7/7 | Complete    | 2026-07-23 |
 | 2. Cleaning Output & Batch | 4/4 | Complete    | 2026-07-26 |
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
-| 4. OCR Recognition & Text Editing | 8/8 | In Progress|  |
+| 4. OCR Recognition & Text Editing | 9/9 | In Progress|  |
 | 5. Project Persistence, Image Ops & Export | 0/TBD | Not started | - |
 
 ---
