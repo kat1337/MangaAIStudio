@@ -218,7 +218,7 @@ Plans:
 
 **Wave 3** *(blocked on 05-01 + 05-04 — main_window.py owned by 05-04's list-apply contract change)*
 
-- [ ] 05-05-PLAN.md — Save/Open Project session: dirty tracking, Unsaved Changes prompt, Recent Projects, chapter-climb (PROJ-01)
+- [x] 05-05-PLAN.md — Save/Open Project session: dirty tracking, Unsaved Changes prompt, Recent Projects, chapter-climb (PROJ-01)
 
 **Wave 4** *(blocked on 05-05)*
 

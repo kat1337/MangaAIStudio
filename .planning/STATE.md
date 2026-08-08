@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: executing
-stopped_at: Completed 05-04-PLAN.md
-last_updated: "2026-08-08T20:00:11.073Z"
+stopped_at: Completed 05-05-PLAN.md
+last_updated: "2026-08-08T21:54:00.953Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 38
-  completed_plans: 34
+  completed_plans: 35
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 05 (Project Persistence, Image Ops & Export) — EXECUTING
-Plan: 6 of 9
+Plan: 7 of 9
 Status: Ready to execute
 Last activity: 2026-08-08 — Phase 05 execution started
 
-Progress: [█████████░] 89% (4/4 phases, 29/29 plans)
+Progress: [█████████░] 92% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -101,6 +101,7 @@ Progress: [█████████░] 89% (4/4 phases, 29/29 plans)
 | Phase 05 P03 | 30m | 2 tasks | 2 files |
 | Phase 05-project-persistence-image-ops-export P05-09 | 12 | 2 tasks | 1 files |
 | Phase 05 P04 | 14 | 2 tasks | 4 files |
+| Phase 05-project-persistence-image-ops-export P05 | 110 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -211,6 +212,10 @@ Recent decisions affecting current work:
 - [Phase ?]: Geometry-op undo record: push_geometry_state stamps IMAGE+MASK+BOXES with ONE monotonic stamp; undo()/redo() pop every store whose tail stamp equals the max and return list[(kind, value)] ([] when empty, was None) — one Ctrl+Z reverses the whole op (PROJ-04, UI-SPEC surface 28)
 - [Phase ?]: Group stash stamp: the 6 per-type pop methods gain an additive optional stash_stamp param (default None = byte-identical Phase 3 behavior); a multi-store pop stashes all popped stores with ONE fresh shared stamp so redo() restores the whole op in one press (test_geometry_redo_restores_all_three)
 - [Phase ?]: Undo/Redo flash op-name resolution is MainWindow-side: _record_geometry_op_name(op_name) is the hook plan 05-06/05-07 _apply_geometry_op calls before push_geometry_state; multi-kind pop flashes the recorded name, single-kind pops keep the Phase 3 kind labels (levels undo flashes inpaint until 05-06 wires it)
+- [Phase ?]: closeEvent gates only spontaneous (window-manager) closes; the Quit action runs the Unsaved Changes gate in _on_quit before its programmatic close() — D-07 prompt coverage preserved (X/Alt+F4/Quit/Open*) while programmatic closes (host teardown) never re-prompt (05-05)
+- [Phase ?]: Unsaved-Changes gate lives inside _load_project_session/_load_single_page_mas (shared by the Open Project… dialog, chapter-climb, and Recent Projects) so the D-07 gate runs once per action without double-prompting after Discard (05-05)
+- [Phase ?]: Project session rebuild bypasses _set_pages: ImageFiles carry restored mask/boxes/current_image and the sidebar is populated directly — _set_pages would rebuild fresh ImageFiles and auto-load placeholder paths via set_image_from_path (05-05)
+- [Phase ?]: Save-side per-page image source = cleaned → source path → embedded current_image (RESEARCH A3 + portable-project fallback): re-saving a project whose originals are missing embeds the last-known image instead of failing (05-05)
 
 ### Pending Todos
 
@@ -237,8 +242,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T19:59:54.857Z
-Stopped at: Completed 05-04-PLAN.md
+Last session: 2026-08-08T21:54:00.910Z
+Stopped at: Completed 05-05-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
