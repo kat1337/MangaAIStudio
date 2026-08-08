@@ -155,6 +155,15 @@ class MainWindow(QMainWindow):
         # detection set_boxes calls that push themselves explicitly.
         self._suppress_boxes_push = False
 
+        # Plan 05-04 (PROJ-04 / UI-SPEC surface 28): the geometry-op apply
+        # path (plan 05-06/05-07 `_apply_geometry_op`) records the op name
+        # here via `_record_geometry_op_name` right before pushing its ONE
+        # geometry undo entry. When the unified undo/redo pops a multi-kind
+        # geometry record, the transient flashes "Undo: {op_name}" /
+        # "Redo: {op_name}" (rotate|crop|levels|resize — the extended op-name
+        # set). None = no geometry op pushed yet on this page.
+        self._last_geometry_op_name: str | None = None
+
         # Plan 03-08 (FLOW-02 regression / UAT test 3 addendum): per-page
         # before-state snapshot for the mask push hook. The mask side
         # historically pushed ONLY the after-state (``canvas.get_mask()`` post-
@@ -1449,20 +1458,61 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------- unified undo/redo
     # Surface 13 (plan 03-05): the unified Ctrl+Z / Ctrl+Shift+Z pop the
     # merged MASK/IMAGE/BOXES timeline (plan 03-02's HistoryManager.undo/redo)
-    # and route the (kind, value) result to the matching apply method. After
+    # and route the (kind, value) results to the matching apply methods. After
     # applying, the status bar shows a transient "Undo: {op}" / "Redo: {op}"
     # message naming the op type (UI-SPEC §Copywriting — the which-stack-was-
     # popped indication the unified timeline requires; T-03-09 mitigation).
+    #
+    # Plan 05-04 (PROJ-04 / UI-SPEC surface 28): undo()/redo() now return a
+    # LIST of (kind, value) pairs — a geometry record (push_geometry_state)
+    # pops image+mask+boxes together with ONE press, "never two"; the op-name
+    # set extends with rotate/crop/levels/resize.
 
-    def _undo_op_label(self, kind: str) -> str:
-        """Map the popped ``kind`` to the UI-SPEC §Copywriting op label."""
-        if kind == "mask":
+    def _undo_op_label(self, kind_or_op: str) -> str:
+        """Map the popped kind / geometry-op name to the §Copywriting op label.
+
+        The Phase 3 set (mask edit / inpaint / box edit) extends with the four
+        image-op names — rotate / crop / levels / resize — per the UI-SPEC
+        surface 28 undo-feedback row (D-14), so a geometry-record undo flashes
+        e.g. "Undo: rotate".
+        """
+        if kind_or_op in ("rotate", "crop", "levels", "resize"):
+            return kind_or_op
+        if kind_or_op == "mask":
             return "mask edit"
-        if kind == "image":
+        if kind_or_op == "image":
             return "inpaint"
-        if kind == "boxes":
+        if kind_or_op == "boxes":
             return "box edit"
         return "edit"
+
+    def _record_geometry_op_name(self, op_name: str) -> None:
+        """Record the most recent geometry-op name for the Undo/Redo flash.
+
+        Called by the geometry-op apply path (plan 05-06/05-07
+        ``_apply_geometry_op``) immediately before
+        ``history.push_geometry_state(...)``. When the unified undo/redo pop
+        returns a multi-kind geometry record, the transient flashes
+        "Undo: {op_name}" / "Redo: {op_name}" — the extended op-name set
+        (rotate|crop|levels|resize, UI-SPEC surface 28).
+        """
+        self._last_geometry_op_name = op_name
+
+    def _undo_op_label_for_result(self, result) -> str:
+        """Resolve the 'Undo: {op}'/'Redo: {op}' label for a pop result list.
+
+        Plan 05-04: ``history.undo``/``redo`` return a LIST of (kind, value)
+        pairs. A geometry record pops as a MULTI-kind list (image+mask+boxes
+        share one stamp) — the op name was recorded at push time by the
+        geometry apply path (``_record_geometry_op_name``). Ordinary
+        single-store pops keep the Phase 3 kind-based labels.
+        """
+        if len(result) > 1:
+            return self._undo_op_label(
+                self._last_geometry_op_name or "edit"
+            )
+        kind, _value = result[0]
+        return self._undo_op_label(kind)
 
     def _current_undo_state(self):
         """Gather the (current_mask, current_img, current_boxes) tuple the
@@ -1485,23 +1535,25 @@ class MainWindow(QMainWindow):
         return current_mask, current_img, current_boxes
 
     def on_undo(self) -> None:
-        """Ctrl+Z — pop the most-recent entry across MASK/IMAGE/BOXES and apply.
+        """Ctrl+Z — pop the most-recent entry (or geometry group) and apply.
 
         Surface 13 unified handler. Calls ``history.undo(...)`` which delegates
-        to the matching per-type pop and returns ``(kind, value)`` (or None).
-        Routes ``kind`` to ``apply_undo_mask`` / ``apply_undo_image`` /
-        ``apply_undo_boxes``. Emits the transient "Undo: {op}" status feedback.
+        to the matching per-type pops and returns a LIST of ``(kind, value)``
+        pairs — one per store popped (plan 05-04: a geometry record pops
+        image+mask+boxes together, "one press per op, never two"; ordinary
+        edits pop a one-element list). Routes each ``kind`` to
+        ``apply_undo_mask`` / ``apply_undo_image`` / ``apply_undo_boxes``.
+        Emits the transient "Undo: {op}" status feedback.
         """
         if self.history is None:
             return
         current_mask, current_img, current_boxes = self._current_undo_state()
         result = self.history.undo(current_mask, current_img, current_boxes)
-        if result is None:
+        if not result:
             self._update_undo_redo_actions()
             return
-        kind, value = result
-        self._apply_undo_result(kind, value)
-        self._show_transient_status(f"Undo: {self._undo_op_label(kind)}")
+        self._apply_undo_result(result)
+        self._show_transient_status(f"Undo: {self._undo_op_label_for_result(result)}")
         self._update_undo_redo_actions()
 
     def on_redo(self) -> None:
@@ -1510,28 +1562,40 @@ class MainWindow(QMainWindow):
             return
         current_mask, current_img, current_boxes = self._current_undo_state()
         result = self.history.redo(current_mask, current_img, current_boxes)
-        if result is None:
+        if not result:
             self._update_undo_redo_actions()
             return
-        kind, value = result
-        self._apply_undo_result(kind, value)
-        self._show_transient_status(f"Redo: {self._undo_op_label(kind)}")
+        self._apply_undo_result(result)
+        self._show_transient_status(f"Redo: {self._undo_op_label_for_result(result)}")
         self._update_undo_redo_actions()
 
-    def _apply_undo_result(self, kind: str, value) -> None:
-        """Route a ``(kind, value)`` pop result to the matching canvas apply."""
-        if kind == "mask":
-            # value is a QImage snapshot (or None if the stack was empty).
-            if value is not None:
-                self.canvas.apply_undo_mask(value)
-        elif kind == "image":
-            # value is an (x, y, patch) tuple (or None).
-            if value is not None:
+    def _apply_undo_result(self, result) -> None:
+        """Route a LIST of (kind, value) pop results to the canvas applies.
+
+        Plan 05-04: ``history.undo``/``redo`` return ``list[(kind, value)]`` —
+        one entry per popped store (a geometry record pops image+mask+boxes
+        together). Each kind applies exactly as before (apply_undo_image /
+        apply_undo_mask / apply_undo_boxes — each refreshes its own canvas
+        layer, so the whole op renders in one pass, never two), in
+        image→mask→boxes order. Entries with a None value (empty-store guards)
+        are skipped, as before.
+        """
+        entries = {kind: value for kind, value in result}
+        for kind in ("image", "mask", "boxes"):
+            value = entries.get(kind)
+            if value is None:
+                continue
+            if kind == "image":
+                # value is an (x, y, patch) tuple — a geometry entry is a
+                # full-frame patch at (0, 0), bounds-checked by the canvas
+                # (canvas.py:522-565 handles full-frame).
                 x, y, patch = value
                 self.canvas.apply_undo_image(x, y, patch)
-        elif kind == "boxes":
-            # value is a list of PageBox (or None).
-            if value is not None:
+            elif kind == "mask":
+                # value is a QImage snapshot (or None if the stack was empty).
+                self.canvas.apply_undo_mask(value)
+            elif kind == "boxes":
+                # value is a list of PageBox (or None).
                 self.apply_undo_boxes(value)
 
     def apply_undo_boxes(self, boxes_snapshot_list) -> None:

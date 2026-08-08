@@ -137,7 +137,9 @@ class HistoryManager:
         if len(self._mask_undo) > self.limit:
             self._mask_undo.pop(0)
 
-    def pop_mask_undo(self, current_mask: QImage) -> QImage | None:
+    def pop_mask_undo(
+        self, current_mask: QImage, stash_stamp: int | None = None
+    ) -> QImage | None:
         """Pop the previous mask snapshot, stashing the current for redo.
 
         Returns ``None`` when the undo stack is empty. The returned snapshot is
@@ -146,6 +148,13 @@ class HistoryManager:
         guard). The current mask is captured (``.copy()``) into the redo stack
         so a redo reverses the undo. Phase 3: the ``(stamp, value)`` unwrap is
         internal — callers still receive a bare ``QImage``.
+
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the redo stash.
+        ``None`` (the default) keeps the Phase 3 behavior — the stash gets a
+        fresh monotonic stamp. The geometry-op group pop in ``undo()`` passes
+        ONE shared stamp to every popped store so the three redo stashes share
+        it and ``redo()`` restores the whole op with a single press (the
+        mirror of the one-stamp push).
 
         WR-01 (03-REVIEW.md): ``current_mask`` may be ``None`` (the unified
         ``undo`` is invoked with ``current_mask=None`` whenever
@@ -161,10 +170,14 @@ class HistoryManager:
             return None
         _stamp, previous = self._mask_undo.pop()
         if current_mask is not None:
-            self._mask_redo.append((self._stamp(), current_mask.copy()))
+            if stash_stamp is None:
+                stash_stamp = self._stamp()
+            self._mask_redo.append((stash_stamp, current_mask.copy()))
         return previous.copy()
 
-    def pop_mask_redo(self, current_mask: QImage) -> QImage | None:
+    def pop_mask_redo(
+        self, current_mask: QImage, stash_stamp: int | None = None
+    ) -> QImage | None:
         """Pop the next mask snapshot (reverses :meth:`pop_mask_undo`).
 
         The current mask is captured (``.copy()``) into the undo stack so a
@@ -172,13 +185,19 @@ class HistoryManager:
         ``.copy()``-detached from the internal list. Phase 3: the
         ``(stamp, value)`` unwrap is internal.
 
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the undo
+        stash; ``None`` keeps the Phase 3 fresh-stamp behavior. See
+        :meth:`pop_mask_undo`.
+
         WR-01: symmetric null-current guard with :meth:`pop_mask_undo`.
         """
         if not self._mask_redo:
             return None
         _stamp, next_state = self._mask_redo.pop()
         if current_mask is not None:
-            self._mask_undo.append((self._stamp(), current_mask.copy()))
+            if stash_stamp is None:
+                stash_stamp = self._stamp()
+            self._mask_undo.append((stash_stamp, current_mask.copy()))
         return next_state.copy()
 
     # -------------------------------------------------------- image stack
@@ -200,7 +219,7 @@ class HistoryManager:
             self._image_undo.pop(0)
 
     def pop_image_undo(
-        self, current_img: np.ndarray
+        self, current_img: np.ndarray, stash_stamp: int | None = None
     ) -> Union[ImageAction, None]:
         """Pop the previous image patch, stashing the current region for redo.
 
@@ -210,6 +229,11 @@ class HistoryManager:
         returned patch is ``.copy()``-detached from the internal list
         (``test_image_undo_swaps_current_into_redo`` is the regression guard).
         Phase 3: the ``(stamp, value)`` unwrap is internal.
+
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the redo
+        stash; ``None`` keeps the Phase 3 fresh-stamp behavior (see
+        :meth:`pop_mask_undo` — the geometry group pop shares one stamp across
+        the popped stores).
 
         WR-01 (03-REVIEW.md): symmetric null-current guard with
         :meth:`pop_mask_undo`. ``current_img`` may be ``None`` (no page loaded)
@@ -223,11 +247,13 @@ class HistoryManager:
         if current_img is not None:
             h, w = patch.shape[:2]
             redo_patch = current_img[y : y + h, x : x + w].copy()
-            self._image_redo.append((self._stamp(), (x, y, redo_patch)))
+            if stash_stamp is None:
+                stash_stamp = self._stamp()
+            self._image_redo.append((stash_stamp, (x, y, redo_patch)))
         return (x, y, patch.copy())
 
     def pop_image_redo(
-        self, current_img: np.ndarray
+        self, current_img: np.ndarray, stash_stamp: int | None = None
     ) -> Union[ImageAction, None]:
         """Pop the next image patch (reverses :meth:`pop_image_undo`).
 
@@ -235,6 +261,9 @@ class HistoryManager:
         stack so a subsequent undo reverses the redo. The returned patch is
         ``.copy()``-detached from the internal list. Phase 3: the
         ``(stamp, value)`` unwrap is internal.
+
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the undo
+        stash; ``None`` keeps the Phase 3 fresh-stamp behavior.
 
         WR-01: symmetric null-current guard with :meth:`pop_image_undo`.
         """
@@ -244,7 +273,9 @@ class HistoryManager:
         if current_img is not None:
             h, w = patch.shape[:2]
             undo_patch = current_img[y : y + h, x : x + w].copy()
-            self._image_undo.append((self._stamp(), (x, y, undo_patch)))
+            if stash_stamp is None:
+                stash_stamp = self._stamp()
+            self._image_undo.append((stash_stamp, (x, y, undo_patch)))
         return (x, y, patch.copy())
 
     # --------------------------------------------------------- boxes stack
@@ -302,7 +333,7 @@ class HistoryManager:
             self._boxes_undo.pop(0)
 
     def pop_boxes_undo(
-        self, current_boxes: list
+        self, current_boxes: list, stash_stamp: int | None = None
     ) -> Union[BoxesSnapshot, None]:
         """Pop the previous boxes snapshot, stashing the current for redo.
 
@@ -311,32 +342,44 @@ class HistoryManager:
         3 detachment) into the redo stack so a redo reverses the undo. The
         returned snapshot is a fresh copy so subsequent pushes/pops cannot
         mutate it.
+
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the redo
+        stash; ``None`` keeps the Phase 3 fresh-stamp behavior (see
+        :meth:`pop_mask_undo` — the geometry group pop shares one stamp across
+        the popped stores).
         """
         if not self._boxes_undo:
             return None
         _stamp, previous = self._boxes_undo.pop()
         # Stash a fresh snapshot of the current boxes into the redo branch.
+        if stash_stamp is None:
+            stash_stamp = self._stamp()
         self._boxes_redo.append(
-            (self._stamp(), self._materialize_snapshot(current_boxes))
+            (stash_stamp, self._materialize_snapshot(current_boxes))
         )
         # Return a fresh copy of the popped snapshot (defensive detachment so
         # the caller's mutation cannot reach the internal list).
         return self._materialize_snapshot(previous)
 
     def pop_boxes_redo(
-        self, current_boxes: list
+        self, current_boxes: list, stash_stamp: int | None = None
     ) -> Union[BoxesSnapshot, None]:
         """Pop the next boxes snapshot (reverses :meth:`pop_boxes_undo`).
 
         The current boxes list is captured (a fresh snapshot) into the undo
         stack so a subsequent undo reverses the redo. The returned snapshot is
         a fresh copy.
+
+        ``stash_stamp`` (plan 05-04): optional shared stamp for the undo
+        stash; ``None`` keeps the Phase 3 fresh-stamp behavior.
         """
         if not self._boxes_redo:
             return None
         _stamp, next_state = self._boxes_redo.pop()
+        if stash_stamp is None:
+            stash_stamp = self._stamp()
         self._boxes_undo.append(
-            (self._stamp(), self._materialize_snapshot(current_boxes))
+            (stash_stamp, self._materialize_snapshot(current_boxes))
         )
         return self._materialize_snapshot(next_state)
 
@@ -396,16 +439,28 @@ class HistoryManager:
         current_img: np.ndarray,
         current_boxes: list,
     ):
-        """Unified-timeline pop (D-11): pop the most-recent entry across all
-        three stores.
+        """Unified-timeline pop (D-11 + plan 05-04): pop EVERY store whose
+        tail stamp equals the max tail stamp; return ``list[(kind, value)]``.
 
-        Builds candidates from the tail stamps of all three non-empty undo
-        lists, picks the max-stamp kind, delegates to the matching per-type pop
-        method, and returns ``(kind, value)`` — or ``None`` when all three undo
-        lists are empty (``test_unified_undo_all_empty_returns_none``). The
-        ``kind`` in the return tells the caller (the UI collapse in plan 03-05)
-        which stack was popped so it can apply the value to the right canvas
-        slot and show "Undo: {op}" feedback (T-03-03 repudiation mitigation).
+        Geometry records (``push_geometry_state``) stamp IMAGE+MASK+BOXES with
+        ONE stamp, so all three stores match the max and ONE call returns all
+        three entries — the "one press per op, never two" contract (PROJ-04,
+        UI-SPEC surface 28). Ordinary single-store edits (mask stroke, inpaint
+        region, box move) return a one-element list ``[(kind, value)]`` —
+        Phase 3's unified pop semantics, widened to the list shape.
+
+        Returns ``[]`` when all three undo lists are empty (was ``None``
+        pre-plan-05-04). The ``kind`` per entry tells the caller (the UI
+        collapse in plan 03-05) which stack was popped so it can apply the
+        value to the right canvas slot and show "Undo: {op}" feedback
+        (T-03-03 repudiation mitigation).
+
+        Group stashes (plan 05-04): when MORE THAN ONE store matches the max
+        stamp, the pop-side stashes into the redo branches share ONE fresh
+        stamp (``stash_stamp``), so a later ``redo()`` restores the whole op
+        with a single press — the symmetric mirror of the one-stamp push.
+        Single-store pops keep the Phase 3 fresh-stamp-per-pop behavior
+        (unchanged redo ordering).
 
         The monotonic integer stamps give a deterministic total order (Pitfall
         4) immune to thread-scheduling jitter.
@@ -418,13 +473,22 @@ class HistoryManager:
         if self._boxes_undo:
             candidates.append(("boxes", self._boxes_undo[-1][0]))
         if not candidates:
-            return None
-        kind = max(candidates, key=lambda c: c[1])[0]
-        if kind == "mask":
-            return ("mask", self.pop_mask_undo(current_mask))
-        if kind == "image":
-            return ("image", self.pop_image_undo(current_img))
-        return ("boxes", self.pop_boxes_undo(current_boxes))
+            return []
+        max_stamp = max(stamp for _, stamp in candidates)
+        matched = [kind for kind, stamp in candidates if stamp == max_stamp]
+        # Group stamp: ONE fresh stamp shared by every popped store's stash so
+        # the redo side can restore the whole op in one press. Only geometry
+        # records match more than one store (ordinary pushes never share
+        # stamps), so single matches keep the Phase 3 stash behavior.
+        group_stamp = self._stamp() if len(matched) > 1 else None
+        out = []
+        if self._mask_undo and self._mask_undo[-1][0] == max_stamp:
+            out.append(("mask", self.pop_mask_undo(current_mask, group_stamp)))
+        if self._image_undo and self._image_undo[-1][0] == max_stamp:
+            out.append(("image", self.pop_image_undo(current_img, group_stamp)))
+        if self._boxes_undo and self._boxes_undo[-1][0] == max_stamp:
+            out.append(("boxes", self.pop_boxes_undo(current_boxes, group_stamp)))
+        return out
 
     def redo(
         self,
@@ -432,8 +496,13 @@ class HistoryManager:
         current_img: np.ndarray,
         current_boxes: list,
     ):
-        """Unified-timeline redo (D-11): pop the most-recent entry across all
-        three REDO stores. Mirrors :meth:`undo` across the redo lists.
+        """Unified-timeline redo (D-11 + plan 05-04): pop EVERY REDO store
+        whose tail stamp equals the max; return ``list[(kind, value)]``.
+
+        Mirrors :meth:`undo` across the redo lists: geometry groups (the three
+        redo stashes share one stamp from the group undo) restore all three
+        stores with ONE call; ordinary entries redo one at a time. Empty redo
+        stacks return ``[]``.
         """
         candidates = []
         if self._mask_redo:
@@ -443,13 +512,18 @@ class HistoryManager:
         if self._boxes_redo:
             candidates.append(("boxes", self._boxes_redo[-1][0]))
         if not candidates:
-            return None
-        kind = max(candidates, key=lambda c: c[1])[0]
-        if kind == "mask":
-            return ("mask", self.pop_mask_redo(current_mask))
-        if kind == "image":
-            return ("image", self.pop_image_redo(current_img))
-        return ("boxes", self.pop_boxes_redo(current_boxes))
+            return []
+        max_stamp = max(stamp for _, stamp in candidates)
+        matched = [kind for kind, stamp in candidates if stamp == max_stamp]
+        group_stamp = self._stamp() if len(matched) > 1 else None
+        out = []
+        if self._mask_redo and self._mask_redo[-1][0] == max_stamp:
+            out.append(("mask", self.pop_mask_redo(current_mask, group_stamp)))
+        if self._image_redo and self._image_redo[-1][0] == max_stamp:
+            out.append(("image", self.pop_image_redo(current_img, group_stamp)))
+        if self._boxes_redo and self._boxes_redo[-1][0] == max_stamp:
+            out.append(("boxes", self.pop_boxes_redo(current_boxes, group_stamp)))
+        return out
 
     # ------------------------------------------------------------- flags
     def can_undo_mask(self) -> bool:
