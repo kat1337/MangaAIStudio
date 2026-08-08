@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QToolBar,
@@ -265,8 +266,11 @@ class MainWindow(QMainWindow):
         self.action_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.action_open_folder.triggered.connect(self.open_folder)
 
-        # Recent Files submenu (max 8 via QSettings).
-        self.recent_menu = self.menuBar().addMenu("Recent Files")
+        # Recent Files submenu (max 8 via QSettings). Created as a standalone
+        # child of the window (never through the menu bar factory) so its
+        # menuAction never lands in the menubar's top-level action list — the
+        # File-menu addMenu below is the only home.
+        self.recent_menu = QMenu("Recent Files", self)
         self.action_clear_recent = QAction("Clear Menu", self)
         self.action_clear_recent.triggered.connect(self._clear_recent_files)
         self._refresh_recent_menu()
@@ -289,7 +293,10 @@ class MainWindow(QMainWindow):
         # currently-open folder (D-06). All three dispatch the Plan 03 entry
         # points on a single Worker(QRunnable). Disabled until a folder is open
         # AND no async op is running (refreshed in _refresh_action_states).
-        self.batch_menu = self.menuBar().addMenu("Batch")
+        # Created as a standalone child of the window (never through the menu
+        # bar factory) — a File submenu only; the three batch actions +
+        # enablement are unchanged.
+        self.batch_menu = QMenu("Batch", self)
         self.action_batch_detect = QAction("Batch Detect", self)
         self.action_batch_detect.triggered.connect(self.batch_detect)
         self.action_batch_detect.setEnabled(False)
