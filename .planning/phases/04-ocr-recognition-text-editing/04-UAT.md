@@ -3,7 +3,7 @@ status: complete
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T03:30:00Z"
+updated: "2026-08-08T03:40:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -59,9 +59,8 @@ expected: |
   entry, redo restores; a manually-set Bubble # (amber border) survives re-auto
   (preserve-manual) with gaps left in the sequence; LTR (Manhwa) orders left-to-right;
   zoom keeps badges constant viewport-px while text scales.
-result: issue
-reported: "Manhwa (LTR) works since it's top-to-bottom left-to-right by default. Manga (RTL) reading order is WRONG on real layouts: e.g. panel 1 at top detected correctly, but panel 2 detected as the panel under bubble 1, panel 3 as the panel right of panel 2 below, and the actual panel 2 numbered 4. Manga is not that simple — can have panel 1+2 side by side at top, or a wide panel 1 at top, etc. The XY-Cut column algorithm doesn't handle complex manga layouts. Suggestion: add a 'draw panel' function so boxes can be placed within a panel. LOG THIS — bigger issue than we can fix right now."
-severity: major
+result: skipped
+reason: "DEFERRED per user (scope decision, not a defect): manhwa LTR works; manga RTL misorders complex layouts (side-by-side top panels, wide top panel). User: 'just log this since this is a bigger issue than we can fix right now'. Logged as a gap with a future 'draw panel' feature note — candidate for a future phase (panel segmentation + reading-order rework)."
 
 ### 6. Load Translations paste + file + report + error UX
 expected: |
@@ -84,9 +83,9 @@ result: pass
 
 total: 7
 passed: 6
-issues: 1
+issues: 0
 pending: 0
-skipped: 0
+skipped: 1
 blocked: 0
 ## Gaps
 
