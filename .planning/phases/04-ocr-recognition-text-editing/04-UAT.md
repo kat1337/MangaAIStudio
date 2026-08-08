@@ -3,7 +3,7 @@ status: complete
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T03:00:00Z"
+updated: "2026-08-08T03:30:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -48,8 +48,8 @@ expected: |
   selected, focus-cycle with no typing commits nothing (no spurious edited=True /
   manual-override pin), Bubble # edit shows the amber manual-override badge, and the
   Inspector refreshes after an inline-edit commit.
-result: issue
-reported: "Inspector behavior passes, but the bubble badge (little box at top-left of the bubble with the number) is too small — only the top half of the number is visible. Need to make the badge fit the number."
+result: pass
+reported: "Inspector behavior passes. Badge sizing was fixed in plan 04-10 (digit-sized badge) and re-verified — pass."
 severity: minor
 
 ### 5. Auto-Number RTL/LTR + preserve-manual + batch undo
@@ -70,8 +70,8 @@ expected: |
   translation), the report shows applied + skipped counts; undo reverts in one batch
   entry; Load from File… reads a .txt into the paste area; a corrupt/non-UTF-8 file
   shows the "Couldn't read" dialog without crashing.
-result: issue
-reported: "The import works as expected EXCEPT bubble 1 can never be applied no matter what — even deleting and re-inputting 1 and pressing Enter, bubble 1 never gets assigned manually."
+result: pass
+reported: "Import works as expected. Bubble-1 sentinel bug was fixed in plan 04-10 (0 = unset) and re-verified — bubble 1 now assigns; pass."
 severity: minor
 
 ### 7. Vertical-metadata toggle fallback
@@ -83,8 +83,8 @@ result: pass
 ## Summary
 
 total: 7
-passed: 4
-issues: 3
+passed: 6
+issues: 1
 pending: 0
 skipped: 0
 blocked: 0
