@@ -292,3 +292,124 @@ def test_save_image_bytes_round_trip() -> None:
     with Image.open(BytesIO(data)) as im:
         assert im.size == (9, 7)  # (w, h) — dims preserved
         assert im.format == "PNG"
+
+
+@pytest.mark.unit
+def test_original_checksum_rule(tmp_path: Path) -> None:
+    """D-06: verify_original is True only on resolve + suffix + sha256 match.
+
+    All four sub-cases: matching checksum -> True; wrong checksum at the
+    same path -> False; missing path -> False; an existing file with a
+    non-image suffix -> False (T-05-03 — the ref never opens arbitrary
+    files).
+    """
+    from manga_ai_studio.core.project_io import sha256_file, verify_original
+
+    img = tmp_path / "page_001.png"
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(img)
+    digest = sha256_file(img)
+
+    assert verify_original(str(img), digest) is True
+    assert verify_original(str(img), "0" * 64) is False
+    assert verify_original(str(tmp_path / "gone.png"), digest) is False
+
+    txt = tmp_path / "note.txt"
+    txt.write_text("not an image", encoding="utf-8")
+    assert verify_original(str(txt), sha256_file(txt)) is False
+
+
+@pytest.mark.unit
+def test_sibling_manifest_detection(tmp_path: Path) -> None:
+    """D-09: sibling manifest found / not found / corrupt.
+
+    A valid sibling manifest.json next to a page .mas is returned; with no
+    sibling the answer is None; a sibling that exists but is malformed
+    raises ProjectFormatError (never silently opens the page standalone).
+    """
+    from manga_ai_studio.core.project_io import find_sibling_manifest
+
+    page = tmp_path / "page_001.mas"
+    save_page_file(page, {"meta.json": b"{}"})
+
+    # no sibling manifest -> None
+    assert find_sibling_manifest(page) is None
+
+    # valid sibling manifest -> returned
+    manifest_path = save_project(tmp_path, "ch1", [("page_001", {"meta.json": b"{}"})])
+    assert find_sibling_manifest(page) == manifest_path
+
+    # sibling present but malformed -> ProjectFormatError
+    (tmp_path / "manifest.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ProjectFormatError):
+        find_sibling_manifest(page)
+
+
+@pytest.mark.unit
+def test_d15_seam_preserved() -> None:
+    """D-15 seam: mask/std_dev are never serialized, always None on load.
+
+    A PageBox with mask/std_dev set to non-None objects must serialize
+    WITHOUT those keys in the dict, and json_to_pagebox must yield None for
+    both.
+    """
+    pb = PageBox(box=Box(0, 0, 10, 10), origin=USER, mask=object(), std_dev=0.5)
+    d = pagebox_to_json(pb)
+    assert "mask" not in d
+    assert "std_dev" not in d
+    out = json_to_pagebox(d)
+    assert out.mask is None
+    assert out.std_dev is None
+    assert out.origin == USER
+
+
+@pytest.mark.unit
+def test_meta_validation() -> None:
+    """Untrusted meta.json is rejected: oversized/non-int dims, mismatched
+    mask dims, non-bool geometry_altered (T-05-02 / T-05-04)."""
+    from manga_ai_studio.core.project_io import validate_meta
+
+    # a well-formed meta passes
+    validate_meta(
+        {
+            "version": 1,
+            "img": {"w": 800, "h": 1200},
+            "mask": {"h": 1200, "w": 800},
+            "geometry_altered": False,
+            "boxes": [],
+        }
+    )
+
+    # img dims beyond MAX_IMAGE_DIMENSION (10000) -> rejected
+    with pytest.raises(ProjectFormatError):
+        validate_meta({"img": {"w": 10001, "h": 100}})
+    # non-int img dims -> rejected
+    with pytest.raises(ProjectFormatError):
+        validate_meta({"img": {"w": "wide", "h": 100}})
+    # mask dims != img dims -> rejected
+    with pytest.raises(ProjectFormatError):
+        validate_meta({"img": {"w": 800, "h": 1200}, "mask": {"h": 10, "w": 10}})
+    # geometry_altered non-bool -> rejected
+    with pytest.raises(ProjectFormatError):
+        validate_meta({"img": {"w": 800, "h": 1200}, "geometry_altered": "yes"})
+    # missing img -> rejected
+    with pytest.raises(ProjectFormatError):
+        validate_meta({"boxes": []})
+
+
+@pytest.mark.unit
+def test_oversized_chapter_rejected(tmp_path: Path) -> None:
+    """A manifest with 1001 pages is an oversized-chapter DoS signal
+    (T-05-04) and is rejected with ProjectFormatError."""
+    project_dir = tmp_path / "big.mas-project"
+    project_dir.mkdir()
+    manifest = {
+        "version": 1,
+        "name": "big",
+        "pages": [
+            {"name": f"p{i:04d}", "file": f"p{i:04d}.mas"} for i in range(1001)
+        ],
+    }
+    manifest_path = project_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ProjectFormatError):
+        load_project(manifest_path)

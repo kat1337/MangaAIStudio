@@ -30,6 +30,7 @@ distributions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import lzma
 import os
@@ -52,6 +53,16 @@ MAX_ENTRY_DECOMPRESSED = 512 * 1024 * 1024
 # T-05-04: a chapter with more pages than this is a DoS signal — load_project
 # rejects it with ProjectFormatError (RESEARCH Security Domain).
 MAX_PROJECT_PAGES = 1000
+
+# D-06 suffix allowlist — mirrors canvas.py:114-126 ``validate_image_path``
+# (canvas ALLOWED_IMAGE_SUFFIXES plus tif/tiff; the .mas ``original`` ref
+# must pass the same gate a direct image open would, T-05-03).
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+# Image-dimension cap — duplicated literal from canvas.py:79
+# ``MAX_IMAGE_DIMENSION = 10000`` (kept here so this headless module needs no
+# Qt import; the GUI constant remains the source of truth, T-05-04).
+MAX_IMAGE_DIMENSION = 10000
 
 
 class ProjectFormatError(Exception):
@@ -422,6 +433,7 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
         raise ProjectFormatError(f"malformed meta.json: {exc}") from exc
     if not isinstance(meta, dict):
         raise ProjectFormatError("meta.json must be a JSON object")
+    validate_meta(meta)
 
     mask = None
     mask_meta = meta.get("mask")
@@ -444,3 +456,108 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
             raise ProjectFormatError(f"malformed original.json: {exc}") from exc
 
     return {"meta": meta, "image_png": image_png, "mask": mask, "original": original}
+
+
+# --------------------------------------------- D-06 checksum + D-09 climb
+
+def sha256_file(path: Path) -> str:
+    """Chunked (1 MiB reads) sha256 hexdigest of ``path`` (A7, stdlib).
+
+    Raises OSError on unreadable files — callers decide how to surface it
+    (:func:`verify_original` catches it and returns False).
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_original(original_path_str: str, expected_sha256: str) -> bool:
+    """D-06: True iff the referenced original resolves, has an allowed image
+    suffix, and its sha256 matches ``expected_sha256``.
+
+    Never raises (T-05-03): a missing path, a non-image suffix, or a
+    checksum mismatch all return False — the embedded image stays the base
+    and Show Original greys out. The path is ``Path.resolve()``'d BEFORE
+    the suffix check so a crafted manifest ref pointing at an arbitrary
+    file fails the suffix gate; a matching-suffix wrong file fails the
+    checksum.
+    """
+    try:
+        resolved = Path(original_path_str).resolve()
+    except (OSError, ValueError):
+        return False
+    if resolved.suffix.lower() not in _IMAGE_SUFFIXES:
+        return False
+    try:
+        return sha256_file(resolved) == expected_sha256
+    except OSError:
+        return False
+
+
+def find_sibling_manifest(page_mas_path: Path) -> Path | None:
+    """D-09: the sibling ``manifest.json`` for a standalone page ``.mas``.
+
+    Returns ``page_mas_path.parent / "manifest.json"`` iff it exists AND
+    :func:`load_project` succeeds on it — a corrupt sibling manifest must
+    NOT silently open the page as a standalone session. When the sibling
+    exists but is malformed, ProjectFormatError is raised (the caller
+    decides the "chapter detected" dialog vs error — plan 05-05).
+    """
+    sibling = page_mas_path.parent / "manifest.json"
+    if not sibling.is_file():
+        return None
+    load_project(sibling)  # raises ProjectFormatError when malformed
+    return sibling
+
+
+# -------------------------------------------------- untrusted-input validation
+
+def validate_meta(meta: dict) -> None:
+    """Validate a page's ``meta.json`` before it shapes any session state.
+
+    T-05-02 / T-05-04 (untrusted-file boundary):
+      - ``img`` w/h must int()-coerce to values within
+        [1, MAX_IMAGE_DIMENSION] (oversized dims are a DoS signal);
+      - ``mask`` dims must equal the image dims when both are present;
+      - ``geometry_altered`` must be a bool when present.
+    Every int field coerces via :func:`_coerce_int` — JSON type confusion
+    (float/str/bool where an int belongs) surfaces as ProjectFormatError,
+    never a partial session (the box_model V5 ``textblock_to_box``
+    discipline). Raises ProjectFormatError.
+    """
+    if not isinstance(meta, dict):
+        raise ProjectFormatError("meta.json must be a JSON object")
+    try:
+        img = meta["img"]
+    except KeyError as exc:
+        raise ProjectFormatError(f"meta.json missing required key: {exc}") from exc
+    if not isinstance(img, dict) or "w" not in img or "h" not in img:
+        raise ProjectFormatError("meta.img must carry 'w' and 'h'")
+    w = _coerce_int(img["w"], "meta img w")
+    h = _coerce_int(img["h"], "meta img h")
+    if not (1 <= w <= MAX_IMAGE_DIMENSION and 1 <= h <= MAX_IMAGE_DIMENSION):
+        raise ProjectFormatError(
+            f"image dimensions {w}x{h} exceed MAX_IMAGE_DIMENSION "
+            f"({MAX_IMAGE_DIMENSION})"
+        )
+
+    if "geometry_altered" in meta and not isinstance(
+        meta["geometry_altered"], bool
+    ):
+        raise ProjectFormatError("meta.geometry_altered must be a bool")
+
+    mask_meta = meta.get("mask")
+    if mask_meta is not None:
+        if not isinstance(mask_meta, dict) or "h" not in mask_meta or "w" not in mask_meta:
+            raise ProjectFormatError("meta.mask must carry 'h' and 'w'")
+        mw = _coerce_int(mask_meta["w"], "meta mask w")
+        mh = _coerce_int(mask_meta["h"], "meta mask h")
+        if (mw, mh) != (w, h):
+            raise ProjectFormatError(
+                f"mask dims {mh}x{mw} do not match image dims {h}x{w}"
+            )
