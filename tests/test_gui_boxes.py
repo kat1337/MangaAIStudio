@@ -1654,16 +1654,52 @@ def test_badge_rect_sizes_to_digit(qtbot, number) -> None:
 
 
 @pytest.mark.gui
-def test_badge_tl_outside_uses_actual_badge_size(qtbot) -> None:
+@pytest.mark.parametrize("number", [3, 12], ids=["1-digit", "2-digit"])
+def test_badge_tl_outside_uses_actual_badge_size(qtbot, number) -> None:
     """The TL-outside placement uses the ACTUAL badge size (badge + 2px offset).
 
+    FAILS pre-fix with the plan's reference platform values: the fixed 20x14
+    constants place the badge at (-3,3) regardless of the digit (probe platform
+    reference: 24x23 at (-7,-6), 40x23 at (-23,-6)). On THIS platform the
+    measured digits give 17.45x23 at (-0.45,-6) and 26.9x23 at (-9.9,-6), so
+    the per-case assertion derives the expected position from the ACTUAL badge
+    rect — the RED gate for the fixed-size bug lives in
+    test_badge_tl_outside_tracks_size_across_digits (which the per-case
+    contract complements).
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = number
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+
+    # Precondition: the reference box's scene rect (2px unselected pen).
+    sbr = item.sceneBoundingRect()
+    assert sbr.left() == pytest.approx(19.0, abs=0.01)
+    assert sbr.top() == pytest.approx(19.0, abs=0.01)
+
+    # The badge sits exactly badge_w+2 / badge_h+2 TL-outside its box,
+    # computed from the ACTUAL (just-measured) badge rect.
+    r = item._badge.rect()
+    pos = item._badge.scenePos()
+    assert pos.x() == pytest.approx(sbr.left() - r.width() - 2.0, abs=0.01), (
+        f"badge x {pos.x()} must be sceneBoundingRect.left() - badge_w - 2"
+    )
+    assert pos.y() == pytest.approx(sbr.top() - r.height() - 2.0, abs=0.01), (
+        f"badge y {pos.y()} must be sceneBoundingRect.top() - badge_h - 2"
+    )
+    # The badge remains TL-outside the box's scene rect.
+    assert pos.x() < sbr.left()
+    assert pos.y() < sbr.top()
+
+
+@pytest.mark.gui
+def test_badge_tl_outside_tracks_size_across_digits(qtbot) -> None:
+    """The badge tracks its size: the multi-digit badge sits FURTHER TL.
+
     FAILS pre-fix: the fixed 20x14 constants place BOTH badges at (-3,3) — a
-    multi-digit badge does not track its own size (the cross-size ordering
-    assertion fails RED). Post-fix: for the reference box (rect 20,20,200,100,
-    unselected 2px pen -> sceneBoundingRect (19,19,202,102)) each badge sits
-    exactly badge_w+2 / badge_h+2 TL-outside (probe platform: 24x23 at (-7,-6),
-    40x23 at (-23,-6); this platform: 17.45x23 at (-0.45,-6), 26.9x23 at
-    (-9.9,-6)) — the multi-digit badge keeps the same 2px gap as the single-digit.
+    multi-digit badge does not track its own size (the ordering assertion
+    fails RED). Post-fix the 2-digit badge is offset further left by exactly
+    its extra width.
     """
     pb3 = _pagebox_with_text(recognized="hello")
     pb3.bubble_no = 3
@@ -1675,31 +1711,18 @@ def test_badge_tl_outside_uses_actual_badge_size(qtbot) -> None:
     _scene12, item12 = _scene_with_box(pb12)
     item12.refresh_badge()
 
-    # Precondition: the reference box's scene rect (2px unselected pen).
-    sbr = item3.sceneBoundingRect()
-    assert sbr.left() == pytest.approx(19.0, abs=0.01)
-    assert sbr.top() == pytest.approx(19.0, abs=0.01)
-
-    # Each badge sits exactly badge_w+2 / badge_h+2 TL-outside its box,
-    # computed from the ACTUAL (just-measured) badge rect.
-    for item in (item3, item12):
-        r = item._badge.rect()
-        pos = item._badge.scenePos()
-        assert pos.x() == pytest.approx(sbr.left() - r.width() - 2.0, abs=0.01), (
-            f"badge x {pos.x()} must be sceneBoundingRect.left() - badge_w - 2"
-        )
-        assert pos.y() == pytest.approx(sbr.top() - r.height() - 2.0, abs=0.01), (
-            f"badge y {pos.y()} must be sceneBoundingRect.top() - badge_h - 2"
-        )
-        # The badge remains TL-outside the box's scene rect.
-        assert pos.x() < sbr.left()
-        assert pos.y() < sbr.top()
-
-    # The badge tracks its size: the multi-digit badge sits further left than
-    # the single-digit one (pre-fix both sit at (-3,3) — this fails RED).
     assert item12._badge.scenePos().x() < item3._badge.scenePos().x(), (
         "the multi-digit badge must sit further TL than the single-digit badge"
     )
+    # The gap is the SAME 2px for both (placement = actual size + 2px).
+    sbr = item3.sceneBoundingRect()
+    for item in (item3, item12):
+        r = item._badge.rect()
+        pos = item._badge.scenePos()
+        gap_x = sbr.left() - pos.x() - r.width()
+        gap_y = sbr.top() - pos.y() - r.height()
+        assert gap_x == pytest.approx(2.0, abs=0.01)
+        assert gap_y == pytest.approx(2.0, abs=0.01)
 
 
 @pytest.mark.gui

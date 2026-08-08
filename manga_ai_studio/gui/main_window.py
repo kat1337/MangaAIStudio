@@ -1416,14 +1416,20 @@ class MainWindow(QMainWindow):
 
         A manual bubble-number sets the manual-override flag so a page-level
         re-auto (Plan 04-07) preserves the user's hand-set number (the amber
-        badge border). The bounded QSpinBox (1..9999, T-4-08) guarantees the
-        value is in range before it reaches ``pagebox.bubble_no``.
+        badge border). The bounded QSpinBox is 0..9999 (T-4-08) with 0 as the
+        UNSET sentinel — a 0 commit CLEARS the number (bubble_no=None, no
+        override pin: unset is not an override); 1..9999 assigns and pins
+        manual_override (D-16 unchanged).
         """
         item = self._inspector_commit_pre()
         if item is None:
             return
-        item.pagebox.bubble_no = number
-        item.pagebox.manual_override = True
+        if number == 0:
+            item.pagebox.bubble_no = None
+            item.pagebox.manual_override = False
+        else:
+            item.pagebox.bubble_no = number
+            item.pagebox.manual_override = True
         self._inspector_commit_post(item)
 
     def _on_inspector_vertical_committed(self, vertical: bool) -> None:

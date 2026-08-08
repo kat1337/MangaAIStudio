@@ -5,8 +5,9 @@ This is the D-08 "always-present view of both fields + metadata" — a
 :meth:`MainWindow._build_docks`) whose body is this ``QWidget``. It surfaces,
 for the currently-selected box:
 
-- **Bubble #** — a bounded ``QSpinBox`` (1..9999) for the D-15/D-16 reading-order
-  number. A manual value sets ``manual_override=True`` (D-16 — the amber badge
+- **Bubble #** — a bounded ``QSpinBox`` (0..9999 — 0 is the unset sentinel,
+  displayed as an em dash) for the D-15/D-16 reading-order number. A manual
+  value sets ``manual_override=True`` (D-16 — the amber badge
   border) so a page-level re-auto preserves the user's hand-set number.
 - **Origin** — a read-only hue-colored ``QLabel`` (green detected / amber user —
   matches the canvas border, reusing the Phase 3 origin hues as text colour).
@@ -34,8 +35,11 @@ push + overlay refresh all live in the MainWindow, not here).
 Security:
     - Both ``QTextEdit`` fields render plain text only (the recognised field
       carries OCR output — ASVS V5, no HTML injection path via the panel).
-    - The Bubble # ``QSpinBox`` is bounded 1..9999 (T-4-08 tampering mitigation
-      — out-of-range values cannot reach ``pagebox.bubble_no``).
+    - The Bubble # ``QSpinBox`` is bounded 0..9999 (T-4-08 tampering mitigation
+      — out-of-range values cannot reach ``pagebox.bubble_no``). 0 never
+      reaches the model — the MainWindow handler maps the sentinel to
+      ``bubble_no=None``, so ``pagebox.bubble_no`` only ever receives None or
+      1..9999 (T-4-08 mitigation unchanged).
 """
 
 from __future__ import annotations
@@ -160,11 +164,15 @@ class InspectorPanel(QWidget):
         form = QFormLayout()
         form.setSpacing(6)
 
-        # Bubble # — bounded 1..9999 (T-4-08 tampering mitigation). Commit on
-        # editingFinished (focus-loss or Enter — the standard QSpinBox signal).
+        # Bubble # — bounded 0..9999 (T-4-08 tampering mitigation). 0 is the
+        # UNSET sentinel (probe: value 0 -> text() '\u2014', value 1 -> '1',
+        # negative input clamps to 0; the special text is display-only — typing
+        # still edits normally). Commit on editingFinished (focus-loss or
+        # Enter — the standard QSpinBox signal).
         self.bubble_spin = QSpinBox()
-        self.bubble_spin.setRange(1, 9999)
-        self.bubble_spin.setValue(1)
+        self.bubble_spin.setRange(0, 9999)
+        self.bubble_spin.setSpecialValueText("\u2014")
+        self.bubble_spin.setValue(0)
         form.addRow("Bubble #", self.bubble_spin)
 
         # Origin — read-only, hue-coloured on load_box.
@@ -201,7 +209,7 @@ class InspectorPanel(QWidget):
         # WR-01: the values the fields displayed at load_box time — a commit
         # whose value is unchanged is a no-op (see _emit_*_if_changed). The
         # InlineEditor's ``_entry_text`` pattern (inline_editor.py:211).
-        self._loaded_bubble = 1
+        self._loaded_bubble = 0
         self._loaded_recognized = ""
         self._loaded_translation = ""
 
@@ -217,8 +225,8 @@ class InspectorPanel(QWidget):
         spurious-commit the just-loaded values back onto the pagebox). Hue-
         colours the Origin label per the box origin.
         """
-        # Bubble # (None -> 1 as the spin default; the field still enables).
-        bubble = pagebox.bubble_no if pagebox.bubble_no is not None else 1
+        # Bubble # (None -> 0 as the unset sentinel; the field still enables).
+        bubble = pagebox.bubble_no if pagebox.bubble_no is not None else 0
         was = self.bubble_spin.blockSignals(True)
         self.bubble_spin.setValue(bubble)
         self.bubble_spin.blockSignals(was)
@@ -278,12 +286,12 @@ class InspectorPanel(QWidget):
         self._set_fields_enabled(False)
         # WR-01: reset the loaded-value memory so a late focus-out commit after
         # a clear cannot fire (fields are disabled anyway — belt-and-suspenders).
-        self._loaded_bubble = 1
+        self._loaded_bubble = 0
         self._loaded_recognized = ""
         self._loaded_translation = ""
         # Clear the field values too so a stale selection does not linger.
         was = self.bubble_spin.blockSignals(True)
-        self.bubble_spin.setValue(1)
+        self.bubble_spin.setValue(0)  # reset to the unset sentinel 0
         self.bubble_spin.blockSignals(was)
         was_r = self.recognized_edit.blockSignals(True)
         self.recognized_edit.clear()
@@ -355,9 +363,9 @@ class InspectorPanel(QWidget):
     def _emit_bubble_if_changed(self, on_bubble) -> None:
         """Forward the bubble-spin commit only if the value changed since load_box.
 
-        The spinbox displays ``1`` for ``bubble_no=None``, so an unchanged
-        focus cycle must not write bubble 1 / ``manual_override=True`` (D-16
-        preserve-manual engaged by accident).
+        The spinbox displays ``0`` (the em dash) for ``bubble_no=None``, so an
+        unchanged focus cycle must not write bubble 1 / ``manual_override=True``
+        (D-16 preserve-manual engaged by accident).
         """
         number = self.bubble_spin.value()
         if number != self._loaded_bubble:
