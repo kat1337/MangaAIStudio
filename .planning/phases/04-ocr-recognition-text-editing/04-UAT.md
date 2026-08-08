@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:20:00Z"
+updated: "2026-08-08T02:30:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -56,7 +56,9 @@ expected: |
   selected, focus-cycle with no typing commits nothing (no spurious edited=True /
   manual-override pin), Bubble # edit shows the amber manual-override badge, and the
   Inspector refreshes after an inline-edit commit.
-result: [pending]
+result: issue
+reported: "Inspector behavior passes, but the bubble badge (little box at top-left of the bubble with the number) is too small — only the top half of the number is visible. Need to make the badge fit the number."
+severity: minor
 
 ### 5. Auto-Number RTL/LTR + preserve-manual + batch undo
 expected: |
@@ -86,12 +88,28 @@ result: [pending]
 
 total: 7
 passed: 3
-issues: 0
-pending: 4
+issues: 1
+pending: 3
 skipped: 0
 blocked: 0
 ## Gaps
 
+- truth: "Bubble badge fits its number: the badge rect (TL-outside) is sized to contain the full digit glyph(s) — top-to-bottom, no clipping"
+  status: failed
+  reason: "User reported: the bubble badge is too small — only the top half of the number is visible; badge must fit the number"
+  severity: minor
+  test: 4
+  artifacts: [manga_ai_studio/gui/box_item.py]
+  missing: [badge rect sized to digit bounding rect, digit re-centering]
+  diagnosis: |
+    Badge is a FIXED 20x14 rect (box_item.py:126-127, _BADGE_W/_BADGE_H) with the digit
+    QGraphicsTextItem at fixed pos (3.0, -1.0) (line 362). The 12pt bold digit glyph
+    (Liberation Sans) is taller than 14px and the fixed pos doesn't center it — so the
+    glyph clips vertically (top half only) and multi-digit numbers overflow the 20px width.
+    Fix direction: after setPlainText, measure _badge_digit bounding rect and resize the
+    badge rect to digit_w + padding, digit_h + padding; re-center the digit; keep
+    ItemIgnoresTransformations viewport-px semantics; TL-outside placement math
+    (refresh_badge lines 612-625) must use the ACTUAL badge size, not the constants.
 - truth: "Text overlay adapts to box size: overlay text wraps/fits INSIDE the box rect (no horizontal overshoot), sized legibly relative to the box"
   status: failed
   reason: "User reported: text is still a bit small, overshoots the box, renders horizontally — should try to fit in the box and adapt text to the text box size"
