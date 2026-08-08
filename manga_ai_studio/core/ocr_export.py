@@ -56,7 +56,11 @@ borrowed under D-19 is a data-format reference, not copied code.
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
 
 from manga_ai_studio.core.box_model import DETECTED, USER
 
@@ -185,3 +189,166 @@ def page_ocr_json_dumps(data: dict) -> str:
     file writes this string encoded utf-8 (Task 2).
     """
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: D-22 output location + write + batch loop
+# ---------------------------------------------------------------------------
+
+
+def ocr_json_target_dir(source_dir: Path, geometry_altered: bool) -> Path:
+    """D-22: the output folder for a page's ``_ocr.json``.
+
+    Pristine page (``geometry_altered`` False) -> the source folder itself
+    (sidecar next to the page, mokuro convention). Geometry-altered page
+    (crop/rotate/resize applied) -> ``source_dir / "cleaned"`` (the Phase 2
+    sibling convention), because its coordinates describe the post-op page,
+    not the image sitting next to it. Callers create the target via
+    ``mkdir(parents=True, exist_ok=True)`` — "created if missing" (UI-SPEC
+    surface 27; os-level mkdir is the A5/UI-SPEC Open Q5 resolution).
+    """
+    if geometry_altered:
+        return source_dir / "cleaned"
+    return source_dir
+
+
+def default_ocr_json_path(page_path: Path, geometry_altered: bool) -> Path:
+    """The D-22 default sidecar path for ``page_path``.
+
+    ``<target_dir> / f"{page_path.stem}_ocr.json"`` — mokuro naming
+    convention; ``target_dir`` per :func:`ocr_json_target_dir`.
+    """
+    target = ocr_json_target_dir(page_path.parent, geometry_altered)
+    return target / f"{page_path.stem}_ocr.json"
+
+
+def write_page_ocr_json(
+    page_boxes: list,
+    img_w: int,
+    img_h: int,
+    page_path: Path,
+    geometry_altered: bool,
+    path_override: Path | None = None,
+) -> Path:
+    """Write one page's D-19 JSON to disk and return the written path.
+
+    Builds the dict via :func:`build_page_ocr_json`, targets the D-22 folder
+    unless ``path_override`` is given (the GUI's Save As dialog overrides —
+    UI-SPEC surface 27), creates the target dir ("created if missing"),
+    encodes UTF-8 (the probe encoding truth), and writes atomically via
+    temp-file + ``os.replace`` so a crash never leaves a half-written JSON
+    (T-05-10 / T-02-06 discipline).
+
+    Args:
+        page_boxes: The page's ``PageBox`` list.
+        img_w / img_h: Current page dims (int; ValueError on non-int).
+        page_path: The source page path — its ``parent`` is the D-22 anchor
+            and its ``stem`` the sidecar name.
+        geometry_altered: D-22 flag — pristine -> sidecar beside the source;
+            altered -> ``<source>/cleaned/``.
+        path_override: Exact destination path; bypasses the D-22 rule.
+
+    Returns:
+        The written path (the D-22 default, or ``path_override``).
+    """
+    data = build_page_ocr_json(page_boxes, img_w, img_h)
+    dest = path_override if path_override is not None else default_ocr_json_path(
+        page_path, geometry_altered
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = page_ocr_json_dumps(data).encode("utf-8")
+    # Atomic write: temp file in the same directory, then os.replace. A
+    # process crash mid-write leaves only the temp file, never a truncated
+    # _ocr.json that a downstream typesetting tool would mis-parse.
+    tmp = dest.with_name(f".{dest.name}.tmp")
+    tmp.write_bytes(payload)
+    os.replace(tmp, dest)
+    return dest
+
+
+@dataclass
+class ExportPage:
+    """The batch-loop input shape for :func:`batch_export_ocr`.
+
+    Lightweight projection of the current page state — deliberately NOT
+    ``ImageFile`` so the exporter stays model-free (pure stdlib) and the
+    GUI can build these from ``boxes_snapshot()`` + canvas dims in plan
+    05-08 without dragging the image model into the worker contract.
+    """
+
+    path: Path
+    boxes: list
+    img_w: int
+    img_h: int
+    geometry_altered: bool = False
+
+
+def batch_export_ocr(pages: list, progress_callback=None, abort_flag=None) -> dict:
+    """Export every page's ``_ocr.json`` in one interruptible batch (D-21).
+
+    Mirrors ``core/batch_runner._run_batch_task`` (batch_runner.py:129-188)
+    contract: abort checked at the loop TOP ONLY, per-page progress emitted
+    once per page, per-page failures isolated and reported (D-04), summary
+    returned as ``{"ok", "failed", "total"}``.
+
+    ``progress_callback`` / ``abort_flag`` are auto-injected by ``Worker``
+    (worker_thread.py:103-140) — they MUST stay the last two kwargs with
+    ``None`` defaults. ``Abort`` is lazy-imported inside this function
+    (never at module top) so the module-top import graph stays Qt-free; the
+    raised exception keeps its exact ``worker_thread`` identity so the
+    Worker's ``except Abort`` (worker_thread.py:155) routes cancel to the
+    ``aborted`` signal. A locally-defined ``Abort(Exception)`` subclass
+    would fall through to ``except Exception`` and surface cancel as an
+    error — do not use that option.
+
+    Logging discipline (T-05-05): only page stems/names + error strings are
+    logged, never raw OCR/translation text (log-injection defense).
+
+    Args:
+        pages: ``ExportPage`` objects (path, boxes, img_w, img_h,
+            geometry_altered).
+        progress_callback: Optional callable/signal with ``.emit((percent,
+            page_name))`` — called once per page at the loop top.
+        abort_flag: Optional ``SharableFlag``-like object with ``.get()``.
+
+    Returns:
+        ``{"ok": int, "failed": list[tuple[Path, str]], "total": int}``.
+
+    Raises:
+        Abort: when the flag is set at a loop-top check.
+    """
+    # Lazy import: worker_thread.py imports PySide6.QtCore at module top
+    # (line 27); importing it here keeps this core module Qt-free while
+    # preserving the exact exception identity the Worker catches.
+    from manga_ai_studio.gui.worker_thread import Abort
+
+    failed: list[tuple[Path, str]] = []
+    total = len(pages)
+
+    for i, page in enumerate(pages):
+        # D-09/Pitfall-4 shape: abort check at the loop TOP ONLY. A cancel
+        # lands strictly between pages; a page already started runs to
+        # completion, so no _ocr.json is ever half-written.
+        if abort_flag is not None and abort_flag.get():
+            raise Abort()
+
+        # D-10 shape: per-page progress (percent, page_name).
+        if progress_callback is not None:
+            percent = int(i / total * 100) if total else 0
+            progress_callback.emit((percent, page.path.name))
+
+        # D-04: per-page failure non-fatal.
+        try:
+            write_page_ocr_json(
+                page.boxes,
+                page.img_w,
+                page.img_h,
+                page.path,
+                page.geometry_altered,
+            )
+        except Exception as exc:  # D-04: per-page failure non-fatal
+            logger.error(f"Batch OCR export: page {page.path.name} failed: {exc}")
+            failed.append((page.path, str(exc)))
+            continue
+
+    return {"ok": total - len(failed), "failed": failed, "total": total}

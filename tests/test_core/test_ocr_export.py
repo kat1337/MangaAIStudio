@@ -26,10 +26,15 @@ from panelcleaner.structures import Box
 from manga_ai_studio.core.box_model import DETECTED, USER, PageBox
 from manga_ai_studio.core.ocr_export import (
     OCR_JSON_VERSION,
+    ExportPage,
+    batch_export_ocr,
     build_page_ocr_json,
+    default_ocr_json_path,
     line_box,
+    ocr_json_target_dir,
     page_ocr_json_dumps,
     split_text_onto_lines,
+    write_page_ocr_json,
 )
 
 
@@ -190,3 +195,181 @@ def test_dumps_round_trip() -> None:
     dumped = page_ocr_json_dumps(data)
     assert json.loads(dumped) == data
     assert "日本語" in dumped  # ensure_ascii=False keeps text readable on disk
+
+
+# ---------------------------------------------------------------------------
+# Task 2: D-22 location rule + write_page_ocr_json + batch_export_ocr
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_d22_location_rule(tmp_path: Path) -> None:
+    """D-22: pristine -> sidecar beside the source; altered -> cleaned/.
+
+    A pristine page exports to ``source_dir / <stem>_ocr.json``; a
+    geometry-altered page exports to ``<source>/cleaned/`` (directory
+    created if missing); ``chapter-01/page-03.png`` altered lands in
+    ``chapter-01/cleaned/page-03_ocr.json``.
+    """
+    src = tmp_path / "chapter-01"
+    src.mkdir(parents=True)
+    page = src / "page-03.png"
+
+    # Pristine: sidecar next to the source.
+    assert ocr_json_target_dir(src, geometry_altered=False) == src
+    assert default_ocr_json_path(page, geometry_altered=False) == src / "page-03_ocr.json"
+
+    # Altered: cleaned/ sibling (created if missing).
+    assert ocr_json_target_dir(src, geometry_altered=True) == src / "cleaned"
+    assert default_ocr_json_path(page, geometry_altered=True) == src / "cleaned" / "page-03_ocr.json"
+
+    # write_page_ocr_json creates the target dir and writes the sidecar.
+    boxes = [PageBox(box=Box(120, 340, 480, 410), origin=DETECTED, payload=_two_line_payload())]
+    written = write_page_ocr_json(boxes, 1600, 2400, page, geometry_altered=True)
+    assert written == src / "cleaned" / "page-03_ocr.json"
+    assert written.is_file()
+    # Path override bypasses the D-22 rule (GUI Save As dialog).
+    override = tmp_path / "elsewhere" / "custom.json"
+    written_override = write_page_ocr_json(
+        boxes, 1600, 2400, page, geometry_altered=False, path_override=override
+    )
+    assert written_override == override
+    assert override.is_file()
+
+
+@pytest.mark.unit
+def test_write_round_trip_utf8(tmp_path: Path) -> None:
+    """UTF-8 file write: Japanese text survives the round-trip exactly.
+
+    ``write_page_ocr_json`` with a Japanese payload -> file bytes decode as
+    UTF-8 and ``json.loads`` yields ``blocks[0]["text"]`` equal to the
+    source (T-05-10 probe encoding truth).
+    """
+    jp = "日本語の台詞\n二行目"
+    boxes = [
+        PageBox(
+            box=Box(1, 2, 100, 50),
+            origin=DETECTED,
+            payload=TextBlock(
+                [1, 2, 100, 50],
+                lines=[[[2, 3], [99, 3], [99, 20], [2, 20]]],
+                text=jp,
+                vertical=True,
+                translation="Japanese dialogue",
+            ),
+        )
+    ]
+    page = tmp_path / "page.png"
+    written = write_page_ocr_json(boxes, 100, 200, page, geometry_altered=False)
+    raw = written.read_bytes()
+    assert raw.decode("utf-8")  # decodes cleanly as UTF-8
+    data = json.loads(raw.decode("utf-8"))
+    assert data["blocks"][0]["text"] == jp
+    assert data["blocks"][0]["translation"] == "Japanese dialogue"
+    assert data["blocks"][0]["vertical"] is True
+
+
+def _export_pages(tmp_path: Path, count: int = 3):
+    """Three pristine ``ExportPage``s with a single payload box each."""
+    pages = []
+    for i in range(count):
+        page_path = tmp_path / f"page{i + 1}.png"
+        pages.append(
+            ExportPage(
+                path=page_path,
+                boxes=[
+                    PageBox(
+                        box=Box(0, 0, 10, 10),
+                        origin=DETECTED,
+                        payload=_two_line_payload(f"text {i + 1}"),
+                    )
+                ],
+                img_w=100,
+                img_h=200,
+                geometry_altered=False,
+            )
+        )
+    return pages
+
+
+@pytest.mark.unit
+def test_batch_export_ocr_isolates_failures(tmp_path: Path) -> None:
+    """D-04 batch contract: {ok, failed, total} exact; loop-top abort.
+
+    3 pages, one with an invalid page path (a FILE where the target
+    directory would be) that raises at write -> {"ok": 2, "failed": 1,
+    "total": 3}, the two good JSON files exist, and the failure is recorded
+    with the page stem. With the abort flag set after page 1's emit, the
+    batch raises ``Abort`` before writing any further page (loop-top
+    ordering proven: page 1 completed).
+    """
+    pages = _export_pages(tmp_path)
+
+    # Make page 2's write fail: its source dir is a FILE, so mkdir raises.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a directory")
+    pages[1].path = blocker / "page2.png"
+
+    summary = batch_export_ocr(pages)
+    # Failure recorded with the page stem in the path tuple.
+    assert len(summary["failed"]) == 1
+    failed_path, failed_msg = summary["failed"][0]
+    assert failed_path.name == "page2.png"
+    assert isinstance(failed_msg, str) and failed_msg
+    assert summary["ok"] == 2
+    assert summary["total"] == 3
+
+    # The two good pages produced their sidecars; the failing one did not.
+    assert (tmp_path / "page1_ocr.json").is_file()
+    assert not (tmp_path / "page2_ocr.json").exists()
+    assert (tmp_path / "page3_ocr.json").is_file()
+
+    # Loop-top abort: flip the flag on the FIRST progress emit. Page 1
+    # completes (flag set mid-page is not consulted until the next top).
+    from manga_ai_studio.gui.worker_thread import Abort, SharableFlag
+
+    flag = SharableFlag(False)
+
+    class _FlagSetter:
+        """Signal-shaped progress callback that flips the flag on emit."""
+
+        def emit(self, payload) -> None:
+            flag.set(True)
+
+    fresh = _export_pages(tmp_path / "fresh")
+    with pytest.raises(Abort):
+        batch_export_ocr(fresh, progress_callback=_FlagSetter(), abort_flag=flag)
+    assert (tmp_path / "fresh" / "page1_ocr.json").is_file()
+    assert not (tmp_path / "fresh" / "page2_ocr.json").exists()
+
+
+@pytest.mark.unit
+def test_batch_progress_emits(tmp_path: Path) -> None:
+    """Per-page progress: (percent, page_name) pairs, first = page 1.
+
+    Mirrors the batch_runner D-10 shape: one emit per page at the loop top,
+    percent computed as ``int(i / total * 100)``.
+    """
+    from manga_ai_studio.gui.worker_thread import Abort, SharableFlag
+
+    pages = _export_pages(tmp_path, count=3)
+
+    class _Recorder:
+        """Signal-shaped progress recorder (mirrors conftest.RecordingSignal)."""
+
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        def emit(self, payload) -> None:
+            self.calls.append(payload)
+
+    recorder = _Recorder()
+    summary = batch_export_ocr(
+        pages, progress_callback=recorder, abort_flag=SharableFlag(False)
+    )
+    assert summary["ok"] == 3
+    emitted = recorder.calls
+    assert [name for _, name in emitted] == ["page1.png", "page2.png", "page3.png"]
+    assert emitted[0] == (0, "page1.png")  # first emit has the first page's name
+    assert emitted[1] == (33, "page2.png")
+    assert emitted[2] == (66, "page3.png")
