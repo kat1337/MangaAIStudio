@@ -1915,9 +1915,10 @@ def test_inspector_vertical_check_emits_vertical_changed(qtbot) -> None:
 
 @pytest.mark.gui
 def test_inspector_bubble_spin_range_is_bounded(qtbot) -> None:
-    """The Bubble # QSpinBox is bounded (1..9999) per T-4-08 tampering mitigation."""
+    """The Bubble # QSpinBox is bounded (0..9999) per T-4-08 tampering
+    mitigation — 0 is the unset sentinel (displayed as an em dash, plan 04-10)."""
     panel = _make_inspector(qtbot)
-    assert panel.bubble_spin.minimum() == 1
+    assert panel.bubble_spin.minimum() == 0
     assert panel.bubble_spin.maximum() == 9999
 
 
@@ -1954,7 +1955,7 @@ def test_inspector_unchanged_focus_cycle_is_noop(qtbot) -> None:
         on_vertical=lambda _v: None,
     )
     pb = _pagebox_with_text(recognized="hello")
-    pb.bubble_no = None  # the spin displays 1 for None (the spin default)
+    pb.bubble_no = None  # the spin displays 0 — the unset sentinel — for None
     panel.load_box(pb)
 
     # Click in + click away with zero typing on every field.
@@ -1985,7 +1986,7 @@ def test_inspector_bubble_changed_commit_still_emits(qtbot) -> None:
         on_vertical=lambda _v: None,
     )
     pb = _pagebox_with_text(recognized="hello")
-    pb.bubble_no = None  # displays 1; changing it to 7 is a real manual edit
+    pb.bubble_no = None  # displays 0 — the unset sentinel; changing it to 7 is a real manual edit
     panel.load_box(pb)
     panel.bubble_spin.setValue(7)
     panel.bubble_spin.editingFinished.emit()
@@ -2016,6 +2017,91 @@ def test_inspector_unchanged_commit_is_noop_end_to_end(qtbot, tmp_path) -> None:
     assert item.pagebox.bubble_no is None
     window.inspector_panel.bubble_spin.editingFinished.emit()
     assert emitted == []
+    assert item.pagebox.manual_override is False
+
+
+# -- UAT test 6 gap closure round 3 (plan 04-10): bubble # 1 manually
+# -- assignable (0-sentinel)
+# The spinbox range was 1..9999 with bubble_no=None displayed as value 1, so
+# the WR-01 guard (number != _loaded_bubble) dropped a user-entered 1 as an
+# "unchanged focus cycle" — bubble 1 could never be assigned manually. The
+# fix: 0 is the UNSET sentinel (setRange(0, 9999) + setSpecialValueText em
+# dash); load_box maps None -> 0; the handler maps a 0 commit to
+# bubble_no=None + manual_override=False (clearing is not an override).
+
+
+@pytest.mark.gui
+def test_inspector_bubble_spin_unset_sentinel(qtbot) -> None:
+    """The unset sentinel is 0: range 0..9999, initial value 0, em-dash display.
+
+    FAILS pre-fix: minimum() == 1 and a fresh panel's text() at value 0 is '1'
+    (the phantom unset display). Post-fix: value 0 renders the setSpecialValueText
+    em dash, value 1 renders '1' (probe-verified on PySide6 6.10.1).
+    """
+    panel = _make_inspector(qtbot)
+    assert panel.bubble_spin.minimum() == 0
+    assert panel.bubble_spin.maximum() == 9999
+    assert panel.bubble_spin.value() == 0
+    assert panel.bubble_spin.text() == "\u2014"  # the em dash (unset state)
+    # A real value shows its digits (the special text is display-only).
+    panel.bubble_spin.setValue(1)
+    assert panel.bubble_spin.text() == "1"
+
+
+@pytest.mark.gui
+def test_inspector_bubble_1_commit_assigns_unset_box(qtbot) -> None:
+    """Entering 1 + Enter on an unset box commits bubble_no_changed(1).
+
+    FAILS pre-fix: the WR-01 guard drops it (1 == _loaded_bubble 1, the unset
+    placeholder) -> captured == [] — the exact UAT test-6 bug. Post-fix:
+    1 != the 0 sentinel, so the commit fires.
+    """
+    panel = _make_inspector(qtbot)
+    captured: list[int] = []
+    panel.connect_commit_handlers(
+        on_recognized=lambda _t: None,
+        on_translation=lambda _t: None,
+        on_bubble=captured.append,
+        on_vertical=lambda _v: None,
+    )
+    pb = _pagebox_with_text(recognized="hello")  # bubble_no=None (unset)
+    panel.load_box(pb)
+    panel.bubble_spin.setValue(1)
+    panel.bubble_spin.editingFinished.emit()
+    assert captured == [1]
+
+
+@pytest.mark.gui
+def test_inspector_bubble_1_assigned_and_cleared_end_to_end(qtbot, tmp_path) -> None:
+    """End-to-end: bubble # 1 assigns bubble_no=1 + manual_override=True (the
+    D-16 amber badge, UAT test-6 truth); committing 0 clears (bubble_no=None,
+    manual_override=False — unset is not an override).
+
+    FAILS pre-fix on the assignment half: bubble_no stays None (the guard
+    drops 1) — no badge. The clear half needs the new sentinel handler.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 50, 60)])[0]
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    # Assignment: entering 1 + Enter on the unset box.
+    window.inspector_panel.load_box(item.pagebox)
+    assert item.pagebox.bubble_no is None
+    window.inspector_panel.bubble_spin.setValue(1)
+    window.inspector_panel.bubble_spin.editingFinished.emit()
+    QApplication.processEvents()
+    assert item.pagebox.bubble_no == 1
+    assert item.pagebox.manual_override is True  # D-16 pin
+    assert item._badge_digit.toPlainText() == "1"  # refreshed amber badge
+
+    # Clearing: reload shows 1; committing 0 clears the number.
+    window.inspector_panel.load_box(item.pagebox)
+    assert window.inspector_panel.bubble_spin.value() == 1
+    window.inspector_panel.bubble_spin.setValue(0)
+    window.inspector_panel.bubble_spin.editingFinished.emit()
+    QApplication.processEvents()
+    assert item.pagebox.bubble_no is None
     assert item.pagebox.manual_override is False
 
 
