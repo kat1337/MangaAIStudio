@@ -67,6 +67,16 @@ class ImageFile:
             Phase 5).
         dirty: True when the page has unsaved edits (mask/inpaint) — reserved
             for plan 06 history tracking.
+        original_verified: D-06 (Phase 5). ``True`` when the original source
+            image is verified available: for ``.mas``-loaded pages this
+            means the referenced path resolves with an image suffix AND its
+            sha256 matches; a normal image/folder open also sets it ``True``
+            (the page was loaded from that path). When ``False``, Show
+            Original is greyed out and the embedded page image is the base.
+        geometry_altered: D-22 (Phase 5). ``True`` once a geometry image op
+            (crop/rotate/resize) has been applied to the page — drives the
+            ``_ocr.json`` export location rule (altered pages export into
+            ``cleaned/``). Levels does NOT set it (A4 — geometry-free).
     """
 
     path: Path
@@ -74,6 +84,11 @@ class ImageFile:
     mask: QImage | None = None
     boxes: list["PageBox"] | None = None
     dirty: bool = False
+    # D-06 original-availability flag (set at .mas load via verify_original;
+    # True for normal image/folder open — the source loaded from that path).
+    original_verified: bool = False
+    # D-22 geometry-op flag (set True by crop/rotate/resize; levels does NOT).
+    geometry_altered: bool = False
 
     def load_thumbnail(self, size: int = THUMBNAIL_SIZE) -> None:
         """Load ``self.thumbnail`` from ``self.path`` as a letterboxed pixmap.

@@ -26,6 +26,7 @@ distributions.
 from __future__ import annotations
 
 import shutil
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -104,6 +105,33 @@ def save_image_optimized(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     pil.save(path, **kwargs)
+
+
+def save_image_bytes(image_rgb: np.ndarray) -> bytes:
+    """Encode a numpy ``(H, W, 3)`` uint8 RGB array to PNG bytes in memory.
+
+    The in-memory twin of :func:`save_image_optimized` for the ``.mas``
+    embedded page image (plan 05-01, D-03 self-contained page files): the
+    PNG kwargs mirror ``save_image_optimized`` (``compress_level=9``) and
+    its pre-write ``(H, W, 3)`` uint8 validation (T-02-01 boundary). No
+    disk I/O happens here.
+
+    :param image_rgb: ``(H, W, 3)`` uint8 RGB array.
+    :raises ValueError: if ``image_rgb`` is not ``(H, W, 3)`` uint8.
+    :return: PNG-encoded bytes.
+    """
+    if (
+        image_rgb.ndim != 3
+        or image_rgb.shape[2] != 3
+        or image_rgb.dtype != np.uint8
+    ):
+        raise ValueError("expected (H,W,3) uint8 RGB")
+
+    buf = BytesIO()
+    Image.fromarray(image_rgb, mode="RGB").save(
+        buf, format="PNG", compress_level=9
+    )
+    return buf.getvalue()
 
 
 def passthrough_original(original: Path, cleaned_dir: Path) -> Path:

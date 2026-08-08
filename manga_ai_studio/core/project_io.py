@@ -37,6 +37,10 @@ import struct
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
+from manga_ai_studio.core.image_io import save_image_bytes
+
 # D-04 container header constants (RESEARCH Pattern 1, 05-RESEARCH.md:259-283).
 _MAGIC = b"MAS\x00"
 _FORMAT_VERSION = 1
@@ -44,6 +48,10 @@ _FORMAT_VERSION = 1
 # T-05-01: decompression bound per entry (512 MiB) — a crafted/corrupt .mas
 # must not expand into a decompression bomb (RESEARCH Pitfall 6).
 MAX_ENTRY_DECOMPRESSED = 512 * 1024 * 1024
+
+# T-05-04: a chapter with more pages than this is a DoS signal — load_project
+# rejects it with ProjectFormatError (RESEARCH Security Domain).
+MAX_PROJECT_PAGES = 1000
 
 
 class ProjectFormatError(Exception):
@@ -83,23 +91,17 @@ def _pack_entry(name: str, payload: bytes) -> bytes:
     return struct.pack("<HQ", len(name_b), len(data)) + name_b + data
 
 
-def save_page_file(path: Path, entries: dict[str, bytes]) -> None:
-    """Write a page container: header + entry table + LZMA2 blobs (D-04).
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically (temp file + ``os.replace``).
 
-    Atomic: the bytes land in a same-directory temp file and are
-    ``os.replace``'d onto the target, so a save interrupted mid-write can
-    never corrupt an existing page file (the held-out atomic backstop,
-    ``test_save_is_atomic`` in plan 05-01 Task 2).
+    A save interrupted mid-write can never corrupt an existing target file
+    (the held-out atomic backstop, ``test_save_is_atomic``).
     """
-    header = _MAGIC + struct.pack("<II", _FORMAT_VERSION, len(entries))
-    table = b"".join(_pack_entry(name, data) for name, data in entries.items())
-    payload = header + table
-
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".mas-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
+            fh.write(data)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -107,6 +109,18 @@ def save_page_file(path: Path, entries: dict[str, bytes]) -> None:
         except OSError:
             pass
         raise
+
+
+def save_page_file(path: Path, entries: dict[str, bytes]) -> None:
+    """Write a page container: header + entry table + LZMA2 blobs (D-04).
+
+    Atomic: the bytes land in a same-directory temp file and are
+    ``os.replace``'d onto the target, so a save interrupted mid-write can
+    never corrupt an existing page file.
+    """
+    header = _MAGIC + struct.pack("<II", _FORMAT_VERSION, len(entries))
+    table = b"".join(_pack_entry(name, data) for name, data in entries.items())
+    _atomic_write_bytes(path, header + table)
 
 
 def load_page_file(path: Path) -> dict[str, bytes]:
@@ -244,3 +258,189 @@ def json_to_pagebox(d: dict):
         bubble_no=None if bubble_no is None else _coerce_int(bubble_no, "bubble_no"),
         manual_override=bool(manual_override),
     )
+
+
+# --------------------------------------------------- page assembly + chapter
+
+def build_page_entries(page_state: dict) -> dict[str, bytes]:
+    """Project a page's live state into its 4 ``.mas`` entries (D-03/D-05).
+
+    ``page_state`` is a plain dict carrying:
+      boxes (list[PageBox]), image_rgb (np.ndarray (H,W,3) uint8),
+      mask_bin (np.ndarray (H,W) uint8 or None), geometry_altered (bool),
+      original_path (Path or None), original_sha256 (str or None).
+
+    Returns the entries dict: ``meta.json`` (UTF-8 JSON with the img/mask
+    dims so load can reshape without trusting blob length alone),
+    ``image.png`` (in-memory PNG encode), ``mask.bin`` (raw mask bytes —
+    omitted when there is no mask), and ``original.json`` (the D-06 path +
+    sha256 ref — present even when the source no longer exists on disk).
+    """
+    boxes = page_state["boxes"]
+    image_rgb = page_state["image_rgb"]
+    mask_bin = page_state.get("mask_bin")
+    geometry_altered = bool(page_state.get("geometry_altered", False))
+    original_path = page_state.get("original_path")
+    original_sha256 = page_state.get("original_sha256")
+
+    h, w = image_rgb.shape[:2]
+    original = (
+        None
+        if original_path is None
+        else {"path": str(original_path), "sha256": original_sha256 or ""}
+    )
+    meta = {
+        "version": 1,
+        "img": {"w": int(w), "h": int(h)},
+        "mask": (
+            None
+            if mask_bin is None
+            else {"h": int(mask_bin.shape[0]), "w": int(mask_bin.shape[1])}
+        ),
+        "geometry_altered": geometry_altered,
+        "original": original,
+        "boxes": [pagebox_to_json(b) for b in boxes],
+    }
+    entries = {
+        "meta.json": json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+        "image.png": save_image_bytes(image_rgb),
+    }
+    if mask_bin is not None:
+        entries["mask.bin"] = mask_bin.tobytes()
+    if original_path is not None:
+        entries["original.json"] = json.dumps(original, ensure_ascii=False).encode(
+            "utf-8"
+        )
+    return entries
+
+
+def save_project(
+    project_dir: Path,
+    project_name: str,
+    page_files: list[tuple[str, dict[str, bytes]]],
+) -> Path:
+    """Write a chapter project: plain-JSON manifest + per-page ``.mas`` files.
+
+    D-01/D-02/D-04: ``project_dir`` holds ``manifest.json`` and one
+    ``<stem>.mas`` per page. Non-destructive overwrite (D-02): ONLY the
+    owned ``manifest.json`` and ``*.mas`` files are ever written or
+    replaced — foreign folder content is untouched. Every file write is
+    atomic (temp file + ``os.replace``).
+
+    :param project_dir: the ``<chapter>.mas-project/`` folder.
+    :param project_name: the chapter/session name (UTF-8 in the manifest).
+    :param page_files: ``(stem, entries)`` pairs in manifest order.
+    :return: the manifest path.
+    """
+    project_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "version": _FORMAT_VERSION,
+        "name": project_name,
+        "pages": [{"name": stem, "file": f"{stem}.mas"} for stem, _ in page_files],
+    }
+    manifest_path = project_dir / "manifest.json"
+    # Plain, human-readable, diffable JSON (D-04) — UTF-8, indented.
+    _atomic_write_bytes(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    for stem, entries in page_files:
+        save_page_file(project_dir / f"{stem}.mas", entries)
+    return manifest_path
+
+
+def load_project(manifest_path: Path) -> dict:
+    """Read + validate a plain-JSON chapter manifest (D-01/D-04).
+
+    The manifest stays plain JSON (human-readable, diffable). Structure is
+    validated: version int-coerced and must equal ``_FORMAT_VERSION`` (a
+    newer format is rejected as corrupt — RESEARCH A9), name must be a str,
+    pages a list of ``{name: str, file: str}`` capped at
+    ``MAX_PROJECT_PAGES`` (T-05-04 oversized-chapter DoS signal).
+    Malformed structure raises ProjectFormatError.
+    """
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise ProjectFormatError(f"cannot read manifest: {exc}") from exc
+    except ValueError as exc:  # json.JSONDecodeError subclasses ValueError
+        raise ProjectFormatError(f"malformed manifest JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ProjectFormatError("manifest must be a JSON object")
+    try:
+        version = _coerce_int(data["version"], "manifest version")
+        name = data["name"]
+        pages = data["pages"]
+    except KeyError as exc:
+        raise ProjectFormatError(f"manifest missing required key: {exc}") from exc
+    if version != _FORMAT_VERSION:
+        raise ProjectFormatError(
+            f"manifest format version {version} is not supported "
+            f"(this build reads version {_FORMAT_VERSION})"
+        )
+    if not isinstance(name, str):
+        raise ProjectFormatError("manifest name must be a string")
+    if not isinstance(pages, list):
+        raise ProjectFormatError("manifest pages must be a list")
+    if len(pages) > MAX_PROJECT_PAGES:
+        raise ProjectFormatError(
+            f"project has {len(pages)} pages (max {MAX_PROJECT_PAGES})"
+        )
+    for page in pages:
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("name"), str)
+            or not isinstance(page.get("file"), str)
+        ):
+            raise ProjectFormatError(
+                "manifest page entries must carry string 'name' and 'file'"
+            )
+    return {"version": version, "name": name, "pages": pages}
+
+
+def parse_page_entries(entries: dict[str, bytes]) -> dict:
+    """Decode a page container's entries into a raw dict — the load-side
+    mirror of :func:`build_page_entries`.
+
+    Returns ``{"meta": dict, "image_png": bytes, "mask": np.ndarray | None,
+    "original": dict | None}``. ``mask`` is reshaped via the dims recorded in
+    ``meta["mask"]`` (never trusted from blob length alone) and
+    ``.copy()``-detached from the container buffer (Pitfall 2 discipline).
+    Typed model construction (PageBox/ImageFile) happens at the GUI boundary
+    (plan 05-05) so this module stays Qt-free.
+    """
+    try:
+        meta_raw = entries["meta.json"]
+        image_png = entries["image.png"]
+    except KeyError as exc:
+        raise ProjectFormatError(f"page file missing required entry: {exc}") from exc
+    try:
+        meta = json.loads(meta_raw.decode("utf-8"))
+    except ValueError as exc:
+        raise ProjectFormatError(f"malformed meta.json: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise ProjectFormatError("meta.json must be a JSON object")
+
+    mask = None
+    mask_meta = meta.get("mask")
+    if mask_meta is not None:
+        try:
+            mask_bytes = entries["mask.bin"]
+        except KeyError as exc:
+            raise ProjectFormatError(
+                "meta.json declares a mask but the mask.bin entry is missing"
+            ) from exc
+        mask = np.frombuffer(mask_bytes, dtype=np.uint8).reshape(
+            int(mask_meta["h"]), int(mask_meta["w"])
+        ).copy()
+
+    original = None
+    if "original.json" in entries:
+        try:
+            original = json.loads(entries["original.json"].decode("utf-8"))
+        except ValueError as exc:
+            raise ProjectFormatError(f"malformed original.json: {exc}") from exc
+
+    return {"meta": meta, "image_png": image_png, "mask": mask, "original": original}
