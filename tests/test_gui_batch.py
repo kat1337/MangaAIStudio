@@ -898,3 +898,68 @@ def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkey
     assert window.canvas.has_mask_content() is True, (
         "after returning to page_a the canvas must show the detected mask"
     )
+
+
+# ---------------------------------------------------------------------------
+# UAT test 1 gap closure round 2 (plan 04-09): menu bar structure
+# ---------------------------------------------------------------------------
+# The user's report: "recent files and batch are ahead of File and Edit, it
+# should be Recent files, File, and then batch" — Recent Files and Batch must
+# be File SUBMENUS only, never top-level menubar entries. Pre-fix the two
+# submenus were constructed via menuBar().addMenu(...) (main_window.py:269/292)
+# which appends their menuActions to the MENUBAR action list; the later
+# file_menu.addMenu re-parents the QMenu but Qt does NOT remove the action
+# from the menubar — so they appeared top-level AHEAD of File AND as File
+# submenus. Fix: standalone QMenu construction (QMenu(title, self)).
+
+
+@pytest.mark.gui
+def test_menubar_top_level_has_only_the_six_core_menus(qtbot, tmp_path) -> None:
+    """The menubar top-level shows exactly File, Edit, View, Text, Tools, Help."""
+    window = _make_window(qtbot, tmp_path)
+    # Hold strong references: QAction wrappers from actions() are temporary
+    # (test_gui_boxes.py:2694 precedent).
+    actions = window.menuBar().actions()
+    assert [a.text() for a in actions] == [
+        "&File",
+        "&Edit",
+        "&View",
+        "&Text",
+        "&Tools",
+        "&Help",
+    ]
+
+
+@pytest.mark.gui
+def test_recent_and_batch_menus_are_file_submenus_not_top_level(qtbot, tmp_path) -> None:
+    """Recent Files + Batch menuActions live in the File menu, NOT the menubar."""
+    window = _make_window(qtbot, tmp_path)
+    actions = window.menuBar().actions()
+    file_menu = next(a for a in actions if a.text() == "&File").menu()
+    recent_action = window.recent_menu.menuAction()
+    batch_action = window.batch_menu.menuAction()
+    # Both submenus ARE File-menu entries…
+    assert recent_action in file_menu.actions()
+    assert batch_action in file_menu.actions()
+    # …and are NOT top-level menubar entries (pre-fix they were — the user's
+    # exact report: "Recent Files and Batch ahead of File and Edit").
+    assert recent_action not in actions
+    assert batch_action not in actions
+
+
+@pytest.mark.gui
+def test_file_menu_internal_order(qtbot, tmp_path) -> None:
+    """The File menu order: Open Image, Open Folder, Recent Files, sep, Export, Batch, sep, Quit."""
+    window = _make_window(qtbot, tmp_path)
+    actions = window.menuBar().actions()
+    file_menu = next(a for a in actions if a.text() == "&File").menu()
+    file_actions = file_menu.actions()
+    assert [a.text() for a in file_actions if not a.isSeparator()] == [
+        "Open Image\u2026",
+        "Open Folder\u2026",
+        "Recent Files",
+        "Export Page\u2026",
+        "Batch",
+        "Quit",
+    ]
+    assert [i for i, a in enumerate(file_actions) if a.isSeparator()] == [3, 6]
