@@ -1170,6 +1170,132 @@ def test_text_overlay_reposition_does_not_rebuild_document(qtbot) -> None:
     assert item._text_overlay.toPlainText() == "hello"
 
 
+# -- UAT test 1 gap closure (plan 04-08): zoom clamp + outline (RC-2/RC-3) --
+# UI-SPEC §16 mandates a [10,28] viewport-px font clamp + a legibility outline.
+# Pre-fix the font was flat 14 scene px (4-7 device px at the default
+# fit-to-window zoom ~0.3-0.5) and the 2px outline was scene-px (sub-pixel AA'd
+# away below 100%: 2710 -> 260 -> 0 dark pixels at 1.0/0.5/0.25 zoom — debug
+# session 04-01). Fix: scene font = clamp(14*zoom, 10, 28)/zoom, outline =
+# 2/zoom scene px (constant 2 viewport px), re-applied from the stored
+# _overlay_zoom via apply_overlay_zoom() on every zoom_changed emission.
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "zoom,expected_point",
+    [
+        (0.25, 40.0),
+        (0.5, 20.0),
+        (1.0, 14.0),
+        (4.0, 7.0),
+    ],
+)
+def test_text_overlay_font_clamp_scales_with_zoom(qtbot, zoom, expected_point) -> None:
+    """apply_overlay_zoom re-derives the font so the RENDERED px stays in [10,28] (RC-2).
+
+    UI-SPEC §16: the scene font is clamp(14*zoom, 10, 28)/zoom, so the rendered
+    viewport-px size clamp(14*zoom, 10, 28) stays within [10, 28] at every zoom.
+    Pre-fix the font stayed 14 scene px at every zoom (no clamp implemented).
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.apply_overlay_zoom(zoom)
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() == pytest.approx(expected_point, abs=0.1)
+    assert 10.0 <= fmt.font().pointSizeF() * zoom <= 28.0
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "zoom,expected_width",
+    [
+        (0.25, 8.0),
+        (0.5, 4.0),
+        (1.0, 2.0),
+        (4.0, 0.5),
+    ],
+)
+def test_text_overlay_outline_width_scales_with_zoom(qtbot, zoom, expected_width) -> None:
+    """apply_overlay_zoom keeps the outline a constant 2 VIEWPORT px (RC-3).
+
+    The outline pen is 2/zoom scene px so it renders 2 device px at any zoom.
+    The scene-px reading (fixed 2 scene px) goes sub-pixel below 100% — the
+    debug session measured 0 dark outline pixels at 0.25 zoom ("just looks
+    white"). Pre-fix the outline stayed 2 scene px at every zoom.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.apply_overlay_zoom(zoom)
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    pen = fmt.textOutline()
+    assert pen.widthF() == pytest.approx(expected_width, abs=0.01)
+    assert pen.widthF() * zoom == pytest.approx(2.0, abs=0.01)
+
+
+@pytest.mark.gui
+def test_text_overlay_zoom_style_survives_content_refresh(qtbot) -> None:
+    """A content refresh (no zoom arg) reuses the STORED zoom style (RC-2/RC-3).
+
+    Inspector/OCR/inline-edit commits call refresh_text_overlay() without a
+    zoom argument; the style must come from the stored _overlay_zoom so a
+    content refresh never resets the font clamp/outline back to the zoom-1
+    style.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.apply_overlay_zoom(0.5)
+    pb.set_translation("hola")  # content change -> current focus flips
+    item.refresh_text_overlay()
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() == pytest.approx(20.0, abs=0.1)
+    assert fmt.textOutline().widthF() == pytest.approx(4.0, abs=0.01)
+
+
+@pytest.mark.gui
+def test_zoom_changed_reapplies_overlay_style_canvas(qtbot) -> None:
+    """The canvas zoom_changed slot forwards its zoom to the overlay style (RC-2/RC-3).
+
+    _on_zoom_changed_reposition_handles previously DISCARDED its zoom argument
+    (a leading-underscore parameter) and only repositioned handles — the
+    overlay style never re-derived from the new zoom. fit_to_window /
+    zoom_reset / wheel zoom all emit zoom_changed (canvas.py:820/827/851), so
+    this single slot covers every zoom path incl. the default fit-to-window.
+    """
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    pb = _pagebox_with_text(recognized="hello")
+    canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[pb])
+    item = canvas._box_items[0]
+    assert item._text_overlay.toPlainText() == "hello"
+    canvas._on_zoom_changed_reposition_handles(0.5)
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() == pytest.approx(20.0, abs=0.1)
+    assert fmt.textOutline().widthF() == pytest.approx(4.0, abs=0.01)
+    # The overlay must stay inside the box rect after the zoom re-apply.
+    assert (
+        item._text_overlay.sceneBoundingRect().intersects(item.sceneBoundingRect())
+        is True
+    )
+
+
 @pytest.mark.gui
 def test_set_text_overlay_visible_false_hides_only_text(qtbot) -> None:
     """set_text_overlay_visible(False) hides the text child but the box border stays visible.
