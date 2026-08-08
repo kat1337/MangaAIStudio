@@ -1587,6 +1587,144 @@ def test_badge_digit_shows_bubble_number(qtbot) -> None:
     assert item._badge_digit.toPlainText() == "42"
 
 
+# -- UAT test 4 gap closure round 3 (plan 04-10): badge digit-fit sizing --
+# The badge was a FIXED 20x14 rect with the digit at a hardcoded (3,-1): the
+# 14px-tall badge clipped the 19px-tall glyph (the user's "top half only") and
+# multi-digit numbers overflowed the 20px width. The 04-10 fix measures the
+# digit's tight glyph line box (document margin 0) after setPlainText, resizes
+# the badge rect to digit_w + 2x4 / digit_h + 2x2 padding, re-centers the
+# digit, and uses the ACTUAL badge size for the TL-outside placement + the
+# edge-flip decision.
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "number, badge_w, badge_h",
+    [(3, 24.0, 23.0), (12, 40.0, 23.0), (123, 56.0, 23.0)],
+)
+def test_badge_rect_sizes_to_digit(qtbot, number, badge_w, badge_h) -> None:
+    """The badge rect is DIGIT-SIZED: measured glyph line box + 4px/2px padding.
+
+    FAILS pre-fix: the badge rect is the fixed 20x14 and the digit (24x27 at
+    the default document margin 4, pos (3,-1)) overflows it — the local rect
+    (3,-1)-(27,26) is NOT contained (right 27 > 20, bottom 26 > 14), the
+    user's "top half only" clipping. The badge-size reference values are the
+    probed platform sizes (16x19 per digit at the 12pt semibold badge font);
+    the centering assertion uses the MEASURED digit rect so it holds on any
+    platform font.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = number
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+
+    r = item._badge.rect()
+    assert r.x() == pytest.approx(0.0, abs=0.01)
+    assert r.y() == pytest.approx(0.0, abs=0.01)
+    assert r.width() == pytest.approx(badge_w, abs=0.01)
+    assert r.height() == pytest.approx(badge_h, abs=0.01)
+
+    # Measurement basis: the tight glyph line box (document margin 0), so the
+    # default QTextDocument margin (4.0) cannot inflate the badge.
+    assert item._badge_digit.document().documentMargin() == pytest.approx(0.0)
+
+    # The digit's LOCAL rect is fully contained in the badge rect (no
+    # top/bottom/right clipping at any digit count).
+    digit = item._badge_digit
+    digit_local = QRectF(digit.pos(), digit.boundingRect().size())
+    badge_rect = QRectF(0.0, 0.0, r.width(), r.height())
+    assert digit_local.left() >= 0.0, f"digit left {digit_local.left()} must not clip"
+    assert digit_local.top() >= 0.0, f"digit top {digit_local.top()} must not clip"
+    assert digit_local.right() <= badge_rect.right(), (
+        f"digit right {digit_local.right()} must fit inside badge width {badge_rect.right()}"
+    )
+    assert digit_local.bottom() <= badge_rect.bottom(), (
+        f"digit bottom {digit_local.bottom()} must fit inside badge height {badge_rect.bottom()}"
+    )
+
+    # The digit is re-centered from the MEASURED digit size.
+    dw = digit.boundingRect().width()
+    dh = digit.boundingRect().height()
+    assert digit.pos().x() == pytest.approx((r.width() - dw) / 2.0, abs=0.01)
+    assert digit.pos().y() == pytest.approx((r.height() - dh) / 2.0, abs=0.01)
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "number, expect_x, expect_y",
+    [(3, -7.0, -6.0), (12, -23.0, -6.0)],
+)
+def test_badge_tl_outside_uses_actual_badge_size(qtbot, number, expect_x, expect_y) -> None:
+    """The TL-outside placement uses the ACTUAL badge size (badge + 2px offset).
+
+    FAILS pre-fix: the fixed 20x14 constants place the badge at (-3,3) for
+    BOTH digits — the badge does not track its own size. Post-fix: for the
+    reference box (rect 20,20,200,100, unselected 2px pen -> sceneBoundingRect
+    (19,19,202,102)) a 24x23 badge sits at (-7,-6) and a 40x23 badge at
+    (-23,-6) — the multi-digit badge keeps the same 2px gap as the single-digit.
+    """
+    pb = _pagebox_with_text(recognized="hello")
+    pb.bubble_no = number
+    _scene, item = _scene_with_box(pb)
+    item.refresh_badge()
+
+    # Precondition: the reference box's scene rect (2px unselected pen).
+    sbr = item.sceneBoundingRect()
+    assert sbr.left() == pytest.approx(19.0, abs=0.01)
+    assert sbr.top() == pytest.approx(19.0, abs=0.01)
+
+    pos = item._badge.scenePos()
+    assert pos.x() == pytest.approx(expect_x, abs=0.01), (
+        f"badge x {pos.x()} must be sceneBoundingRect.left() - badge_w - 2 ({expect_x})"
+    )
+    assert pos.y() == pytest.approx(expect_y, abs=0.01), (
+        f"badge y {pos.y()} must be sceneBoundingRect.top() - badge_h - 2 ({expect_y})"
+    )
+    # The badge remains TL-outside the box's scene rect.
+    assert pos.x() < sbr.left()
+    assert pos.y() < sbr.top()
+
+
+@pytest.mark.gui
+def test_badge_edge_flip_uses_actual_size(qtbot) -> None:
+    """The edge-flip uses the ACTUAL badge size and the digit stays contained.
+
+    A box at (0,0,50,50) in a 1000x1000 scene: sceneBoundingRect is
+    (-1,-1,52,52) (2px pen); the 40x23 outside candidate (-43,-26) would clip
+    off the page TL edge, so the badge flips INSIDE at (1,1). FAILS pre-fix on
+    the containment half: the digit ('12' at margin 4, pos (3,-1)) overflows
+    the fixed 20x14 badge even though the (size-independent) inside-flip inset
+    lands at (1,1) either way.
+    """
+    pb = PageBox(box=Box(0, 0, 50, 50), origin=DETECTED)  # the page TL corner
+    pb.bubble_no = 12
+    scene = QGraphicsScene()
+    scene.setSceneRect(0.0, 0.0, 1000.0, 1000.0)  # the page bounds (pre-add)
+    item = BoxItem(pb)
+    scene.addItem(item)
+    item.refresh_badge()
+
+    sbr = item.sceneBoundingRect()
+    assert sbr.left() == pytest.approx(-1.0, abs=0.01)
+    assert sbr.top() == pytest.approx(-1.0, abs=0.01)
+
+    # The outside candidate would clip -> flipped inside-top-left (inset 2px).
+    pos = item._badge.scenePos()
+    assert pos.x() == pytest.approx(1.0, abs=0.01)
+    assert pos.y() == pytest.approx(1.0, abs=0.01)
+
+    # The badge is the ACTUAL 40x23 size and the digit is fully contained.
+    r = item._badge.rect()
+    assert r.width() == pytest.approx(40.0, abs=0.01)
+    assert r.height() == pytest.approx(23.0, abs=0.01)
+    digit = item._badge_digit
+    digit_local = QRectF(digit.pos(), digit.boundingRect().size())
+    assert digit_local.left() >= 0.0
+    assert digit_local.top() >= 0.0
+    assert digit_local.right() <= r.width()
+    assert digit_local.bottom() <= r.height()
+
+
 # ===========================================================================
 # Plan 04-04 Task 2 — InspectorPanel dock + Toggle Text Overlay (T)
 # ===========================================================================
