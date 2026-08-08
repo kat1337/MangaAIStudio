@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QGraphicsItemGroup,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -97,6 +98,19 @@ _EMPTY_BOX_HINT_TEXT = (
     "No text boxes yet. Alt+drag on the page to draw one, "
     "or Tools \u2192 Detect Text (D)."
 )
+
+# Phase 5 crop tool (plan 05-07, UI-SPEC surface 24a + §Z-order). The dim-out
+# overlay composits the outside-of-crop region with 4 rects at
+# rgba(0,0,0,0.45) — deliberately darker than the 0.24 preview fills and
+# lighter than opaque black (the discarded area reads as "cut away" without
+# competing with the artwork). z=880 sits BELOW the crop border
+# (``preview_item`` z=900) and ABOVE the box layer (z=100) so the dashed
+# keep-edge renders on top of the dim while boxes inside the crop region are
+# visibly dimmed outside it. The 8x8 scene-px minimum reuses MIN_BOX_SIZE
+# (UI-SPEC §Spacing exceptions — a crop smaller than the box minimum is a
+# no-op, not a degenerate edit).
+CROP_DIM_Z = 880
+_CROP_DIM_COLOR = QColor(0, 0, 0, int(255 * 0.45))
 
 
 def _disable_qimage_allocation_limit() -> None:
@@ -160,6 +174,12 @@ class EditorCanvas(QGraphicsView):
     # box below the 8x8 create threshold never emits (the Phase 3 no-op
     # returns before this signal — UI-SPEC §14).
     ocr_requested = Signal(object)
+    # Plan 05-07 (UI-SPEC surface 24a): emitted when the Crop tool applies an
+    # armed crop rect (Enter). Carries the rect in SCENE coordinates as a
+    # QRectF; the MainWindow handler converts to image-pixel ints (clamped)
+    # and runs the crop apply path. The tool STAYS active after emission (the
+    # user may crop again; switching tools is the exit).
+    crop_committed = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -309,6 +329,20 @@ class EditorCanvas(QGraphicsView):
         self._start_pt = QPointF()
         self._lasso_path = QPainterPath()
 
+        # Crop-tool state (plan 05-07, UI-SPEC surface 24a). The armed-rect
+        # state machine: a drag defines ``_crop_rect`` (scene coords, clamped
+        # to the page) which stays ARMED after release — dim-out overlay +
+        # preview persist until Enter applies (``_apply_armed_crop`` ->
+        # ``crop_committed``) or Esc cancels; the tool stays active either
+        # way. Unlike the mask-rect there is NO commit-on-release (drag-then-
+        # decide). ``_crop_dim_items`` holds the 4 composited dim rects
+        # (z=880); ``_crop_anchor`` is the drag origin. The armed state is
+        # removed on tool switch, page switch, and image replacement.
+        self._crop_rect: QRectF | None = None
+        self._crop_drag_active = False
+        self._crop_anchor = QPointF()
+        self._crop_dim_items: list = []
+
         # Inpaint preview state (plan 05, UI-SPEC surface 7). _original_image_numpy
         # holds the pre-inpaint image (for the before/after toggle);
         # _inpainted_qimage is the displayed (inpainted) image; _showing_original
@@ -343,6 +377,8 @@ class EditorCanvas(QGraphicsView):
         self._original_image_numpy = None
         self._inpainted_qimage = None
         self._showing_original = False
+        # A new page clears any armed crop rect (plan 05-07 — stale geometry).
+        self._clear_crop_state()
 
         self._update_empty_state()
 
@@ -382,6 +418,7 @@ class EditorCanvas(QGraphicsView):
         self._original_image_numpy = None
         self._inpainted_qimage = None
         self._showing_original = False
+        self._clear_crop_state()
         self.setTransform(QTransform())
         self._update_empty_state()
 
@@ -687,6 +724,10 @@ class EditorCanvas(QGraphicsView):
                 f"expected (H,W,3) uint8 RGB array, got shape={rgb.shape} dtype={rgb.dtype}"
             )
 
+        # The page image is being replaced (image op write-back, undo, or a
+        # page mutation): any armed crop rect is stale geometry (plan 05-07).
+        self._clear_crop_state()
+
         # _original_image_numpy holds the PRE-FIRST-inpaint image for the
         # before/after preview toggle (captured once per page, reset on
         # set_image/clear). It is NOT used as the composite base — compositing
@@ -754,10 +795,14 @@ class EditorCanvas(QGraphicsView):
         """Set the active mask-editing tool (UI-SPEC surface 6).
 
         Resets the Shift eraser-modifier (it is transient — only Brush+Shift
-        means erase).
+        means erase). Switching AWAY from the Crop tool removes any armed
+        crop rect + dim-out overlay (plan 05-07 — the armed state belongs to
+        the active Crop session; switching tools is the exit).
         """
         self.current_tool = tool
         self.is_eraser_modifier = False
+        if tool != ToolMode.CROP:
+            self._clear_crop_state()
         self._update_cursor_visuals()
 
     def set_brush_size(self, size: int) -> None:
@@ -993,9 +1038,24 @@ class EditorCanvas(QGraphicsView):
             # click paints (UI-SPEC §12d step 2 last bullet — critical).
             self._deselect_box()
 
+        # --- Crop-tool branch (plan 05-07, UI-SPEC surface 24a). The box
+        # hit-test above already returned for presses on boxes/handles — the
+        # crop drag starts only on EMPTY canvas (a press on a box still
+        # selects/moves it while the Crop tool is active). Runs before the
+        # mask-tool branch so CROP never falls into paint dispatch.
         if (
             event.button() == Qt.MouseButton.LeftButton
-            and self.current_tool != ToolMode.MOVE
+            and self.current_tool == ToolMode.CROP
+            and self._mask is not None
+            and not self._mask.isNull()
+        ):
+            self._begin_crop_drag(event)
+            event.accept()
+            return
+
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.current_tool not in (ToolMode.MOVE, ToolMode.CROP)
             and self._mask is not None
             and not self._mask.isNull()
         ):
@@ -1080,6 +1140,12 @@ class EditorCanvas(QGraphicsView):
             event.accept()
             return
 
+        # --- Crop drag advance (plan 05-07): update the rect + dim overlay.
+        if self._crop_drag_active:
+            self._advance_crop_drag(curr)
+            event.accept()
+            return
+
         if self._is_painting:
             self._advance_paint(curr)
             event.accept()
@@ -1127,6 +1193,15 @@ class EditorCanvas(QGraphicsView):
                 self._moving_box = None
                 if moved:
                     self.boxes_modified.emit(before)
+                self.viewport().releaseMouse()
+                event.accept()
+                return
+
+            # --- Crop drag release (plan 05-07): ARM the rect (drag-then-
+            # decide — no commit-on-release). Dim + preview persist until
+            # Enter applies / Esc cancels; a <8x8 release arms nothing.
+            if self._crop_drag_active:
+                self._end_crop_drag()
                 self.viewport().releaseMouse()
                 event.accept()
                 return
@@ -1198,6 +1273,163 @@ class EditorCanvas(QGraphicsView):
         # Single emission per completed stroke — the plan-06 history hook.
         self.mask_modified.emit()
 
+    # ------------------------------------------------- crop tool (plan 05-07)
+    # The armed-rect state machine (UI-SPEC surface 24a): drag defines the
+    # rect (CrossCursor, dim-out overlay z=880, cyan dashed border z=900);
+    # release ARMS it (drag-then-decide — dim + preview persist); Enter
+    # applies (crop_committed), Esc cancels; the Crop tool stays active
+    # either way. A drag < 8x8 scene px is a no-op (no overlay, no preview —
+    # the 8x8 minimum; RESEARCH Pitfall 10).
+    def _begin_crop_drag(self, event) -> None:
+        """Start a crop-rect drag: capture the anchor, clear any armed rect,
+        show the CrossCursor."""
+        self._crop_drag_active = True
+        self._crop_anchor = self._scene_pos(event)
+        self._clear_crop_dim()
+        self._crop_rect = None
+        self.preview_item.setPath(QPainterPath())
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._cursor_overridden = True
+        # The viewport owns the drag so move/release keep arriving even when
+        # the pointer leaves the page (mirrors the box-drag pattern).
+        self.viewport().grabMouse()
+
+    def _advance_crop_drag(self, curr: QPointF) -> None:
+        """Update the crop rect during the drag, clamped to the page bounds.
+
+        Both the anchor and the cursor position are clamped into the page
+        rect (UI-SPEC §UI Considerations overflow: scene-px geometry is
+        page-bounded — a drag beyond the canvas clamps, no container
+        overflow). The rect is shown (dim + preview border) only once it is
+        >= 8x8 scene px on both axes; smaller rects show nothing (the no-op
+        contract).
+        """
+        page = self.sceneRect()
+        if page.isNull():
+            return
+
+        def _clamp(p: QPointF) -> QPointF:
+            return QPointF(
+                min(max(p.x(), 0.0), page.width()),
+                min(max(p.y(), 0.0), page.height()),
+            )
+
+        rect = QRectF(_clamp(self._crop_anchor), _clamp(curr)).normalized()
+        self._crop_rect = rect
+        if rect.width() >= MIN_BOX_SIZE and rect.height() >= MIN_BOX_SIZE:
+            self._show_crop_dim(rect)
+            path = QPainterPath()
+            path.addRect(rect)
+            self.preview_item.setPath(path)
+        else:
+            self._clear_crop_dim()
+            self.preview_item.setPath(QPainterPath())
+
+    def _end_crop_drag(self) -> None:
+        """Arm the rect on release: dim + preview PERSIST (drag-then-decide).
+
+        A release with a <8x8 rect clears the overlay/preview and arms
+        nothing (the no-op contract). The cursor returns to the default.
+        """
+        self._crop_drag_active = False
+        if self._cursor_overridden:
+            self.unsetCursor()
+            self._cursor_overridden = False
+        rect = self._crop_rect
+        if (
+            rect is None
+            or rect.width() < MIN_BOX_SIZE
+            or rect.height() < MIN_BOX_SIZE
+        ):
+            self._crop_rect = None
+            self._clear_crop_dim()
+            self.preview_item.setPath(QPainterPath())
+            return
+        # Armed: leave the dim + preview in place until Enter / Esc.
+
+    def _show_crop_dim(self, rect: QRectF) -> None:
+        """Build the 4 composited dim rects for the outside-of-crop region.
+
+        The dim rects cover the page minus the crop rect INFLATED BY 1px on
+        each side (UI-SPEC §Spacing exceptions — the 1px inset so the dim
+        meets the crop edge exactly and the 2px cyan dashed border renders
+        unobscured). Rect at the page edge are skipped (nothing to dim);
+        the rects are pairwise non-overlapping. Constant item count (4 max —
+        T-05-18, fixed per armed drag).
+        """
+        self._clear_crop_dim()
+        page = self.sceneRect()
+        if page.isNull():
+            return
+        W, H = page.width(), page.height()
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+
+        def _add(dx, dy, dw, dh) -> None:
+            if dw <= 0 or dh <= 0:
+                return
+            # Clamp the dim rect to the page (a moat rect may extend past the
+            # page when the crop hugs an edge — nothing may dim outside the
+            # page; the outside-of-crop region is page-bounded).
+            r = QRectF(dx, dy, dw, dh).intersected(page)
+            if r.width() <= 0 or r.height() <= 0:
+                return
+            item = QGraphicsRectItem(r)
+            item.setPen(Qt.PenStyle.NoPen)
+            item.setBrush(QBrush(_CROP_DIM_COLOR))
+            item.setZValue(CROP_DIM_Z)
+            self._scene.addItem(item)
+            self._crop_dim_items.append(item)
+
+        # 1px moat around the crop rect: top / bottom span the full width,
+        # left / right fill the vertical gap between them (h+2 tall).
+        _add(0.0, 0.0, W, y - 1.0)  # top
+        _add(0.0, y + h + 1.0, W, H - (y + h + 1.0))  # bottom
+        _add(0.0, y - 1.0, x - 1.0, h + 2.0)  # left
+        _add(x + w + 1.0, y - 1.0, W - (x + w + 1.0), h + 2.0)  # right
+
+    def _clear_crop_dim(self) -> None:
+        """Remove the dim-out overlay rects from the scene."""
+        for item in self._crop_dim_items:
+            self._scene.removeItem(item)
+        self._crop_dim_items = []
+
+    def _apply_armed_crop(self) -> None:
+        """Enter on an armed crop rect: emit ``crop_committed`` (scene rect)
+        and clear the armed state. The tool STAYS active (the user may crop
+        again; switching tools is the exit). A degenerate rect (never armed,
+        or shrunk below the 8x8 min) emits nothing.
+        """
+        rect = self._crop_rect
+        self._crop_rect = None
+        self._clear_crop_dim()
+        self.preview_item.setPath(QPainterPath())
+        if (
+            rect is None
+            or rect.width() < MIN_BOX_SIZE
+            or rect.height() < MIN_BOX_SIZE
+        ):
+            return
+        self.crop_committed.emit(QRectF(rect))
+
+    def _cancel_armed_crop(self) -> None:
+        """Esc on an armed crop rect: clear overlay + preview + armed rect;
+        the Crop tool stays active."""
+        self._crop_rect = None
+        self._clear_crop_dim()
+        self.preview_item.setPath(QPainterPath())
+
+    def _clear_crop_state(self) -> None:
+        """Drop the armed rect + dim overlay + any in-progress crop drag.
+
+        Called on tool switch away from Crop, page switch, and image
+        replacement (stale geometry). Not used to end a completed drag (the
+        release path handles its own cleanup + cursor restore).
+        """
+        self._crop_rect = None
+        self._crop_drag_active = False
+        self._clear_crop_dim()
+        self.preview_item.setPath(QPainterPath())
+
     # ----------------------------------------------------------- keyboard
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Handle Phase 3 box keys; track Space for pan; Shift toggles Brush<->Eraser.
@@ -1223,10 +1455,16 @@ class EditorCanvas(QGraphicsView):
                 return
         if event.key() == Qt.Key.Key_Escape:
             # UI-SPEC §Shortcuts Esc priority: cancel the inline edit FIRST
-            # (highest priority — the box stays selected, §15); then Phase 3
-            # deselect; Phase 2 batch-cancel lives in MainWindow.
+            # (highest priority — the box stays selected, §15); then the crop
+            # armed-rect (plan 05-07 — overlay + preview clear, the Crop tool
+            # stays active); then Phase 3 deselect; Phase 2 batch-cancel lives
+            # in MainWindow.
             if self._inline_editor.is_active():
                 self._inline_editor.cancel()
+                event.accept()
+                return
+            if self.current_tool == ToolMode.CROP and self._crop_rect is not None:
+                self._cancel_armed_crop()
                 event.accept()
                 return
             if self._selected_box() is not None:
@@ -1242,6 +1480,20 @@ class EditorCanvas(QGraphicsView):
                 self._inline_editor.enter(selected)
                 event.accept()
                 return
+
+        # --- Crop armed-rect keys (plan 05-07, UI-SPEC surface 24a): with a
+        # crop rect armed AND the Crop tool active, Enter applies the crop
+        # (emits crop_committed, clears the armed state, tool stays active);
+        # Enter with no armed rect falls through (nothing to apply). Esc is
+        # handled in the Esc block above (crop-cancel before box deselect).
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and self.current_tool == ToolMode.CROP
+            and self._crop_rect is not None
+        ):
+            self._apply_armed_crop()
+            event.accept()
+            return
 
         if event.key() == Qt.Key.Key_Space and not self._space_held:
             self._space_held = True
