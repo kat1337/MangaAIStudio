@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:30:00Z"
+updated: "2026-08-08T02:40:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -67,7 +67,9 @@ expected: |
   entry, redo restores; a manually-set Bubble # (amber border) survives re-auto
   (preserve-manual) with gaps left in the sequence; LTR (Manhwa) orders left-to-right;
   zoom keeps badges constant viewport-px while text scales.
-result: [pending]
+result: issue
+reported: "Manhwa (LTR) works since it's top-to-bottom left-to-right by default. Manga (RTL) reading order is WRONG on real layouts: e.g. panel 1 at top detected correctly, but panel 2 detected as the panel under bubble 1, panel 3 as the panel right of panel 2 below, and the actual panel 2 numbered 4. Manga is not that simple — can have panel 1+2 side by side at top, or a wide panel 1 at top, etc. The XY-Cut column algorithm doesn't handle complex manga layouts. Suggestion: add a 'draw panel' function so boxes can be placed within a panel. LOG THIS — bigger issue than we can fix right now."
+severity: major
 
 ### 6. Load Translations paste + file + report + error UX
 expected: |
@@ -88,11 +90,21 @@ result: [pending]
 
 total: 7
 passed: 3
-issues: 1
-pending: 3
+issues: 2
+pending: 2
 skipped: 0
 blocked: 0
 ## Gaps
+
+- truth: "Manga RTL reading order matches actual panel flow on real layouts (side-by-side top panels, wide top panel, panel-within-panel)"
+  status: failed
+  reason: "User reported: Auto-Number RTL (Manga) misorders real panels — e.g. panel 1 at top correct, but panel 2 detected as the panel under bubble 1, panel 3 as the panel right of panel 2 below, actual panel 2 numbered 4. Manhwa LTR works. XY-Cut column algorithm does not handle complex manga layouts (side-by-side top panels, wide top panel, etc.). User requests: log this (bigger than fixable now); future 'draw panel' function so boxes can be placed within a panel."
+  severity: major
+  test: 5
+  artifacts: [manga_ai_studio/core/reading_order.py]
+  missing: [panel-aware reading order, draw-panel feature (future), manga layout models]
+  deferred: true
+  note: "Logged per user instruction — NOT planned this round. Candidate for a future phase: panel segmentation + 'draw panel' tool + reading-order algorithm rework (XY-Cut is insufficient for real manga layouts)."
 
 - truth: "Bubble badge fits its number: the badge rect (TL-outside) is sized to contain the full digit glyph(s) — top-to-bottom, no clipping"
   status: failed
