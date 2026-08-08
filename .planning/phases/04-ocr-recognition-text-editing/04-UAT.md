@@ -3,7 +3,7 @@ status: testing
 phase: 04-ocr-recognition-text-editing
 source: [04-VERIFICATION.md]
 started: "2026-08-07T21:30:00Z"
-updated: "2026-08-08T02:00:00Z"
+updated: "2026-08-08T02:10:00Z"
 ---
 
 # Phase 4 UAT — OCR Recognition & Text Editing
@@ -37,7 +37,7 @@ expected: |
   Text->Run OCR on a detected box; run OCR All (Ctrl+R) with mixed empty/edited boxes —
   confirm status-bar progress, the D-04 single + batch confirm dialogs on edited boxes
   (Cancel = no overwrite), and the error UX by breaking the model cache.
-result: [pending]
+result: pass
 
 ### 3. Inline editor on real artwork + Japanese IME
 expected: |
@@ -85,9 +85,9 @@ result: [pending]
 ## Summary
 
 total: 7
-passed: 1
+passed: 2
 issues: 0
-pending: 6
+pending: 5
 skipped: 0
 blocked: 0
 ## Gaps
