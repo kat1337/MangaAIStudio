@@ -88,14 +88,28 @@ def test_canvas_load_image(qtbot) -> None:
 
 
 def test_open_image_action(qtbot, tmp_path) -> None:
-    """MainWindow exposes an Open Image action with Ctrl+O shortcut."""
+    """MainWindow exposes an Open Image action — WITHOUT the Ctrl+O shortcut.
+
+    D-07 / RESEARCH Pitfall 8 (plan 05-05): Ctrl+O moved to Open Project…;
+    Open Image keeps its action but loses the binding (Qt would fire both
+    actions on one Ctrl+O press otherwise). Exactly one action binds Ctrl+O.
+    """
     pm = ProfileManager(tmp_path)
     window = MainWindow(pm)
     qtbot.addWidget(window)
 
     action = window.action_open_image
     assert action.text() == "Open Image\u2026"
-    assert "Ctrl+O" in action.shortcut().toString()
+    assert action.shortcut() != QKeySequence("Ctrl+O")
+    from PySide6.QtGui import QAction
+
+    bound = [
+        act
+        for act in window.findChildren(QAction)
+        if act.shortcut() == QKeySequence("Ctrl+O")
+    ]
+    assert len(bound) == 1
+    assert bound[0] is window.action_open_project
 
 
 # ---------------------------------------------------------------------------

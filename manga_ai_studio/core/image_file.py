@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 
@@ -77,6 +78,13 @@ class ImageFile:
             (crop/rotate/resize) has been applied to the page — drives the
             ``_ocr.json`` export location rule (altered pages export into
             ``cleaned/``). Levels does NOT set it (A4 — geometry-free).
+        current_image: Phase 5 (plan 05-05) runtime save-time capture slot.
+            Holds the page's current image as an ``(H, W, 3)`` uint8 RGB numpy
+            array (``.copy()``-detached). Populated for EVERY page at project
+            load (decoded from the embedded ``image.png`` entry — the D-08
+            batch-export dims fallback and the D-06/D-08 missing-original
+            navigation source) and refreshed for the CURRENT page at save time
+            (``_snapshot_current_page``). ``None`` until populated.
     """
 
     path: Path
@@ -89,6 +97,8 @@ class ImageFile:
     original_verified: bool = False
     # D-22 geometry-op flag (set True by crop/rotate/resize; levels does NOT).
     geometry_altered: bool = False
+    # Phase 5 runtime save-time capture slot (see class docstring).
+    current_image: np.ndarray | None = None
 
     def load_thumbnail(self, size: int = THUMBNAIL_SIZE) -> None:
         """Load ``self.thumbnail`` from ``self.path`` as a letterboxed pixmap.

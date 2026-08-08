@@ -3,7 +3,7 @@
 Architecture adapted from PanelCleaner ``mainwindow_driver.py`` (GPL v3,
 vendored-shape per D-12): the constructor receives a ``ProfileManager``,
 builds a central ``EditorCanvas``, and wires the menu bar / actions. Plan 01
-shipped the File -> Open Image (Ctrl+O) + View -> Fit to Window (Ctrl+0)
+shipped the File -> Open Image + View -> Fit to Window (Ctrl+0)
 skeleton. Plan 02 adds the full menu bar (File/Edit/View/Tools/Help), the
 single top toolbar, the Pages + Tools docks, the 3-field status bar, the
 FileTable sidebar, the Open Folder workflow, and drag-drop routing. Plan 03
@@ -29,11 +29,13 @@ Security:
 from __future__ import annotations
 
 import copy
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 from loguru import logger
 from natsort import natsorted
+from PIL import Image
 from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
@@ -45,12 +47,14 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QPushButton,
     QToolBar,
     QToolButton,
 )
 
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.config.profile_manager import ProfileManager
+from manga_ai_studio.core import project_io
 from manga_ai_studio.core.box_model import (
     DETECTED,
     USER,
@@ -59,7 +63,12 @@ from manga_ai_studio.core.box_model import (
 )
 from manga_ai_studio.core.history_manager import HistoryManager
 from manga_ai_studio.core.image_file import ImageFile
-from manga_ai_studio.core.mask_editor import DEFAULT_BRUSH_SIZE, ToolMode, mask_to_numpy_binary
+from manga_ai_studio.core.mask_editor import (
+    DEFAULT_BRUSH_SIZE,
+    ToolMode,
+    mask_to_numpy_binary,
+    numpy_binary_to_mask_qimage,
+)
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
@@ -70,6 +79,9 @@ from manga_ai_studio.gui.worker_thread import Worker
 
 # Maximum number of entries kept in the Recent Files submenu (UI-SPEC surface 1).
 MAX_RECENT_FILES = 8
+# Maximum number of entries kept in the Recent Projects submenu (D-07, plan
+# 05-05 — mirrors Recent Files, UI-SPEC surface 21).
+MAX_RECENT_PROJECTS = 8
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
@@ -138,6 +150,16 @@ class MainWindow(QMainWindow):
         # so the OUTGOING index MUST come from this stored field, NOT from
         # _current_page_index() (PATTERNS.md file 4a note + RESEARCH Open Q2).
         self._last_page_index: int | None = None
+
+        # Plan 05-05 (PROJ-01 / D-07): the open project's ``<chapter>.mas-
+        # project`` folder + manifest name, or None for an unsaved session.
+        # ``_project_dir`` routes the first Save Project… into the Save As…
+        # flow and drives the D-07 window-title format
+        # ("Manga AI Studio — {project-name} — {page}*"); ``_project_name``
+        # is the manifest ``name`` (the chapter/session name from
+        # project_io.save_project).
+        self._project_dir: Path | None = None
+        self._project_name: str | None = None
 
         # Inpaint history hook (plan 06 wires the real HistoryManager here;
         # _on_inpaint_finished activates the push_image_action call site).
@@ -265,15 +287,56 @@ class MainWindow(QMainWindow):
         self._build_help_menu()
 
     def _build_file_menu(self) -> None:
-        # Open Image (plan 01, kept).
+        # Open Image (plan 01, kept). NOTE (Pitfall 8 / D-07): the Ctrl+O
+        # shortcut is REMOVED — Open Project… takes Ctrl+O; Qt would fire both
+        # actions if Open Image kept the binding (UI-SPEC §Keyboard).
         self.action_open_image = QAction("Open Image\u2026", self)
-        self.action_open_image.setShortcut(QKeySequence("Ctrl+O"))
         self.action_open_image.triggered.connect(self.open_image)
 
         # Open Folder (plan 02).
         self.action_open_folder = QAction("Open Folder\u2026", self)
         self.action_open_folder.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.action_open_folder.triggered.connect(self.open_folder)
+
+        # Open Project (plan 05, D-07): opens a chapter manifest OR a page
+        # .mas (the D-09 climb, UI-SPEC surface 21/22). Ctrl+O per D-07.
+        self.action_open_project = QAction("Open Project\u2026", self)
+        self.action_open_project.setShortcut(QKeySequence("Ctrl+O"))
+        self.action_open_project.setToolTip(
+            "Open a saved project (manifest.json or a page .mas file)."
+        )
+        self.action_open_project.triggered.connect(self._open_project)
+        self.action_open_project.setEnabled(False)
+
+        # Recent Projects submenu (D-07, max 8 via QSettings). Mirrors the
+        # Recent Files machinery exactly (standalone QMenu child of the
+        # window — never the menubar factory — so its menuAction never lands
+        # in the top-level action list). Structure wired in plan 05-05
+        # Task 3; the submenu exists from the File-menu build.
+        self.recent_projects_menu = QMenu("Recent Projects", self)
+        self.action_clear_recent_projects = QAction("Clear Menu", self)
+        self.action_clear_recent_projects.triggered.connect(
+            self._clear_recent_projects
+        )
+        self._refresh_recent_projects_menu()
+
+        # Save Project (D-07): writes the session as a <chapter>.mas-project/
+        # folder. Disabled until a page is open (refreshed in
+        # _refresh_action_states). Ctrl+S.
+        self.action_save_project = QAction("Save Project\u2026", self)
+        self.action_save_project.setShortcut(QKeySequence("Ctrl+S"))
+        self.action_save_project.setToolTip(
+            "Save the full page state (images, masks, boxes, text,"
+            " translations) as a project (Ctrl+S)."
+        )
+        self.action_save_project.triggered.connect(self._save_project)
+        self.action_save_project.setEnabled(False)
+
+        # Save Project As (D-07): choose the project folder first. Ctrl+Shift+S.
+        self.action_save_project_as = QAction("Save Project As\u2026", self)
+        self.action_save_project_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.action_save_project_as.triggered.connect(self._save_project_as)
+        self.action_save_project_as.setEnabled(False)
 
         # Recent Files submenu (max 8 via QSettings). Created as a standalone
         # child of the window (never through the menu bar factory) so its
@@ -319,10 +382,20 @@ class MainWindow(QMainWindow):
         self.batch_menu.addAction(self.action_batch_clean)
         self.batch_menu.addAction(self.action_batch_detect_and_clean)
 
+        # UI-SPEC surface 21 (executor-authoritative order): Open Image… /
+        # Open Folder… / ─ / Open Project… / Recent Projects ▸ / Recent
+        # Files ▸ / ─ / Save Project… / Save Project As… / ─ / Export
+        # Page… / Batch ▸ / ─ / Quit.
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.action_open_image)
         file_menu.addAction(self.action_open_folder)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_open_project)
+        file_menu.addMenu(self.recent_projects_menu)
         file_menu.addMenu(self.recent_menu)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save_project)
+        file_menu.addAction(self.action_save_project_as)
         file_menu.addSeparator()
         file_menu.addAction(self.action_export_page)
         file_menu.addMenu(self.batch_menu)
@@ -623,7 +696,7 @@ class MainWindow(QMainWindow):
 
         The toolbar's open action is Open Folder (Ctrl+Shift+O) — the
         phase-2 manga-workflow default (open a folder of pages); Open Image
-        lives in the File menu (Ctrl+O). Rest: Fit / 100% / Zoom Out / Zoom
+        lives in the File menu. Rest: Fit / 100% / Zoom Out / Zoom
         In | (sep) | Toggle Mask Overlay. Other sections (Detect/Inpaint/
         Tools/Undo) are added by their plans.
         """
@@ -787,6 +860,19 @@ class MainWindow(QMainWindow):
         )
         self.action_cancel_batch.setEnabled(self._batch_active)
 
+        # Plan 05-05 (D-07): project-persistence actions. Save Project… /
+        # Save Project As… need an open page AND no running async op; Open
+        # Project… needs only no running op (it opens into any state).
+        self.action_save_project.setEnabled(page_open and not self._op_running)
+        self.action_save_project_as.setEnabled(page_open and not self._op_running)
+        self.action_open_project.setEnabled(not self._op_running)
+        # Recent Projects entries (flagged in _refresh_recent_projects_menu)
+        # gate on _op_running only; the empty placeholder + Clear Menu stay
+        # as-is.
+        for act in self.recent_projects_menu.actions():
+            if act.property("recent_project"):
+                act.setEnabled(not self._op_running)
+
         # Plan 06 OCR actions. Run OCR is enabled iff exactly one box is
         # selected AND no async op is running (D-01 — mirrors detect_text's
         # `page_open and not self._op_running` plus the one-box-selected
@@ -872,7 +958,11 @@ class MainWindow(QMainWindow):
         in :meth:`_current_page_index` rely on this consistency.
         """
         ordered = natsorted(paths, key=lambda p: str(p))
-        self.image_files = [ImageFile(path=p) for p in ordered]
+        # D-06 (plan 05-05): a normal image/folder open loads each page from
+        # its own path, so Show Original is valid — every ImageFile starts
+        # original_verified=True (consumed by plan 05-06's Show Original
+        # gating; .mas-loaded pages set it per the checksum rule instead).
+        self.image_files = [ImageFile(path=p, original_verified=True) for p in ordered]
         self.file_table.set_pages([imf.path for imf in self.image_files])
         # Auto-select + load the first page (UI-SPEC: open folder shows page 1).
         if self.image_files:
@@ -1022,8 +1112,8 @@ class MainWindow(QMainWindow):
             finally:
                 self._suppress_boxes_push = False
 
-        # Step 5 (unchanged tail).
-        self.setWindowTitle(f"Manga AI Studio \u2014 {path.name}")
+        # Step 5 (unchanged tail; title via the D-07 format — plan 05-05).
+        self._update_title()
         self.canvas.fit_to_window()
         self._add_recent_file(path)
         self._refresh_status_bar()
@@ -1104,6 +1194,305 @@ class MainWindow(QMainWindow):
     def _make_recent_opener(self, path: Path):
         def _open(_checked: bool = False) -> None:
             self._open_single_image(path)
+
+        return _open
+
+    # ------------------------------------------------ project session (plan 05-05)
+    # Save Project… / Open Project… (PROJ-01 D-07/D-08/D-09): the resumable-
+    # workspace session layer. Save flushes the live canvas state through the
+    # Phase 2 D-11 seam into per-page ImageFile slots and hands them to
+    # core/project_io (the ONLY disk boundary); Open rebuilds the session
+    # from the manifest with D-06 original re-verification + the embedded
+    # image as the D-08 fallback. Menu structure is executor-authoritative
+    # per UI-SPEC surface 21.
+
+    def _session_dirty(self) -> bool:
+        """True iff ANY page carries unsaved edits (D-07 dirty tracking).
+
+        Any page mutation since the last save marks the page's
+        ``ImageFile.dirty`` (via :meth:`_set_session_dirty`); the window
+        title appends ``*`` and the Unsaved Changes prompt fires on
+        session-replacement actions while this is True.
+        """
+        return any(imf.dirty for imf in self.image_files)
+
+    def _update_title(self) -> None:
+        """Render the D-07 window title.
+
+        ``Manga AI Studio — {project-name} — {page-filename}*`` with a
+        project open, ``Manga AI Studio — {page-filename}*`` without; ``*``
+        is the LAST character while the session is dirty (any page). Save
+        clears the dirty state, so the suffix disappears.
+        """
+        if not self.image_files:
+            self.setWindowTitle("Manga AI Studio")
+            return
+        page = self.file_table.current_path()
+        page_name = page.name if page is not None else ""
+        if self._project_name:
+            base = f"Manga AI Studio \u2014 {self._project_name} \u2014 {page_name}"
+        else:
+            base = f"Manga AI Studio \u2014 {page_name}"
+        if self._session_dirty():
+            base += "*"
+        self.setWindowTitle(base)
+
+    def _set_session_dirty(self) -> None:
+        """Mark the current page dirty + refresh the title (D-07).
+
+        Connected to the current page's existing mutation signals
+        (``canvas.mask_modified``, ``canvas.boxes_modified``) plus the
+        inpaint-finish handler; the OCR + Inspector commit handlers emit
+        ``boxes_modified`` so they ride the same connection. The restore
+        paths (page navigation / undo / detection / apply_undo_boxes) set
+        ``_suppress_boxes_push`` around their ``set_boxes`` calls, so the
+        guard here keeps those non-edits from marking the session dirty.
+        """
+        if self._suppress_boxes_push:
+            return
+        idx = self._current_page_index()
+        if idx is not None and 0 <= idx < len(self.image_files):
+            self.image_files[idx].dirty = True
+        self._update_title()
+
+    def _snapshot_current_page(self) -> None:
+        """Flush the live canvas state into the outgoing ImageFile (save side).
+
+        Mirrors the Phase 2 D-11 seam (RESEARCH Common Operation 4): the
+        OUTGOING index is the stored ``self._last_page_index`` — NEVER
+        ``_current_page_index()`` (Pitfall 7 — ``select_path`` mutates
+        ``current_path`` before ``on_page_selected`` runs). The mask write
+        uses the MANDATORY ``.copy()`` boundary detach (Pitfall 2); boxes
+        are detached by construction (``boxes_snapshot()`` materializes
+        fresh PageBoxes); ``current_image`` is the canvas numpy (the D-05
+        per-page current-image contract — resume exactly where you left off).
+        """
+        idx = self._last_page_index
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        if self.canvas.has_mask():
+            self.image_files[idx].mask = self.canvas.get_mask().copy()
+        self.image_files[idx].boxes = self.canvas.boxes_snapshot()
+        image_np = self.canvas.get_image_numpy()
+        if image_np is not None:
+            self.image_files[idx].current_image = image_np
+
+    def _choose_project_dir(self) -> Path | None:
+        """The Save Project As… folder dialog (D-02).
+
+        Defaults to ``<source-parent>/<chapter-name>.mas-project`` (the
+        sibling-of-source convention), or ``<image-parent>/<image-stem>
+        .mas-project`` for a single-image session. Returns None on cancel.
+        """
+        first = self.image_files[0]
+        if len(self.image_files) == 1:
+            default = first.path.parent / f"{first.path.stem}.mas-project"
+        else:
+            default = first.path.parent / f"{first.path.parent.name}.mas-project"
+        directory = QFileDialog.getExistingDirectory(
+            self, "Save Project As", str(default)
+        )
+        if not directory:
+            return None
+        return Path(directory)
+
+    def _page_image_source(self, idx: int) -> np.ndarray | None:
+        """Resolve the per-page image to embed at save time (RESEARCH A3).
+
+        The canvas holds only the live page, so the CURRENT page (index ==
+        ``_last_page_index``) uses the just-flushed ``current_image``; each
+        NON-current page uses ``cleaned/<stem>`` in its source dir when that
+        file exists (the Phase 2 convention), else the source file at
+        ``ImageFile.path``, else the embedded ``current_image`` (the D-08
+        portable-project fallback — a re-save of a project whose originals
+        are missing must not fail). Reads are ``.copy()``-detached
+        (Pitfall 2). Returns None when no source exists at all (the page is
+        skipped by the caller with a warning).
+        """
+        imf = self.image_files[idx]
+        if idx == self._last_page_index and imf.current_image is not None:
+            return imf.current_image
+        cleaned = imf.path.parent / "cleaned" / imf.path.name
+        if cleaned.is_file():
+            return np.asarray(Image.open(cleaned).convert("RGB")).copy()
+        if imf.path.is_file():
+            return np.asarray(Image.open(imf.path).convert("RGB")).copy()
+        if imf.current_image is not None:
+            return imf.current_image
+        return None
+
+    def _save_project(self, force_as: bool = False) -> None:
+        """Save Project… (Ctrl+S) — write the session as a project folder.
+
+        D-07/D-02 flow: no page open → no-op (the action is disabled too);
+        a clean session flashes "No changes to save." and writes nothing;
+        otherwise flush the current page, then save — routing through the
+        Save As… folder dialog when ``force_as`` or the session has no
+        project dir yet. The disk write is core's
+        :func:`project_io.save_project` (the only disk boundary);
+        an OSError surfaces the save-failure copy (T-05-12) and the in-memory
+        session is untouched. On success: dirty cleared, project dir/name
+        recorded, Recent Projects updated, title refreshed (no ``*``), and
+        the "Saved project …" transient shows.
+        """
+        if self._current_page_index() is None:
+            return
+        if not force_as and not self._session_dirty():
+            self._show_transient_status("No changes to save.")
+            return
+        self._snapshot_current_page()
+
+        project_dir = self._project_dir
+        if project_dir is None or force_as:
+            project_dir = self._choose_project_dir()
+            if project_dir is None:
+                return  # dialog cancelled — nothing written, session untouched
+
+        # Project name: keep an open project's name; derive for new sessions
+        # (chapter = source-folder name; single-image session = image stem).
+        if self._project_name is not None:
+            name = self._project_name
+        elif len(self.image_files) == 1:
+            name = self.image_files[0].path.stem
+        else:
+            name = self.image_files[0].path.parent.name
+
+        page_files: list[tuple[str, dict[str, bytes]]] = []
+        for idx, imf in enumerate(self.image_files):
+            image_rgb = self._page_image_source(idx)
+            if image_rgb is None:
+                logger.warning(
+                    f"Save Project: page '{imf.path.name}' has no image source"
+                    " — skipped"
+                )
+                continue
+            mask_bin = None
+            if imf.mask is not None and not imf.mask.isNull():
+                mask_bin = mask_to_numpy_binary(imf.mask)
+            original_sha = ""
+            if imf.path.is_file():
+                try:
+                    original_sha = project_io.sha256_file(imf.path)
+                except OSError:
+                    original_sha = ""
+            page_files.append(
+                (
+                    imf.path.stem,
+                    project_io.build_page_entries(
+                        {
+                            "boxes": imf.boxes if imf.boxes is not None else [],
+                            "image_rgb": image_rgb,
+                            "mask_bin": mask_bin,
+                            "geometry_altered": imf.geometry_altered,
+                            "original_path": imf.path,
+                            "original_sha256": original_sha,
+                        }
+                    ),
+                )
+            )
+
+        try:
+            project_io.save_project(project_dir, name, page_files)
+        except OSError as exc:
+            # T-05-12: the save-failure copy; the traceback goes to loguru
+            # (the in-memory session is untouched).
+            logger.error(f"Save Project failed: {exc}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{name}'.",
+                "Check that the folder is writable and see the log for details.",
+            )
+            return
+
+        self._project_dir = project_dir
+        self._project_name = name
+        for imf in self.image_files:
+            imf.dirty = False
+        self._add_recent_project(project_dir)
+        self._update_title()
+        self._show_transient_status(
+            f"Saved project '{name}' ({len(page_files)} pages)."
+        )
+
+    def _save_project_as(self) -> None:
+        """Save Project As… (Ctrl+Shift+S): choose the folder, then save."""
+        if self._current_page_index() is None:
+            return
+        self._save_project(force_as=True)
+
+    def _open_project(self, manifest_path: Path | None = None) -> None:
+        """Open Project….
+
+        The D-08 session rebuild + D-09 chapter-climb routing are wired in
+        plan 05-05 Task 2 (this Task-1 commit wires the menu action + the
+        shortcut remap only; the slot body lands with the open-side
+        implementation).
+        """
+        return
+
+    # --------------------------------------------------- recent projects (D-07)
+    def _recent_projects(self) -> list[Path]:
+        """QSettings-persisted project dirs (key "recentProjects", max 8).
+
+        Mirrors :meth:`_recent_files`: entries are path-validated and capped
+        at ``MAX_RECENT_PROJECTS``. A stale entry whose folder no longer
+        holds a ``manifest.json`` is dropped at refresh time (T-05-14
+        accepted convenience data).
+        """
+        raw = self._settings().value("recentProjects", []) or []
+        out: list[Path] = []
+        for entry in raw:
+            try:
+                p = Path(entry)
+            except (TypeError, ValueError):
+                continue
+            if (p / "manifest.json").is_file():
+                out.append(p)
+        return out[:MAX_RECENT_PROJECTS]
+
+    def _add_recent_project(self, project_dir: Path) -> None:
+        """Record ``project_dir`` at the top of the Recent Projects list."""
+        current = [p for p in self._recent_projects() if p != project_dir]
+        current.insert(0, project_dir)
+        self._settings().setValue(
+            "recentProjects", [str(p) for p in current[:MAX_RECENT_PROJECTS]]
+        )
+        self._refresh_recent_projects_menu()
+
+    def _clear_recent_projects(self) -> None:
+        self._settings().remove("recentProjects")
+        self._refresh_recent_projects_menu()
+
+    def _refresh_recent_projects_menu(self) -> None:
+        """Rebuild the Recent Projects submenu (UI-SPEC surface 21).
+
+        Empty list → the disabled "No recent projects yet." item; otherwise
+        "Project — {folder-name}" entries with the full path in the tooltip,
+        capped at 8, plus the always-present Clear Menu action. Entries are
+        flagged with the ``recent_project`` property so
+        ``_refresh_action_states`` can gate them during async ops.
+        """
+        self.recent_projects_menu.clear()
+        recents = self._recent_projects()
+        if not recents:
+            placeholder = QAction("No recent projects yet.", self)
+            placeholder.setEnabled(False)
+            self.recent_projects_menu.addAction(placeholder)
+        else:
+            for proj in recents:
+                act = QAction(f"Project \u2014 {proj.name}", self)
+                act.setToolTip(str(proj))
+                act.setProperty("recent_project", True)
+                act.triggered.connect(self._make_recent_project_opener(proj))
+                self.recent_projects_menu.addAction(act)
+        self.recent_projects_menu.addSeparator()
+        self.recent_projects_menu.addAction(self.action_clear_recent_projects)
+
+    def _make_recent_project_opener(self, project_dir: Path):
+        def _open(_checked: bool = False) -> None:
+            # Bypass the file dialog; the manifest path routes straight into
+            # the session rebuild (UI-SPEC surface 21).
+            self._open_project(project_dir / "manifest.json")
 
         return _open
 
@@ -1202,6 +1591,15 @@ class MainWindow(QMainWindow):
         # Boxes push hook (CR-01 fix): boxes_modified -> push a BOXES snapshot.
         # Sibling of the mask hook — mirrors _on_mask_modified / _on_boxes_modified.
         self.canvas.boxes_modified.connect(self._on_boxes_modified)
+
+        # Plan 05-05 (D-07) dirty tracking: the SAME mutation signals mark
+        # the session dirty (the plan-05-05 save layer). The OCR +
+        # Inspector commit handlers emit boxes_modified, so this single
+        # connection covers box/text/translation/bubble edits too; restore
+        # paths are excluded via the _suppress_boxes_push guard inside
+        # _set_session_dirty.
+        self.canvas.mask_modified.connect(self._set_session_dirty)
+        self.canvas.boxes_modified.connect(self._set_session_dirty)
 
         # Plan 04-04 Inspector wiring (D-08). The Inspector is a FOLLOWER — it
         # subscribes to the scene's selectionChanged so load_box fires on every
@@ -2365,6 +2763,10 @@ class MainWindow(QMainWindow):
                 original_patch_numpy = pre_inpaint[y1 : y1 + bh, x1 : x1 + bw].copy()
 
         self.canvas.set_image_from_numpy(result_rgb, bbox=bbox)
+
+        # D-07 (plan 05-05): the inpaint result is a page mutation — mark
+        # the session dirty + refresh the title (the * suffix).
+        self._set_session_dirty()
 
         # CR-16 (UAT): the mask has been consumed by the inpaint. Clear it so
         # the red overlay does not sit on top of the now-inpainted region
