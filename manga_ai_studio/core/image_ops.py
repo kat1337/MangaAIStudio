@@ -327,3 +327,144 @@ def crop_page_with_boxes(
     img_c, msk_c = crop_page(image_rgb, mask_bin, x, y, w, h)
     kept, dropped = crop_boxes(boxes, x, y, w, h)
     return img_c, msk_c, kept, dropped
+
+
+# ---------------------------------------------------------------------------
+# Resize (plan 05-02 Task 3) — D-13 dialog range, A8 LANCZOS/NEAREST, D-18
+# ---------------------------------------------------------------------------
+
+# Resize dimension bounds (UI-SPEC surface 26: Resize ranges 1..100000).
+MIN_RESIZE_DIM = 1
+MAX_RESIZE_DIM = 100000
+
+
+def resize_page(
+    image_rgb: np.ndarray, mask_bin: np.ndarray, new_w: int, new_h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resize the page: image LANCZOS, mask NEAREST — no soft alpha drift
+    (D-18, A8). The binary mask stays strictly 0/255 — never interpolated
+    grays. Validates ``(H,W,3)``/``(H,W)`` and ``new_w``/``new_h`` ints in
+    ``[1, 100000]`` (UI-SPEC surface 26) before any PIL work (T-05-06).
+    """
+    _validate_image_mask(image_rgb, mask_bin)
+    for name, value in (("new_w", new_w), ("new_h", new_h)):
+        if not isinstance(value, int):
+            raise ValueError(f"resize {name} must be an int, got {type(value).__name__}")
+        if not MIN_RESIZE_DIM <= value <= MAX_RESIZE_DIM:
+            raise ValueError(
+                f"resize {name} must be within [{MIN_RESIZE_DIM}, {MAX_RESIZE_DIM}]"
+            )
+    img = np.asarray(
+        Image.fromarray(image_rgb, "RGB").resize(
+            (new_w, new_h), Image.Resampling.LANCZOS
+        )
+    ).copy()
+    msk = np.asarray(
+        Image.fromarray(mask_bin, "L").resize(
+            (new_w, new_h), Image.Resampling.NEAREST
+        )
+    ).copy()
+    return img, msk
+
+
+def resize_boxes(
+    boxes: list[PageBox], w: int, h: int, new_w: int, new_h: int
+) -> list[PageBox]:
+    """Scale every box (bbox + line quads) to the new page dims — D-15/D-17.
+
+    Scale factors ``(new_w/w, new_h/h)``; every coordinate is rounded via
+    ``int(round(coord * scale))`` (Pitfall 6 int discipline) and the bbox is
+    re-normalized. ``w``/``h`` are the PRE-resize image dims. Fresh
+    ``PageBox``/``TextBlock`` per box — inputs never mutated (Pitfall 3).
+    """
+    if not isinstance(w, int) or not isinstance(h, int) or w < 1 or h < 1:
+        raise ValueError("resize pre-dims w/h must be positive ints")
+    sx = new_w / w
+    sy = new_h / h
+
+    def _scale_point(px: int, py: int) -> tuple[int, int]:
+        return int(round(px * sx)), int(round(py * sy))
+
+    out: list[PageBox] = []
+    for pb in boxes:
+        x1, y1, x2, y2 = pb.box.as_tuple
+        nx1, ny1 = _scale_point(x1, y1)
+        nx2, ny2 = _scale_point(x2, y2)
+        new_box = Box(min(nx1, nx2), min(ny1, ny2), max(nx1, nx2), max(ny1, ny2))
+        payload = pb.payload
+        if payload is None:
+            out.append(PageBox(box=new_box, origin=pb.origin))
+            continue
+        new_lines = [
+            [list(_scale_point(px, py)) for px, py in quad] for quad in payload.lines
+        ]
+        text = payload.text
+        if isinstance(text, list):
+            text = list(text)
+        fresh = TextBlock(
+            xyxy=list(new_box.as_tuple),
+            lines=new_lines,
+            vertical=payload.vertical,
+            language=payload.language,
+            font_size=payload.font_size,
+            text=text,
+            translation=payload.translation,
+        )
+        out.append(
+            PageBox(
+                box=new_box,
+                origin=pb.origin,
+                payload=fresh,
+                edited=pb.edited,
+                bubble_no=pb.bubble_no,
+                manual_override=pb.manual_override,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Levels (plan 05-02 Task 3) — D-12 numpy LUT, geometry-free (D-15)
+# ---------------------------------------------------------------------------
+
+
+def levels_lut(black: int, white: int, gamma: float) -> np.ndarray:
+    """Build the 256-entry uint8 levels lookup table (D-12, RESEARCH Pattern 4).
+
+    ``lut[v]`` maps input value ``v`` to its output: ``(v - black) /
+    max(white - black, 1)`` clipped to ``[0, 1]``, gamma-corrected with
+    ``**(1/gamma)``, scaled to ``[0, 255]``. 256 entries — NEVER the 768-entry
+    PIL ``point()`` form (Pitfall 1; the numpy path is byte-identical and
+    simpler). The white>black clamp (T-05-07, UI-SPEC surface 25): the range
+    is internally normalized to ``[min(black, white), max(black, white)]`` so
+    the LUT is ALWAYS monotone non-decreasing — an inverted map can never
+    render, even when ``white <= black``. ``gamma`` must be > 0.
+    """
+    if not isinstance(gamma, (int, float)) or gamma <= 0:
+        raise ValueError("gamma must be a positive number")
+    lo = min(black, white)
+    hi = max(black, white)
+    lut = np.arange(256, dtype=np.float64)
+    lut = (lut - lo) / max(hi - lo, 1)
+    lut = np.clip(lut, 0.0, 1.0) ** (1.0 / gamma)
+    return (lut * 255.0).round().astype(np.uint8)
+
+
+def levels_page(
+    image_rgb: np.ndarray, black: int, white: int, gamma: float
+) -> np.ndarray:
+    """Apply levels to the page pixels — geometry-free by design (D-15).
+
+    Only the image is touched: the mask and boxes are NOT arguments and NOT
+    transformed (a levels edit is pixels-only). ``levels_lut(...)[image_rgb]``
+    is a fancy-index per-channel LUT apply (RESEARCH Pattern 4); the trailing
+    ``.copy()`` detaches the result (Pitfall 2). Validates ``(H,W,3)`` uint8.
+    """
+    # levels is image-only: validate the image shape without a mask argument.
+    if (
+        image_rgb.ndim != 3
+        or image_rgb.shape[2] != 3
+        or image_rgb.dtype != np.uint8
+    ):
+        raise ValueError("expected (H,W,3) uint8 RGB")
+    return levels_lut(black, white, gamma)[image_rgb].copy()

@@ -346,3 +346,112 @@ def test_crop_zero_area_dropped() -> None:
     assert len(kept) == 1
     assert kept[0].box.as_tuple == (0, 1, 1, 2)
     assert kept[0].origin == USER
+
+
+@pytest.mark.unit
+def test_resize_and_levels() -> None:
+    """Resize: LANCZOS image / NEAREST mask (D-18 no interpolated grays),
+    int box scaling (Pitfall 6); levels: byte-exact LUT math with the
+    white>black monotone clamp (D-12, T-05-07), geometry-free (D-15)."""
+    # --- Resize image + mask: 10x8 (W,H) page -> 5x4. ---
+    img = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
+    mask = np.zeros((8, 10), dtype=np.uint8)
+    mask[2:6, 3:8] = 255  # solid block — NEAREST must keep it strictly 0/255
+    img_r, msk_r = image_ops.resize_page(img, mask, 5, 4)
+    assert img_r.shape == (4, 5, 3)
+    assert msk_r.shape == (4, 5)
+    # D-18: NEAREST mask purity — no interpolated grays ever.
+    assert set(np.unique(msk_r)) <= {0, 255}
+    assert img_r.flags["OWNDATA"]
+    assert msk_r.flags["OWNDATA"]
+    assert not np.shares_memory(img_r, img)
+
+    # --- Resize boxes: 10x8 -> 5x4 scales 0.5/0.5; [2,2,6,6] -> [1,1,3,3]. ---
+    payload = TextBlock(
+        xyxy=[2, 2, 6, 6],
+        lines=[
+            [[2, 2], [6, 2], [6, 4], [2, 4]],
+            [[2, 4], [6, 4], [6, 6], [2, 6]],
+        ],
+        vertical=False,
+        language="eng",
+        font_size=12,
+        text="two\nlines",
+        translation="tr",
+    )
+    boxes = [
+        PageBox(
+            box=Box(2, 2, 6, 6),
+            origin=DETECTED,
+            payload=payload,
+            edited=True,
+            bubble_no=2,
+            manual_override=True,
+        ),
+        PageBox(box=Box(2, 0, 6, 2), origin=USER),
+    ]
+    before = _snapshot_boxes(boxes)
+    scaled = image_ops.resize_boxes(boxes, 10, 8, 5, 4)
+    assert len(scaled) == 2
+    assert scaled[0].box.as_tuple == (1, 1, 3, 3)
+    assert scaled[0].payload.lines == [
+        [[1, 1], [3, 1], [3, 2], [1, 2]],
+        [[1, 2], [3, 2], [3, 3], [1, 3]],
+    ]
+    assert scaled[0].payload.text == "two\nlines"
+    assert scaled[0].payload.translation == "tr"
+    assert scaled[0].edited is True
+    assert scaled[0].bubble_no == 2
+    assert scaled[0].manual_override is True
+    assert scaled[1].box.as_tuple == (1, 0, 3, 1)  # int(round(2*0.5))=1 etc.
+    assert scaled[1].payload is None
+    # No in-place mutation (Pitfall 3).
+    assert _snapshot_boxes(boxes) == before
+
+    # --- Levels: byte-exact LUT on a 0..255 ramp, one value per channel. ---
+    ramp = np.tile(np.arange(256, dtype=np.uint8).reshape(256, 1), (1, 3))
+    page = ramp.reshape(1, 256, 3)
+    leveled = image_ops.levels_page(page, 64, 192, 1.0)
+    assert leveled.shape == page.shape  # pixel-wise: shape unchanged
+    assert leveled.flags["OWNDATA"]
+    assert not np.shares_memory(leveled, page)
+    # Below black -> 0; midpoint (64+192)/2=128 -> 128; above white -> 255.
+    assert np.array_equal(leveled[0, 63], [0, 0, 0])
+    assert np.array_equal(leveled[0, 64], [0, 0, 0])
+    assert np.array_equal(leveled[0, 128], [128, 128, 128])
+    assert np.array_equal(leveled[0, 192], [255, 255, 255])
+    assert np.array_equal(leveled[0, 255], [255, 255, 255])
+
+    # --- white>black clamp (T-05-07): never an inverted/descending map. ---
+    lut = image_ops.levels_lut(white=100, black=100, gamma=1.0)
+    assert lut.dtype == np.uint8 and lut.shape == (256,)
+    assert bool(np.all(np.diff(lut.astype(np.int16)) >= 0))
+    # Explicit inversion input also clamps to monotone.
+    assert bool(np.all(np.diff(image_ops.levels_lut(200, 50, 1.0).astype(np.int16)) >= 0))
+
+
+@pytest.mark.unit
+def test_resize_rejects_bad_input() -> None:
+    """Resize dims outside [1, 100000] or non-int raise ValueError
+    (UI-SPEC surface 26 range; T-05-06); levels validates image + gamma."""
+    img, mask, _ = _sample_page()
+    with pytest.raises(ValueError):
+        image_ops.resize_page(img, mask, 0, 4)  # new_w < 1
+    with pytest.raises(ValueError):
+        image_ops.resize_page(img, mask, 4, 0)  # new_h < 1
+    with pytest.raises(ValueError):
+        image_ops.resize_page(img, mask, -2, 4)  # negative
+    with pytest.raises(ValueError):
+        image_ops.resize_page(img, mask, 100001, 4)  # new_w > 100000
+    with pytest.raises(ValueError):
+        image_ops.resize_page(img, mask, 4, 2.5)  # non-int new_h
+    with pytest.raises(ValueError):
+        image_ops.resize_page(np.zeros((4, 6), np.uint8), mask, 4, 4)  # bad img
+    with pytest.raises(ValueError):
+        image_ops.levels_page(img.astype(np.float32), 64, 192, 1.0)  # bad img
+    with pytest.raises(ValueError):
+        image_ops.levels_page(img, 64, 192, 0)  # gamma <= 0
+    with pytest.raises(ValueError):
+        image_ops.levels_lut(64, 192, -1.0)  # negative gamma
+    with pytest.raises(ValueError):
+        image_ops.resize_boxes([], 0, 8, 5, 4)  # w < 1 -> ZeroDiv guard
