@@ -1184,7 +1184,6 @@ def test_text_overlay_reposition_does_not_rebuild_document(qtbot) -> None:
 @pytest.mark.parametrize(
     "zoom,expected_point",
     [
-        (0.25, 40.0),
         (0.5, 20.0),
         (1.0, 14.0),
         (4.0, 7.0),
@@ -1196,6 +1195,10 @@ def test_text_overlay_font_clamp_scales_with_zoom(qtbot, zoom, expected_point) -
     UI-SPEC §16: the scene font is clamp(14*zoom, 10, 28)/zoom, so the rendered
     viewport-px size clamp(14*zoom, 10, 28) stays within [10, 28] at every zoom.
     Pre-fix the font stayed 14 scene px at every zoom (no clamp implemented).
+    The former zoom-0.25/40.0 case moved to the 04-09 section: at 0.25 zoom the
+    clamped 40pt font wraps "hello" to two lines (265-280px > inner width 194),
+    so the 04-09 fit loop (below the clamp, to the 5 vp floor) replaces that
+    clamp-only outcome — see test_text_overlay_fit_loop_reduces_below_clamp_floor_at_low_zoom.
     """
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
@@ -1294,6 +1297,163 @@ def test_zoom_changed_reapplies_overlay_style_canvas(qtbot) -> None:
         item._text_overlay.sceneBoundingRect().intersects(item.sceneBoundingRect())
         is True
     )
+
+
+# -- UAT test 1 gap closure round 2 (plan 04-09): overlay fit-in-box --
+# The UAT test-1 truth "text overlay adapts to box size: overlay text wraps/fits
+# INSIDE the box rect (no horizontal overshoot), sized legibly relative to the
+# box" — the user's report "it's still a bit small and it overshoots the box,
+# renders horizontally — it should try to fit in the box and kind of adapt the
+# text to the size of the text box". Root causes: refresh_text_overlay never
+# called setTextWidth (single unwrapped horizontal line) and the font was a
+# fixed 14 viewport-px base regardless of box size. Fix contract: wrap at the
+# box inner width + box-adaptive base (14 x min(box_w, box_h)/100 viewport px,
+# clamped [10,28] — the clamp bounds the BASE) + a bounded shrink-to-fit loop
+# (max 12 steps of 0.9, hard floor 5 vp checked at loop top) so the text
+# "tries to fit" the box height; a resize COMMIT re-wraps/re-fits once per drag.
+
+
+@pytest.mark.gui
+def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
+    """Long overlay text WRAPS at the box inner width — no horizontal overshoot.
+
+    The reference box (20,20,220,120) has a 200-wide rect; unselected pen 2 ->
+    inset 3 -> inner width 194. Pre-fix no setTextWidth meant the document laid
+    out on ONE line (~5700 px wide on the exec platform, >25x the box width).
+    The text is 60 words ("word " x 59 + "word") so no trailing space is lost
+    to Qt's document trailing-whitespace trimming.
+    """
+    pb = _pagebox_with_text(recognized="word " * 59 + "word")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    assert item._text_overlay.textWidth() == pytest.approx(194.0, abs=0.01)
+    assert item._text_overlay.document().size().width() == pytest.approx(
+        194.0, abs=0.01
+    )
+    assert (
+        item._text_overlay.sceneBoundingRect().right()
+        <= item.sceneBoundingRect().right() + 1.5
+    )
+    assert item._text_overlay.toPlainText() == "word " * 59 + "word"
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "box,expected_font",
+    [
+        # Box is (x1, y1, x2, y2): (20,20,220,120) -> 200x100 rect, min dim 100
+        # -> base 14 (the §16 reference box).
+        (Box(20, 20, 220, 120), 14.0),
+        # (20,20,220,170) -> 200x150 rect, min dim 150 -> base 21.0.
+        (Box(20, 20, 220, 170), 21.0),
+        # (20,20,320,320) -> 300x300 rect, min dim 300 -> base 42 -> clamped 28.
+        (Box(20, 20, 320, 320), 28.0),
+    ],
+)
+def test_text_overlay_font_adapts_to_box_size(qtbot, box, expected_font) -> None:
+    """The overlay font is BOX-ADAPTIVE: 14 x min(box_w, box_h)/100, clamped [10,28].
+
+    "hello" fits on one line at every size here (no shrink interference:
+    ~95px at 14pt, ~145px at 21pt, ~200px at 28pt — all < the 194/294 inner
+    widths). Pre-fix the font was 14.0 for every box regardless of size.
+    """
+    pb = PageBox(box=box, origin=DETECTED)
+    pb.set_recognized_text("hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() == pytest.approx(expected_font, abs=0.1)
+    # At zoom 1.0 the rendered size is the box-adaptive base within [10, 28].
+    assert 10.0 <= fmt.font().pointSizeF() * 1.0 <= 28.0
+
+
+@pytest.mark.gui
+def test_text_overlay_shrinks_to_fit_box_height(qtbot) -> None:
+    """Wrapped text that exceeds the box height shrinks (bounded) to fit inside.
+
+    "word " x 40 wraps at 194 and the base 14 vp font needs ~8 lines — exceeds
+    the inner height 94, so the fit loop reduces the RENDERED font (below the
+    [10,28] clamp if needed, never below the 5 vp floor). The overlay rect must
+    stay CONTAINED in the box rect and the wrap width must survive the loop.
+    """
+    pb = _pagebox_with_text(recognized="word " * 40)
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay_rect = item._text_overlay.sceneBoundingRect()
+    box_rect = item.sceneBoundingRect()
+    assert overlay_rect.right() <= box_rect.right() + 1.5
+    assert overlay_rect.bottom() <= box_rect.bottom() + 1.5
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() < 14.0  # the shrink loop engaged
+    assert item._text_overlay.document().size().width() == pytest.approx(
+        194.0, abs=0.01
+    )  # wrap preserved through the loop
+
+
+@pytest.mark.gui
+def test_resize_commit_rewraps_overlay_text_canvas(qtbot) -> None:
+    """A resize COMMIT re-wraps/re-fits the overlay to the final rect (once per drag).
+
+    _commit_resize must refresh the overlay after _sync_handles. Pre-fix the
+    overlay kept the stale reference-box layout (194-wide doc at font 14) after
+    a resize to (20,20,320,200): textWidth 194 != 314 and font 14 != 28.
+    """
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    pb = _pagebox_with_text(recognized="hello")
+    canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[pb])
+    item = canvas._box_items[0]
+    canvas._resizing_box = item
+    canvas._resize_start_rect = QRectF(item.rect())
+    canvas._boxes_interaction_start_snapshot = []
+    item.setRect(QRectF(20, 20, 320, 200))
+    canvas._commit_resize()
+    # 320 - 2x inset 3 -> inner width 314; min dim 200 -> base 28 (no shrink:
+    # "hello" is one line at 28pt within inner height 194).
+    assert item._text_overlay.textWidth() == pytest.approx(314.0, abs=0.01)
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() == pytest.approx(28.0, abs=0.1)
+
+
+@pytest.mark.gui
+def test_text_overlay_fit_loop_reduces_below_clamp_floor_at_low_zoom(qtbot) -> None:
+    """At low zoom the fit loop operates BELOW the [10,28] clamp, never below 5 vp.
+
+    At zoom 0.25 the clamped font is 40pt; "hello world" lays out wider than
+    the inner width 194 -> wraps -> the wrapped height exceeds the inner
+    height 94, so the clamp-only outcome is unreachable and the fit outcome
+    replaces it: the loop shrinks the RENDERED font below the clamp down toward
+    the 5 vp floor and the overlay stays CONTAINED in the box. Measured on the
+    exec platform: ~26.24pt -> 6.56 vp (assertions stay range-based per the
+    plan — the exact landing depends on the font metrics of the platform).
+    This is the case REMOVED from the 04-08 clamp test (plan 04-09).
+    """
+    pb = _pagebox_with_text(recognized="hello world")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    item.apply_overlay_zoom(0.25)
+    from PySide6.QtGui import QTextCursor
+
+    cursor = item._text_overlay.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    fmt = cursor.charFormat()
+    assert fmt.font().pointSizeF() < 40.0  # shrink engaged
+    assert 5.0 <= fmt.font().pointSizeF() * 0.25 < 10.0  # below clamp, above floor
+    overlay_rect = item._text_overlay.sceneBoundingRect()
+    box_rect = item.sceneBoundingRect()
+    assert overlay_rect.right() <= box_rect.right() + 1.5
+    assert overlay_rect.bottom() <= box_rect.bottom() + 1.5
 
 
 @pytest.mark.gui
