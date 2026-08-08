@@ -185,26 +185,27 @@ def test_unified_undo_pops_most_recent_by_stamp() -> None:
 
     cur_mask = _transparent_mask()
     cur_img = np.zeros((4, 4, 3), dtype=np.uint8)
-    kind1, _v1 = history.undo(cur_mask, cur_img, [])
-    assert kind1 == "boxes"
+    res1 = history.undo(cur_mask, cur_img, [])
+    assert res1[0][0] == "boxes"
 
-    kind2, _v2 = history.undo(cur_mask, cur_img, [])
-    assert kind2 == "image"
+    res2 = history.undo(cur_mask, cur_img, [])
+    assert res2[0][0] == "image"
 
-    kind3, _v3 = history.undo(cur_mask, cur_img, [])
-    assert kind3 == "mask"
+    res3 = history.undo(cur_mask, cur_img, [])
+    assert res3[0][0] == "mask"
 
 
 @pytest.mark.unit
-def test_unified_undo_all_empty_returns_none() -> None:
-    """undo() returns None when all three undo lists are empty.
+def test_unified_undo_all_empty_returns_empty_list() -> None:
+    """undo() returns [] when all three undo lists are empty (plan 05-04:
+    the return shape widened from None to a list; empty stacks -> []).
 
     When nothing is on any undo list, no per-type pop is invoked, so passing
     None for the current values is safe (the unified pop returns before
     delegating).
     """
     history = HistoryManager(limit=20)
-    assert history.undo(None, None, []) is None
+    assert history.undo(None, None, []) == []
 
 
 @pytest.mark.unit
@@ -224,11 +225,11 @@ def test_unified_redo_mirrors_undo() -> None:
     assert history.can_redo()
     # Redo pops in stamp order: the most-recent redo stamp first (mask, stamped
     # at the 2nd undo, has the higher stamp).
-    kind1, _v1 = history.redo(cur_mask, cur_img_stand_in(), [])
-    assert kind1 == "mask"
-    kind2, _v2 = history.redo(cur_mask, cur_img_stand_in(), [])
-    assert kind2 == "boxes"
-    assert history.redo(cur_mask, cur_img_stand_in(), []) is None
+    res1 = history.redo(cur_mask, cur_img_stand_in(), [])
+    assert res1[0][0] == "mask"
+    res2 = history.redo(cur_mask, cur_img_stand_in(), [])
+    assert res2[0][0] == "boxes"
+    assert history.redo(cur_mask, cur_img_stand_in(), []) == []
 
 
 @pytest.mark.unit

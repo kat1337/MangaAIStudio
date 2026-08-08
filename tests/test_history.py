@@ -832,8 +832,8 @@ def test_first_mask_stroke_undoable_to_baseline(qtbot, tmp_path) -> None:
     pin.push_mask_state(_opaque_stroked_mask(64, brush_size=12))
     pin_result = pin.undo(_opaque_stroked_mask(64, brush_size=12),
                           np.zeros((64, 64, 3), dtype=np.uint8), [])
-    assert pin_result is not None and pin_result[0] == "mask"
-    assert _opaque_pixel_count(pin_result[1]) > 0, (
+    assert pin_result is not None and pin_result[0][0] == "mask"
+    assert _opaque_pixel_count(pin_result[0][1]) > 0, (
         "pre-fix pin: a bare after-state-only push returns the stroked "
         "after-state on undo (the one-behind defect the GUI hook seeds around)"
     )
@@ -874,8 +874,8 @@ def test_pop_mask_undo_with_null_current_mask_does_not_crash(qtbot) -> None:
         current_boxes=[],
     )
     assert result is not None
-    assert result[0] == "mask"
-    assert result[1] is not None
+    assert result[0][0] == "mask"
+    assert result[0][1] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -997,4 +997,102 @@ def test_geometry_push_detaches_patch() -> None:
     stored_boxes = history._boxes_undo[-1][1]
     assert len(stored_boxes) == 1
     assert stored_boxes[0][2] == {"text": "original"}
+
+
+# ---------------------------------------------------------------------------
+# Plan 05-04 Task 2 — undo()/redo() pop-all-with-max-stamp returning LISTS.
+# The geometry record pops as a multi-kind list so ONE Ctrl+Z reverses the
+# whole op (PROJ-04 / UI-SPEC surface 28); ordinary single-store edits pop as
+# one-element lists (unchanged Phase 3 semantics, return shape widened).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_geometry_undo_reverses_all_three() -> None:
+    """ONE undo() pops image+mask+boxes together for a geometry record.
+
+    Push a geometry record (image+mask+boxes share one stamp), then a second
+    ORDINARY image push; undo #1 returns the ordinary image entry alone (a
+    one-element list); undo #2 returns ALL THREE geometry entries (mask,
+    image, boxes order); undo #3 returns [].
+    """
+    history = HistoryManager(limit=20)
+    pre_patch = np.zeros((8, 8, 3), dtype=np.uint8)
+    pre_mask = _transparent_mask(8)
+    pre_boxes = [(1, "detected", {"text": "a"})]
+    history.push_geometry_state(pre_patch, pre_mask, pre_boxes)
+    history.push_image_action(2, 2, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    current = np.full((8, 8, 3), 100, dtype=np.uint8)
+    cur_mask = _painted_mask(20)
+
+    # Undo #1: the ordinary image push — exactly one entry.
+    r1 = history.undo(cur_mask, current, [])
+    assert len(r1) == 1 and r1[0][0] == "image"
+
+    # Undo #2: the geometry record — ALL THREE entries (mask, image, boxes);
+    # the image side is the full-frame pre-op patch at (0, 0).
+    r2 = history.undo(cur_mask, current, [])
+    assert [kind for kind, _ in r2] == ["mask", "image", "boxes"]
+    img_value = dict(r2)["image"]
+    gx, gy, gpatch = img_value
+    assert (gx, gy) == (0, 0)
+    assert np.array_equal(gpatch, pre_patch)
+
+    # Undo #3: everything popped — empty list (was None pre-plan).
+    assert history.undo(cur_mask, current, []) == []
+
+
+@pytest.mark.unit
+def test_geometry_redo_restores_all_three() -> None:
+    """redo() mirrors undo() over the redo stores: ONE redo restores the
+    geometry triple (the group's redo stashes share one stamp).
+
+    After undoing the geometry record (undo #2), the three redo stashes must
+    carry a single shared stamp so a single redo() pops all three together —
+    the mirror of the one-press undo contract.
+    """
+    history = HistoryManager(limit=20)
+    pre_patch = np.zeros((8, 8, 3), dtype=np.uint8)
+    pre_mask = _transparent_mask(8)
+    pre_boxes = [(1, "detected", None)]
+    history.push_geometry_state(pre_patch, pre_mask, pre_boxes)
+    history.push_image_action(2, 2, np.zeros((2, 2, 3), dtype=np.uint8))
+
+    current = np.full((8, 8, 3), 100, dtype=np.uint8)
+    cur_mask = _painted_mask(20)
+
+    history.undo(cur_mask, current, [])  # ordinary image entry
+    history.undo(cur_mask, current, [])  # geometry triple
+
+    # Redo #1: the geometry triple (undone last -> redone first).
+    r1 = history.redo(cur_mask, current, [])
+    assert [kind for kind, _ in r1] == ["mask", "image", "boxes"]
+
+    # Redo #2: the ordinary image entry alone.
+    r2 = history.redo(cur_mask, current, [])
+    assert len(r2) == 1 and r2[0][0] == "image"
+
+    # Redo #3: everything redone.
+    assert history.redo(cur_mask, current, []) == []
+
+
+@pytest.mark.unit
+def test_undo_returns_single_element_list() -> None:
+    """Ordinary single-store pushes undo() to a ONE-element list [(kind, value)].
+
+    The return-shape contract (plan 05-04): undo()/redo() always return a
+    list; a lone ordinary push yields a list of exactly one (kind, value)
+    pair, preserving the Phase 3 unified pop for ordinary edits.
+    """
+    history = HistoryManager(limit=20)
+    history.push_mask_state(_painted_mask(10))
+
+    cur = _painted_mask(20)
+    result = history.undo(cur, np.zeros((8, 8, 3), dtype=np.uint8), [])
+    assert isinstance(result, list)
+    assert len(result) == 1
+    kind, value = result[0]
+    assert kind == "mask"
+    assert value is not None
 
