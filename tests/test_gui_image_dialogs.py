@@ -32,6 +32,7 @@ from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
 )
+from manga_ai_studio.gui.levels_dialog import LevelsDialog
 from manga_ai_studio.gui.main_window import MainWindow
 from panelcleaner.structures import Box
 
@@ -133,3 +134,133 @@ def test_rotate_90cw_end_to_end(qtbot, tmp_path) -> None:
         mask_to_numpy_binary(window.canvas.get_mask()), mask_bin
     )
     assert window.canvas.boxes_snapshot()[0].box.as_tuple == (30, 10, 50, 20)
+
+
+# ===========================================================================
+# Task 2 — Levels dialog: live preview + Cancel-restores-exactly + Apply-one
+# ===========================================================================
+
+@pytest.mark.gui
+def test_levels_defaults_and_clamp(qtbot) -> None:
+    """LevelsDialog opens at 0/255/1.00 with the white>black cross-clamp.
+
+    Dragging black to 200 moves white's minimum to 201, and the preview
+    callback never receives white <= black (T-05-07 — no inverted map).
+    """
+    calls: list = []
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    dlg = LevelsDialog(page_image=img, preview_callback=lambda v: calls.append(v))
+    qtbot.addWidget(dlg)
+
+    assert dlg.black_spin.value() == 0
+    assert dlg.white_spin.value() == 255
+    assert dlg.gamma_spin.value() == 1.00
+
+    dlg.black_spin.setValue(200)
+    assert dlg.white_spin.minimum() == 201  # white min follows black+1
+    dlg.black_spin.setValue(254)
+    assert dlg.white_spin.minimum() == 255
+    dlg.white_spin.setValue(100)  # white below black+1 -> clamped up
+    assert dlg.black_spin.maximum() == dlg.white_spin.value() - 1
+    assert dlg.black_spin.value() <= dlg.white_spin.value() - 1
+
+    # The preview never received an inverted map.
+    assert calls, "preview callback never fired"
+    assert all(white > black for black, white, _gamma in calls)
+
+
+@pytest.mark.gui
+def test_levels_cancel_restores_exactly(qtbot, tmp_path, monkeypatch) -> None:
+    """Cancel restores the pre-dialog image byte-identical with zero entries.
+
+    Dragging the sliders during the dialog mutates the canvas (live preview,
+    no pushes — Pitfall 9); Cancel re-displays the detached base silently:
+    no undo entry, no status flash (UI-SPEC surface 25).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+
+    def _fake_exec(dlg):
+        dlg.black_spin.setValue(120)  # preview mutates the canvas
+        dlg.white_spin.setValue(200)
+        dlg.gamma_spin.setValue(1.7)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(LevelsDialog, "exec", _fake_exec)
+    window._on_levels()
+    QApplication.processEvents()
+
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)  # exact restore
+    assert not window.history.can_undo()  # no undo entry was pushed
+    assert window.status_bar_left.text() != "Levels applied."  # no flash
+
+
+@pytest.mark.gui
+def test_levels_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
+    """Apply commits the previewed state: ONE image-only entry (D-15).
+
+    Levels is geometry-free: masks and boxes are untouched, the image entry
+    is the only store pushed, geometry_altered stays False (A4), the status
+    flash fires, and Show Original re-baselines to the post-levels image
+    (D-14).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+    mask_bin, _box = _seed_mask_and_box(window)
+
+    def _fake_exec(dlg):
+        dlg.result_values = (30, 200, 1.0)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(LevelsDialog, "exec", _fake_exec)
+    window._on_levels()
+    QApplication.processEvents()
+
+    expected = levels_page(pre, 30, 200, 1.0)
+    assert np.array_equal(window.canvas.get_image_numpy(), expected)
+    # Geometry-free: mask + boxes untouched.
+    assert np.array_equal(mask_to_numpy_binary(window.canvas.get_mask()), mask_bin)
+    assert window.canvas.boxes_snapshot()[0].box.as_tuple == (30, 10, 50, 20)
+    # ONE image-only entry — the mask/boxes stores are untouched.
+    assert len(window.history._image_undo) == 1
+    assert len(window.history._mask_undo) == 0
+    assert len(window.history._boxes_undo) == 0
+    assert window.image_files[0].geometry_altered is False  # A4
+    assert "Levels applied." in window.status_bar_left.text()
+    # Show Original shows the POST-levels image (D-14 re-baseline).
+    assert np.array_equal(window.canvas._original_image_numpy, expected)
+
+
+@pytest.mark.gui
+def test_levels_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None:
+    """The live preview never re-baselines Show Original (Pitfall 5/9).
+
+    The capture-suppressed preview path keeps the pre-dialog image as the
+    D-14 "original"; after Cancel, Show Original still shows the pre-dialog
+    image even though the canvas was mutated by previews.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+    window.canvas.rebaseline_original()  # honest pre-dialog baseline
+    assert np.array_equal(window.canvas._original_image_numpy, pre)
+
+    preview_seen: dict = {}
+
+    def _fake_exec(dlg):
+        dlg.black_spin.setValue(60)  # preview mutates the canvas mid-dialog
+        preview_seen["mid"] = window.canvas.get_image_numpy().copy()
+        dlg.gamma_spin.setValue(2.0)
+        dlg.white_spin.setValue(180)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(LevelsDialog, "exec", _fake_exec)
+    window._on_levels()
+    QApplication.processEvents()
+
+    # The preview ran mid-dialog (canvas mutated) but never touched the
+    # baseline; Cancel restored the pre-dialog image exactly (Pitfall 5/9).
+    assert not np.array_equal(preview_seen["mid"], pre)
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    assert np.array_equal(window.canvas._original_image_numpy, pre)
+    window.canvas.show_original(True)
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
