@@ -340,6 +340,55 @@ class HistoryManager:
         )
         return self._materialize_snapshot(next_state)
 
+    # ------------------------------------------------ geometry-op record
+    def push_geometry_state(
+        self,
+        image_patch: np.ndarray,
+        mask_qimage: QImage | None = None,
+        boxes: list | None = None,
+    ) -> None:
+        """Push ONE image op across IMAGE + MASK + BOXES with a SINGLE stamp.
+
+        The geometry-op undo record (plan 05-04, PROJ-04 / UI-SPEC surface 28
+        "one press per op, never two"; RESEARCH Pattern 2). Rotate/crop/
+        resize/levels apply image + mask + box geometry together, so their
+        pre-op state is stamped into ALL touched stores with ONE monotonic
+        stamp; the unified ``undo()``/``redo()`` pop every store whose tail
+        stamp equals the max, reversing the whole op with a single Ctrl+Z.
+
+        - The image entry is a FULL-FRAME patch at ``(0, 0)`` —
+          ``pop_image_undo``'s existing machinery handles it (redo stash of
+          the current full frame + ``limit``-bounded memory, T-01-16 /
+          T-05-08).
+        - ``mask_qimage`` / ``boxes`` are OPTIONAL: ``levels`` is
+          geometry-free (D-15) and pushes image-only; a geometry op on a
+          maskless page pushes image+boxes.
+        - Push-side detachment (Pitfall 2/3, T-05-11): the image patch is
+          ``.copy()``-detached, the mask is ``.copy()``-detached, the boxes
+          snapshot is materialized fresh via ``_materialize_snapshot``.
+        - Every touched store's redo branch is cleared and the ``limit`` cap
+          applied (the existing push discipline, mirrored per store).
+
+        ONLY geometry ops use this record. Ordinary mask/image/box edits keep
+        their per-type single-store pushes (``push_mask_state`` /
+        ``push_image_action`` / ``push_boxes_state``).
+        """
+        stamp = self._stamp()
+        self._image_undo.append((stamp, (0, 0, image_patch.copy())))
+        self._image_redo.clear()
+        if len(self._image_undo) > self.limit:
+            self._image_undo.pop(0)
+        if mask_qimage is not None:
+            self._mask_undo.append((stamp, mask_qimage.copy()))
+            self._mask_redo.clear()
+            if len(self._mask_undo) > self.limit:
+                self._mask_undo.pop(0)
+        if boxes is not None:
+            self._boxes_undo.append((stamp, self._materialize_snapshot(boxes)))
+            self._boxes_redo.clear()
+            if len(self._boxes_undo) > self.limit:
+                self._boxes_undo.pop(0)
+
     # -------------------------------------------------- unified timeline
     def undo(
         self,
