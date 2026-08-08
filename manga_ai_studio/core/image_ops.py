@@ -184,3 +184,146 @@ def rotate_boxes(boxes: list[PageBox], w: int, h: int, k: int) -> list[PageBox]:
     uses them (matches ``rotate_page``'s coordinate frame).
     """
     return [transform_box_payload(pb, w, h, k) for pb in boxes]
+
+
+# ---------------------------------------------------------------------------
+# Crop (plan 05-02 Task 2) — D-11 exact slice + D-16 drop/clip policy
+# ---------------------------------------------------------------------------
+
+
+def crop_page(
+    image_rgb: np.ndarray, mask_bin: np.ndarray, x: int, y: int, w: int, h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Crop the page to ``(x, y, w, h)`` — an exact slice (D-18, Pitfall 2).
+
+    ``x``/``y`` are the crop origin in pre-crop page coordinates; ``w``/``h``
+    the crop size. Validates ``(H,W,3)`` uint8 / ``(H,W)`` uint8 and that the
+    crop rect is in-range (ints, x/y >= 0, w/h >= 1, fully inside the page)
+    BEFORE slicing; ValueError otherwise (image_io.py:65-72 discipline).
+    """
+    _validate_image_mask(image_rgb, mask_bin)
+    for name, value in (("x", x), ("y", y), ("w", w), ("h", h)):
+        if not isinstance(value, int):
+            raise ValueError(f"crop {name} must be an int, got {type(value).__name__}")
+    h_img, w_img = image_rgb.shape[:2]
+    if x < 0 or y < 0 or w < 1 or h < 1:
+        raise ValueError("crop rect must satisfy x>=0, y>=0, w>=1, h>=1")
+    if x + w > w_img or y + h > h_img:
+        raise ValueError("crop rect must lie inside the page (H,W) dims")
+    return (
+        image_rgb[y : y + h, x : x + w].copy(),
+        mask_bin[y : y + h, x : x + w].copy(),
+    )
+
+
+def _clip_quad(quad: list, x: int, y: int, w: int, h: int) -> list | None:
+    """Clamp a line quad to the crop rect ``[x, x+w] x [y, y+h]`` (D-16).
+
+    Each point's coordinates are clamped to the rect edges — partially
+    outside quads CLIP, their points clamp to the new page boundary. If the
+    clamped quad is degenerate (zero width or zero height — the quad lies
+    fully outside the rect or only touches its edge), ``None`` is returned
+    and the caller drops the quad. Never mutates the input quad.
+    """
+    x2, y2 = x + w, y + h
+    clamped = [[max(x, min(x2, px)), max(y, min(y2, py))] for px, py in quad]
+    xs = [p[0] for p in clamped]
+    ys = [p[1] for p in clamped]
+    if max(xs) == min(xs) or max(ys) == min(ys):
+        return None
+    return clamped
+
+
+def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | None:
+    """Clip one box (bbox AND line quads) to the crop rect — D-16.
+
+    The bbox is intersected with the crop rect; a zero-area or empty
+    intersection (fully outside, or only touching the edge) returns ``None``
+    — the caller DROPS the box and counts it. A kept box gets a fresh
+    ``PageBox`` (fresh ``@frozen`` ``Box`` + fresh ``TextBlock`` when a
+    payload exists) in POST-crop page coordinates: the bbox and every line
+    quad are translated by ``(-x, -y)`` and the quads are clamped to
+    ``[0, w] x [0, h]``. Line quads that clip to nothing are removed. The
+    input PageBox/payload/lines are NEVER mutated (Pitfall 3); the D-15 seam
+    (``mask``/``std_dev``) stays ``None``.
+    """
+    bx1, by1, bx2, by2 = pagebox.box.as_tuple
+    nx1 = max(bx1, x)
+    ny1 = max(by1, y)
+    nx2 = min(bx2, x + w)
+    ny2 = min(by2, y + h)
+    if nx2 <= nx1 or ny2 <= ny1:
+        return None
+    # Post-crop page coordinates: translate the intersection by (-x, -y).
+    tx1, ty1, tx2, ty2 = nx1 - x, ny1 - y, nx2 - x, ny2 - y
+    new_box = Box(tx1, ty1, tx2, ty2)
+    payload = pagebox.payload
+    if payload is None:
+        return PageBox(box=new_box, origin=pagebox.origin)
+    new_lines = []
+    for quad in payload.lines:
+        clipped = _clip_quad(quad, x, y, w, h)
+        if clipped is None:
+            continue
+        new_lines.append(
+            [[max(0, min(w, px - x)), max(0, min(h, py - y))] for px, py in clipped]
+        )
+    text = payload.text
+    if isinstance(text, list):
+        text = list(text)
+    fresh = TextBlock(
+        xyxy=list(new_box.as_tuple),
+        lines=new_lines,
+        vertical=payload.vertical,
+        language=payload.language,
+        font_size=payload.font_size,
+        text=text,
+        translation=payload.translation,
+    )
+    return PageBox(
+        box=new_box,
+        origin=pagebox.origin,
+        payload=fresh,
+        edited=pagebox.edited,
+        bubble_no=pagebox.bubble_no,
+        manual_override=pagebox.manual_override,
+    )
+
+
+def crop_boxes(
+    boxes: list[PageBox], x: int, y: int, w: int, h: int
+) -> tuple[list[PageBox], int]:
+    """Apply the D-16 drop/clip policy to every box.
+
+    Returns ``(kept_boxes, dropped_count)`` — ``dropped_count`` is the number
+    of fully-outside boxes removed (reported in the status bar by the GUI
+    apply path; RESEARCH Pitfall 10).
+    """
+    kept: list[PageBox] = []
+    dropped = 0
+    for pb in boxes:
+        clipped = _clip_box(pb, x, y, w, h)
+        if clipped is None:
+            dropped += 1
+        else:
+            kept.append(clipped)
+    return kept, dropped
+
+
+def crop_page_with_boxes(
+    image_rgb: np.ndarray,
+    mask_bin: np.ndarray,
+    boxes: list[PageBox],
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+) -> tuple[np.ndarray, np.ndarray, list[PageBox], int]:
+    """The one-call crop apply seam for the GUI (plan 05-07): crop the image
+    + mask and apply the D-16 drop/clip policy in one call.
+
+    Returns ``(image_c, mask_c, kept_boxes, dropped_count)``.
+    """
+    img_c, msk_c = crop_page(image_rgb, mask_bin, x, y, w, h)
+    kept, dropped = crop_boxes(boxes, x, y, w, h)
+    return img_c, msk_c, kept, dropped

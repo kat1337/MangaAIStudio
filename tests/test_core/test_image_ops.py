@@ -214,3 +214,135 @@ def test_rotate_rejects_bad_shapes() -> None:
         image_ops.rotate_page(img, np.zeros((5, 6), np.uint8), -1)  # H mismatch
     with pytest.raises(ValueError):
         image_ops.rotate_page(img, mask.astype(np.float64), -1)  # mask dtype
+
+
+@pytest.mark.unit
+def test_crop_drop_and_clip() -> None:
+    """Crop slices exactly (D-18) and applies the D-16 drop/clip policy:
+    fully-outside boxes dropped (counted), partial boxes clipped (bbox AND
+    line quads) into post-crop page coordinates, payload-None preserved."""
+    # A 10x8 (W,H) page with a deterministic pattern so slice exactness is
+    # checkable: value = (y*10 + x + channel), 0..239 fits uint8 directly.
+    img = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
+    mask = np.zeros((8, 10), dtype=np.uint8)
+    mask[2, 3] = 255  # inside the crop rect
+
+    payload = TextBlock(
+        xyxy=[1, 0, 8, 6],
+        lines=[
+            [[1, 0], [8, 0], [8, 6], [1, 6]],  # partial -> clipped+translated
+            [[1, 0], [2, 0], [2, 1], [1, 1]],  # fully outside -> dropped quad
+        ],
+        vertical=False,
+        language="eng",
+        font_size=10,
+        text="clipped",
+        translation="trans",
+    )
+    boxes = [
+        PageBox(box=Box(8, 5, 9, 7), origin=DETECTED),  # fully outside -> drop
+        PageBox(
+            box=Box(3, 2, 5, 3),
+            origin=DETECTED,
+            payload=payload,
+            edited=True,
+            bubble_no=7,
+            manual_override=True,
+        ),  # fully inside -> translated
+        PageBox(box=Box(1, 0, 8, 6), origin=DETECTED, payload=payload),  # partial
+        PageBox(box=Box(0, 2, 5, 3), origin=USER),  # payload-None partial
+    ]
+    before = _snapshot_boxes(boxes)
+
+    x, y, w, h = 2, 1, 4, 3
+    img_c, msk_c = image_ops.crop_page(img, mask, x, y, w, h)
+    # D-18 exact slice.
+    assert np.array_equal(img_c, img[1:4, 2:6])
+    assert np.array_equal(msk_c, mask[1:4, 2:6])
+    assert img_c.flags["OWNDATA"]
+    assert not np.shares_memory(img_c, img)
+
+    kept, dropped = image_ops.crop_boxes(boxes, x, y, w, h)
+    assert dropped == 1  # only the fully-outside box
+    assert len(kept) == 3
+
+    # Fully-inside box: translated bbox + payload rides along.
+    inner = kept[0]
+    assert inner.box.as_tuple == (1, 1, 3, 2)
+    assert inner.payload.lines == [[[0, 0], [4, 0], [4, 3], [0, 3]]]
+    assert inner.payload.text == "clipped"
+    assert inner.payload.translation == "trans"
+    assert inner.origin == DETECTED
+    assert inner.edited is True
+    assert inner.bubble_no == 7
+    assert inner.manual_override is True
+    assert inner.payload is not payload  # fresh TextBlock, never the original
+
+    # Partial box: bbox clamped to the crop rect [2,1,6,4] pre-translation,
+    # then translated to post-crop [0,0,4,3]; the outside quad was dropped.
+    partial = kept[1]
+    assert partial.box.as_tuple == (0, 0, 4, 3)
+    assert partial.payload.lines == [[[0, 0], [4, 0], [4, 3], [0, 3]]]
+    assert partial.payload.xyxy == [0, 0, 4, 3]
+
+    # Payload-None partial box: clipped bbox, payload still None.
+    none_pb = kept[2]
+    assert none_pb.box.as_tuple == (0, 1, 3, 2)
+    assert none_pb.payload is None
+    assert none_pb.origin == USER
+
+    # One-call apply seam returns everything.
+    img2, msk2, kept2, dropped2 = image_ops.crop_page_with_boxes(
+        img, mask, boxes, x, y, w, h
+    )
+    assert np.array_equal(img2, img_c)
+    assert np.array_equal(msk2, msk_c)
+    assert dropped2 == 1
+    assert len(kept2) == 3
+
+    # No-in-place-mutation guard: originals byte-identical (Pitfall 3).
+    assert np.array_equal(img, img)
+    assert _snapshot_boxes(boxes) == before
+
+
+@pytest.mark.unit
+def test_crop_rejects_bad_input() -> None:
+    """Out-of-range or non-int crop coords raise ValueError before slicing
+    (image_io.py:65-72 discipline; T-05-06)."""
+    img, mask, _ = _sample_page()  # (4,6) page: H=4, W=6
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, -1, 0, 2, 2)  # x < 0
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 0, -1, 2, 2)  # y < 0
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 0, 0, 0, 2)  # w < 1
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 0, 0, 2, 0)  # h < 1
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 5, 0, 2, 2)  # x+w > W (5+2 > 6)
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 0, 3, 2, 2)  # y+h > H (3+2 > 4)
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 2.5, 0, 2, 2)  # non-int x
+    with pytest.raises(ValueError):
+        image_ops.crop_page(img, mask, 0, 0, "4", 2)  # non-int w
+    with pytest.raises(ValueError):
+        image_ops.crop_page(np.zeros((4, 6), np.uint8), mask, 0, 0, 2, 2)  # bad img
+
+
+@pytest.mark.unit
+def test_crop_zero_area_dropped() -> None:
+    """A box whose bbox touches the crop edge but has zero intersection area
+    (nx2 == nx1) is dropped and counted (D-16; RESEARCH Pitfall 10)."""
+    img, mask, _ = _sample_page()  # (4,6): W=6, H=4
+    # Crop rect x=2, y=1, w=2, h=2 -> [2,4) x [1,3).
+    boxes = [
+        PageBox(box=Box(4, 1, 6, 3), origin=DETECTED),  # nx1=4, nx2=min(6,4)=4
+        PageBox(box=Box(2, 3, 5, 4), origin=DETECTED),  # ny1=3, ny2=min(4,3)=3
+        PageBox(box=Box(2, 2, 3, 3), origin=USER),  # fully inside -> kept
+    ]
+    kept, dropped = image_ops.crop_boxes(boxes, 2, 1, 2, 2)
+    assert dropped == 2
+    assert len(kept) == 1
+    assert kept[0].box.as_tuple == (0, 1, 1, 2)
+    assert kept[0].origin == USER
