@@ -275,7 +275,12 @@ class EditorCanvas(QGraphicsView):
             "Open a single image or a folder of images to begin cleaning."
         )
         self._empty_hint = QGraphicsTextItem(
-            "File \u2192 Open Image\u2026 (Ctrl+O)   \u00b7   or drag files here"
+            # D-11 (deferred from 05-UAT/05-UI-REVIEW): the stale copy
+            # advertised "Open Image…" with the shortcut that Phase 5
+            # re-bound to Open Project… (main_window.py:311). Open Folder
+            # binds Ctrl+Shift+O (main_window.py:305) — the locked UI-SPEC
+            # §Copywriting wording (heading + body stay verbatim).
+            "File \u2192 Open Folder\u2026 (Ctrl+Shift+O)   \u00b7   or drag files here"
         )
         for item in (self._empty_heading, self._empty_body, self._empty_hint):
             item.setDefaultTextColor(QColor("#9a9aa2"))

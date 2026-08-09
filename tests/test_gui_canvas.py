@@ -217,6 +217,26 @@ def test_empty_state_heading(qtbot) -> None:
     assert canvas._empty_body in canvas.scene().items()
 
 
+@pytest.mark.gui
+def test_empty_hint_copy_references_open_folder(qtbot) -> None:
+    """D-11 regression: the first-run hint advertises the REAL Open Folder
+    binding (Ctrl+Shift+O, main_window.py:305) — the stale Open-Image Ctrl+O
+    copy is gone (Ctrl+O is Open Project…, main_window.py:311)."""
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    expected = (
+        "File \u2192 Open Folder\u2026 (Ctrl+Shift+O)   \u00b7   or drag files here"
+    )
+    assert canvas._empty_hint.toPlainText() == expected
+    # The stale Ctrl+O advertisement must not appear anywhere in the hint
+    # (grep-safe: "Ctrl+Shift+O" does not contain the substring "Ctrl+O").
+    assert "Ctrl+O" not in canvas._empty_hint.toPlainText()
+    # The body copy stays verbatim (D-11 prohibition).
+    assert canvas._empty_body.toPlainText() == (
+        "Open a single image or a folder of images to begin cleaning."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Plan 04 Task 2 tests — ToolsPanel + canvas tool dispatch + cursor visuals
 # ---------------------------------------------------------------------------
