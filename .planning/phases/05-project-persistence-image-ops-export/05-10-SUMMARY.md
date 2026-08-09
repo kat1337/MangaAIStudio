@@ -156,3 +156,9 @@ None - no external service configuration required.
 ---
 *Phase: 05-project-persistence-image-ops-export*
 *Completed: 2026-08-08*
+
+## Self-Check: PASSED
+
+- Files verified on disk: `manga_ai_studio/gui/main_window.py`, `tests/test_gui_project.py`, `.planning/phases/05-project-persistence-image-ops-export/05-10-SUMMARY.md`
+- Commits verified in git history: `0b583c0` (test RED), `cd41905` (fix GREEN), `6a45863` (test RED), `6ea1f1a` (feat GREEN), `09cbfb4` (docs: plan metadata)
+- Full suite final run: 551 passed, 0 failed
