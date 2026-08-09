@@ -1258,6 +1258,14 @@ class MainWindow(QMainWindow):
             return
         black, white, gamma = dialog.result_values
 
+        # UI-review FLAG (surface 25/28): the dialog's live previews mutated
+        # the canvas (Pitfall 9), so _apply_geometry_op's pre-capture would
+        # see the LAST PREVIEW frame — the post-levels image — as the undo
+        # "before", making Ctrl+Z a no-op. Restore the detached pre-dialog
+        # base first (mirroring the Cancel path above) so the undo record's
+        # before-state is the true pre-op image.
+        self.canvas.set_image_from_numpy(base.copy())
+
         def _transform():
             return image_ops.levels_page(base, black, white, gamma), None, None
 

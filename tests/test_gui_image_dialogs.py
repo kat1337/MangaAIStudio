@@ -204,12 +204,24 @@ def test_levels_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
     is the only store pushed, geometry_altered stays False (A4), the status
     flash fires, and Show Original re-baselines to the post-levels image
     (D-14).
+
+    Restore semantics (UI-review FLAG, surface 25/28): the live preview
+    mutates the canvas mid-dialog, so Apply MUST capture the TRUE pre-op
+    image (the detached pre-dialog base) as the undo before-state — not the
+    last preview frame. ONE Ctrl+Z after Apply must restore the pre-dialog
+    image byte-identical and leave the geometry undo stack empty.
     """
     window = _window_with_page(qtbot, tmp_path)
     pre = window.canvas.get_image_numpy().copy()
     mask_bin, _box = _seed_mask_and_box(window)
 
     def _fake_exec(dlg):
+        # A real user drags the controls: each change fires the live preview,
+        # mutating the canvas (Pitfall 9 — no pushes). The final preview
+        # leaves the canvas showing the leveled state.
+        dlg.black_spin.setValue(30)
+        dlg.white_spin.setValue(200)
+        dlg.gamma_spin.setValue(1.0)
         dlg.result_values = (30, 200, 1.0)
         return QDialog.DialogCode.Accepted
 
@@ -230,6 +242,15 @@ def test_levels_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
     assert "Levels applied." in window.status_bar_left.text()
     # Show Original shows the POST-levels image (D-14 re-baseline).
     assert np.array_equal(window.canvas._original_image_numpy, expected)
+
+    # Restore semantics: the undo before-state is the PRE-DIALOG image (the
+    # previews above mutated the canvas — without the fix, the before-state
+    # equals the post-op state and Ctrl+Z is a no-op).
+    window.on_undo()
+    QApplication.processEvents()
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    # The single geometry entry was consumed: the stack is empty again.
+    assert not window.history.can_undo()
 
 
 @pytest.mark.gui
