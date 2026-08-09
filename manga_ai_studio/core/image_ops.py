@@ -5,7 +5,7 @@ only pure functions of ``(numpy arrays, list[PageBox])`` so
 ``tests/test_core/test_image_ops.py`` can exercise every transform headless —
 no QWidget, no display, safe to call from the apply path (plans 05-06/05-07)
 and from any worker thread. This module owns ALL pixel and geometry math for
-rotate / crop / resize / levels; the GUI owns interaction only.
+rotate / crop / resize / levels / curves; the GUI owns interaction only.
 
 The mask boundary (D-18): inputs and outputs use the BINARY mask form
 ``(H, W)`` uint8 (0/255) produced by ``mask_editor.mask_to_numpy_binary`` and
