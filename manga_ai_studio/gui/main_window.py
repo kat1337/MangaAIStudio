@@ -1948,6 +1948,24 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        # WR-02: every page's image source unresolvable (e.g. originals
+        # deleted before a folder session's first save) would write a 0-page
+        # manifest and then clear the dirty flags — the user believes the
+        # session was saved, but reopening fails with "project contains no
+        # pages". Abort with the save-failure copy BEFORE writing; the dirty
+        # flags stay untouched so the session remains recoverable.
+        if not page_files:
+            logger.error(
+                "Save Project failed: no page has a resolvable image source"
+            )
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{name}'.",
+                "No page could be read for saving. Check that the source"
+                " images still exist and see the log for details.",
+            )
+            return False
+
         try:
             project_io.save_project(project_dir, name, page_files)
         except OSError as exc:
