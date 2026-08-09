@@ -40,14 +40,14 @@ created: 2026-08-09
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | 01 | 1 | PROJ-04 (curves math) | T-06-01 / — | LUT values clipped 0..255 uint8; no NaN/garbage entries | unit | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_core/test_image_ops.py -x` | ✅ / ❌ W0 | ⬜ pending |
-| TBD | 01 | 1 | PROJ-04 (composition) | T-06-01 / — | `.copy()` detach; validation errors | unit | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_core/test_image_ops.py -x` | ✅ / ❌ W0 | ⬜ pending |
-| TBD | 02 | 2 | PROJ-04 (dialog) | T-06-02 / — | endpoint clamps; point x-order preservation | GUI (pytest-qt) | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_curves_dialog.py -x` | ❌ W0 | ⬜ pending |
-| TBD | 02 | 2 | PROJ-04 (lifecycle) | T-06-03 / — | restore-before-Apply ordering; ONE undo entry | GUI e2e | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_curves_dialog.py -x` | ❌ W0 | ⬜ pending |
-| TBD | 03 | 1 | D-09 | — | empty-state trio hidden after numpy display path | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_project.py tests/test_gui_canvas.py -x` | ✅ / ❌ W0 | ⬜ pending |
-| TBD | 03 | 1 | D-10 | — | active toolbar button checked, others unchecked | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_crop_tool.py tests/test_gui_tools.py -x` | ✅ / ❌ W0 | ⬜ pending |
-| TBD | 03 | 1 | D-11 | — | hint copy lacks "Ctrl+O" | unit/regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_canvas.py -x` | ✅ / ❌ W0 | ⬜ pending |
-| TBD | 03 | 1 | D-12 | — | dialog font 14px | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_image_dialogs.py tests/test_gui_curves_dialog.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 01 | 1 | PROJ-04 (curves math) | T-06-01 / T-06-02 | LUT values clipped 0..255 uint8; no NaN/garbage entries | unit | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_core/test_image_ops.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 01 | 1 | PROJ-04 (composition) | T-06-01 / T-06-02 | `.copy()` detach; validation errors | unit | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_core/test_image_ops.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 04 | 2 | PROJ-04 (dialog) | T-06-05 / T-06-06 | endpoint clamps; point x-order preservation | GUI (pytest-qt) | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_curves_dialog.py -x` | ❌ W0 | ⬜ pending |
+| TBD | 05 | 3 | PROJ-04 (lifecycle) | T-06-07 | restore-before-Apply ordering; ONE undo entry | GUI e2e | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_curves_dialog.py -x` | ❌ W0 | ⬜ pending |
+| TBD | 02 | 1 | D-09 | T-06-03 | empty-state trio hidden after numpy display path | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_project.py tests/test_gui_canvas.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 03 | 1 | D-10 | T-06-04 | active toolbar button checked, others unchecked | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_crop_tool.py tests/test_gui_tools.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 02 | 1 | D-11 | T-06-03 | hint copy lacks "Ctrl+O" | unit/regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_canvas.py -x` | ✅ / ❌ W0 | ⬜ pending |
+| TBD | 03 | 1 | D-12 | T-06-04 | dialog font 14px | GUI regression | `& "C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_image_dialogs.py tests/test_gui_curves_dialog.py -x` | ✅ / ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

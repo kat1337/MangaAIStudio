@@ -399,24 +399,29 @@ self.action_tool_move.triggered.connect(lambda: self.set_active_tool(ToolMode.MO
 | A7 | Histogram: luminance `0.299R+0.587G+0.114B` for the RGB master, per-channel plane for R/G/B (D-08 "luminance histogram" wording) | Patterns | Display-only detail; any reasonable luminance definition satisfies D-08 |
 | A8 | Adobe helpx curves page content (Photoshop's exact composition internals) | Sources | Could not be fetched (transport errors); all Photoshop conventions used are already locked by D-04…D-08 or grounded in GIMP/Photopea docs |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **D-10 wiring: Option 1 (window actions checkable + in the group) vs Option 2 (toolbar buttons bound to panel actions)?**
    - What we know: both satisfy the sync contract (CONTEXT D-10, 05-UI-REVIEW Top Fix 3). Option 1 matches the deferred-items prescription first sentence and gives Tools-menu checkmarks on the active tool (Photoshop-like); Option 2 keeps menus checkmark-free.
    - What's unclear: whether the menu checkmark side-effect is desired.
    - Recommendation: Option 1 — single action object per tool, matches the prescription, and the checkmark is defensible active-state feedback; the plan should note the side effect explicitly.
+   - **RESOLVED: Option 1.** Locked in 06-UI-SPEC "Resolved Assumptions" (D-10 row) and implemented in 06-03-PLAN.md (checkable window actions + exclusive QActionGroup; menu checkmark side effect accepted and noted).
 2. **D-12 typography scope: the three Phase-5 image-op dialogs only, or all four (incl. LoadTranslationsDialog)?**
    - What we know: the contract row is generic ("dialog field values, labels"); LoadTranslationsDialog is the inherited baseline the review calls out as doing the same thing.
    - What's unclear: user intent (delegated to discretion).
    - Recommendation: all four dialogs in one pass — cheapest, satisfies the contract row everywhere, and the Curves dialog ships at 14px from birth. The mono exception (paste_edit Consolas 10) stays.
+   - **RESOLVED: all four dialogs** (incl. LoadTranslationsDialog) + Curves ships at 14px from birth. Locked in 06-UI-SPEC (D-12 row) and implemented in 06-03-PLAN.md (+ 06-04-PLAN.md).
 3. **Levels→Curves op-name: add "curves" to `_undo_op_label` (main_window.py:2888) or replace "levels"?**
    - What we know: no serialization (D-05) — no legacy records exist; the set `("rotate","crop","levels","resize")` is in-memory only.
    - Recommendation: replace "levels" with "curves" AND migrate the two "Levels applied." flash assertions (test_gui_image_dialogs.py:196,242) to "Curves applied." — the Levels dialog no longer exists, so its op name is dead.
+   - **RESOLVED: replace-not-append** ("curves" replaces "levels" in `_undo_op_label`; flash assertions migrated). Locked in 06-UI-SPEC (copywriting row) and implemented in 06-05-PLAN.md.
 4. **`levels_dialog.py`: delete or keep?**
    - What we know: D-01 replaces it; nothing will import it after `_on_curves` swaps the lazy import.
    - Recommendation: delete after migration (dead code); `levels_lut`/`levels_page` stay. If the plan prefers a softer landing, keep it one plan and delete in the following plan — but the repo's gap-closure discipline favors removal.
+   - **RESOLVED: delete** after migration — `levels_dialog.py` is deleted in 06-05-PLAN.md once `_on_curves` takes over; `levels_lut`/`levels_page` stay. Locked in 06-UI-SPEC (surface 25 SUPERSEDED row) and the assumption-delta `promote` decision.
 5. **Histogram channel for the RGB master: luminance vs per-channel when editing the master?**
    - Recommendation: luminance (A7); the master is a composite tone map, so the luminance histogram is the D-08-literal reading.
+   - **RESOLVED: luminance** (`0.299R+0.587G+0.114B` for master; per-channel plane for R/G/B — assumption A7). Locked in 06-UI-SPEC (A7 row) and implemented in 06-04-PLAN.md.
 
 ## Environment Availability
 
