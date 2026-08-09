@@ -762,6 +762,14 @@ class EditorCanvas(QGraphicsView):
         if (w, h) != (self.sceneRect().width(), self.sceneRect().height()):
             self.setSceneRect(QRectF(0, 0, w, h))
         self._inpainted_qimage = qimg
+        # D-09 (deferred from 05-UAT/05-UI-REVIEW): the numpy display path is
+        # the ONLY image display path that missed the empty-state refresh, so
+        # the z=2000 "No page open" trio stayed rendered over a loaded page
+        # (project open via _display_page_state, image-op write-back, undo).
+        # The call is idempotent with an image present (RESEARCH Pitfall 1) —
+        # it also covers the preview path (set_image_from_numpy_preview routes
+        # through this shared implementation).
+        self._update_empty_state()
         # If currently showing the original preview, the new result replaces the
         # stored inpainted image but the display stays on original until toggled.
         return qimg
