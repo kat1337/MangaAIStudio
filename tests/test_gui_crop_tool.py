@@ -224,6 +224,76 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
+    """D-10 RED gate: toolbar tool buttons highlight the active tool on every
+    entry path (programmatic set_active_tool, V/B/R/L/E/G shortcut, Tools-menu
+    trigger), in sync with the ToolsPanel's active tool.
+
+    The six window tool actions must be checkable members of the ToolsPanel's
+    exclusive QActionGroup: the group's exclusivity unchecks the previous tool
+    and the dock + toolbar always agree (UI-SPEC surface 31 / E3). Fails on
+    the pre-fix code — a non-checkable action makes ``setChecked`` a no-op
+    (QToolButton mirrors its default action's checkable state).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+
+    def toolbar_btn(mode: ToolMode) -> QToolButton:
+        return next(
+            btn
+            for btn in window.toolbar.findChildren(QToolButton)
+            if btn.defaultAction() is not None
+            and btn.defaultAction().data() == mode
+        )
+
+    def checked_tools() -> list:
+        return [
+            btn.defaultAction().data()
+            for btn in window.toolbar.findChildren(QToolButton)
+            if btn.defaultAction() is not None
+            and btn.defaultAction().data() is not None
+            and btn.isChecked()
+        ]
+
+    # Test 4 (group membership): every window tool action lives in the
+    # ToolsPanel's exclusive group.
+    for action in (
+        window.action_tool_move,
+        window.action_tool_brush,
+        window.action_tool_rectangle,
+        window.action_tool_lasso,
+        window.action_tool_eraser,
+        window.action_tool_crop,
+    ):
+        assert action.actionGroup() is window.tools_panel.tool_group
+
+    # Test 1 (programmatic path): set_active_tool checks the matching toolbar
+    # button and unchecks the rest.
+    window.set_active_tool(ToolMode.BRUSH)
+    QApplication.processEvents()
+    assert toolbar_btn(ToolMode.BRUSH).isChecked()
+    assert checked_tools() == [ToolMode.BRUSH]
+    # Test 5 (sync): the dock's active tool matches the toolbar's checked tool.
+    assert window.tools_panel.active_tool() == ToolMode.BRUSH
+
+    # Test 2 (shortcut path): the V QShortcut drives the same sync.
+    shortcut = next(
+        sc for sc in window.findChildren(QShortcut) if sc.key().toString() == "V"
+    )
+    shortcut.activated.emit()
+    QApplication.processEvents()
+    assert toolbar_btn(ToolMode.MOVE).isChecked()
+    assert checked_tools() == [ToolMode.MOVE]
+    assert window.tools_panel.active_tool() == ToolMode.MOVE
+
+    # Test 3 (menu path): the Tools-menu Crop action triggers the same sync.
+    window.action_tool_crop.trigger()
+    QApplication.processEvents()
+    assert toolbar_btn(ToolMode.CROP).isChecked()
+    assert checked_tools() == [ToolMode.CROP]
+    assert window.tools_panel.active_tool() == ToolMode.CROP
+
+
+@pytest.mark.gui
 def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     """The Tools-menu Crop action exists with the same data and wires end-to-end.
 
