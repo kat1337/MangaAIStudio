@@ -4,15 +4,16 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 5
 status: completed
-stopped_at: Completed 05-10-PLAN.md
-last_updated: "2026-08-09T04:43:44.336Z"
+stopped_at: Phase 6 context gathered
+last_updated: "2026-08-09T19:08:05.427Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 5 complete
 progress:
-  total_phases: 5
+  total_phases: 7
   completed_phases: 5
   total_plans: 39
   completed_plans: 39
+  percent: 71
 current_phase_name: Project Persistence, Image Ops & Export
 ---
 
@@ -236,6 +237,11 @@ Recent decisions affecting current work:
 - [Phase 05-project-persistence-image-ops-export]: Zero-arg lambda wrapper (not functools.partial, not a _checked param) for action_open_project/action_save_project triggered wiring — PySide6 drops the emitted checked-bool for zero-arg callables; partial still injects it; a _checked param would contaminate the public dialog-driven path
 - [Phase 05-project-persistence-image-ops-export]: Pre-create the default .mas-project folder before QFileDialog.getExistingDirectory; best-effort rmdir cleanup only for self-created empty folders — The native dialog refuses a non-existent default and silently falls back to the album root (D-02 violation)
 
+### Roadmap Evolution
+
+- Phase 6 added: Refinement & Polish — deferred fixes (empty-state overlay, toolbar active-tool highlight, stale shortcut copy, dialog typography) + full curve editor (2026-08-09)
+- Phase 7 added: Typesetting (TRAN-02) — render translated text into the page (2026-08-09)
+
 ### Pending Todos
 
 [From .planning/todos/pending/ — ideas captured during sessions]
@@ -261,8 +267,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-09T04:09:15.543Z
-Stopped at: Completed 05-10-PLAN.md
-Resume file: None
+Last session: 2026-08-09T19:08:05.418Z
+Stopped at: Phase 6 context gathered
+Resume file: .planning/phases/06-refinement-polish-deferred-fixes-full-curve-editor/06-CONTEXT.md
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
