@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 05
 current_phase_name: Project Persistence, Image Ops & Export
 status: verifying
-stopped_at: Completed 05-08-PLAN.md
-last_updated: "2026-08-08T23:17:53.885Z"
+stopped_at: Completed 05-10-PLAN.md
+last_updated: "2026-08-09T04:09:23.444Z"
 last_activity: 2026-08-08
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 5
-  total_plans: 38
-  completed_plans: 38
+  total_plans: 39
+  completed_plans: 39
 ---
 
 # Project State
@@ -105,6 +105,7 @@ Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 | Phase 05 P05-06 | 42 | 3 tasks | 8 files |
 | Phase 05-project-persistence-image-ops-export P05-07 | 28min | 3 tasks | 8 files |
 | Phase 05-project-persistence-image-ops-export P05-08 | 55min | 2 tasks | 2 files |
+| Phase 05-project-persistence-image-ops-export P10 | 8min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -231,6 +232,8 @@ Recent decisions affecting current work:
 - [Phase ?]: CropDialog stores result_values (the 05-06 precedent — result shadows QDialog.result()); apply-time re-validation compares against the PAGE bounds, not the spinbox ranges.
 - [Phase ?]: Batch progress {done}/{total} is derived from the worker's (percent, name) emissions against a dispatched page count (_batch_ocr_total) — batch_export_ocr's D-10 signal shape carries percent, not a done count (05-08)
 - [Phase ?]: Per-page batch-failure logging stays in batch_export_ocr (stems + error strings only, T-05-05) — _on_batch_ocr_export_finished is UI-only; single-source logging (05-08)
+- [Phase 05-project-persistence-image-ops-export]: Zero-arg lambda wrapper (not functools.partial, not a _checked param) for action_open_project/action_save_project triggered wiring — PySide6 drops the emitted checked-bool for zero-arg callables; partial still injects it; a _checked param would contaminate the public dialog-driven path
+- [Phase 05-project-persistence-image-ops-export]: Pre-create the default .mas-project folder before QFileDialog.getExistingDirectory; best-effort rmdir cleanup only for self-created empty folders — The native dialog refuses a non-existent default and silently falls back to the album root (D-02 violation)
 
 ### Pending Todos
 
@@ -257,8 +260,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-08T23:17:53.847Z
-Stopped at: Completed 05-08-PLAN.md
+Last session: 2026-08-09T04:09:15.543Z
+Stopped at: Completed 05-10-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

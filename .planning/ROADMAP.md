@@ -234,7 +234,7 @@ Plans:
 
 **Gap-closure waves** (UAT fixes — run via `/gsd-execute-phase 5 --gaps-only`)
 
-- [ ] 05-10-PLAN.md — *(Wave 1)* Open Project… triggered-bool crash (G-05-1) + Save Project As… default .mas-project folder pre-creation (G-05-2) — PROJ-01
+- [x] 05-10-PLAN.md — *(Wave 1)* Open Project… triggered-bool crash (G-05-1) + Save Project As… default .mas-project folder pre-creation (G-05-2) — PROJ-01
 
 **UI hint**: yes
 
