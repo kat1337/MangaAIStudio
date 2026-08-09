@@ -1462,6 +1462,14 @@ class MainWindow(QMainWindow):
         The paths are natural-sorted before building ``ImageFile``s so the
         window's ordering matches the sidebar's displayed order — index lookups
         in :meth:`_current_page_index` rely on this consistency.
+
+        CR-02: a non-project session (Open Image / Open Folder / drag-drop)
+        resets the project identity (``_project_dir`` / ``_project_name``).
+        Without this, opening a folder after working in a project left the
+        stale dir/name behind and Ctrl+S silently overwrote the PREVIOUS
+        project's manifest and ``.mas`` files with the new session's pages.
+        Project loads (``_load_project_session`` / ``_load_single_page_mas``)
+        set their own identity and never route through this method.
         """
         ordered = natsorted(paths, key=lambda p: str(p))
         # D-06 (plan 05-05): a normal image/folder open loads each page from
@@ -1469,6 +1477,8 @@ class MainWindow(QMainWindow):
         # original_verified=True (consumed by plan 05-06's Show Original
         # gating; .mas-loaded pages set it per the checksum rule instead).
         self.image_files = [ImageFile(path=p, original_verified=True) for p in ordered]
+        self._project_dir = None
+        self._project_name = None
         self.file_table.set_pages([imf.path for imf in self.image_files])
         # Auto-select + load the first page (UI-SPEC: open folder shows page 1).
         if self.image_files:
