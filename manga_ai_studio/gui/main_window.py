@@ -1677,6 +1677,15 @@ class MainWindow(QMainWindow):
         # race (RESEARCH Open Question Q2 / T-02-05).
         self._last_page_index = self._current_page_index()
 
+        # WR-04: re-refresh the action states NOW. The tail's earlier
+        # _refresh_status_bar ran BEFORE _last_page_index flipped, so the
+        # D-06 Show Original gating (read from _last_page_index at
+        # _refresh_action_states) still reflected the OUTGOING page — e.g.
+        # navigating from a verified-original page to a portable .mas page
+        # left Show Original enabled. Refreshing after the flip makes the
+        # gating follow the incoming page.
+        self._refresh_action_states()
+
     def _open_single_image(self, path: Path) -> None:
         """Open one image as the sole page in the sidebar."""
         if not validate_image_path(path):
