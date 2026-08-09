@@ -468,3 +468,66 @@ def levels_page(
     ):
         raise ValueError("expected (H,W,3) uint8 RGB")
     return levels_lut(black, white, gamma)[image_rgb].copy()
+
+
+# ---------------------------------------------------------------------------
+# Curves (plan 06-01, PROJ-04 "curves" half) — D-04/D-06 curve LUT math
+# ---------------------------------------------------------------------------
+
+
+def curve_lut(points: list[tuple[int, int]]) -> np.ndarray:
+    """Build a 256-entry uint8 curve lookup table (D-04/D-06, PROJ-04 curves).
+
+    ``lut[v]`` maps input value ``v`` to the piecewise-linear interpolation
+    of the control points (Photoshop convention). Backstop (T-05-07
+    discipline, the same guarantee ``levels_lut`` documents): the points are
+    sorted by x, duplicate x kept LAST-WINS, x and y clipped to [0,255], and
+    the (0,0)/(255,255) endpoints default in when absent — a degenerate point
+    set can never produce NaN, an out-of-range index, or a silently-wrong
+    map; interior non-monotone shapes remain legal (D-04 allows them).
+    Returns a detached uint8 array.
+    """
+    clipped = [
+        (max(0, min(255, int(x))), max(0, min(255, int(y)))) for x, y in points
+    ]
+    last_wins: dict[int, int] = {}
+    for x, y in sorted(clipped, key=lambda p: p[0]):
+        last_wins[x] = y
+    xs = list(last_wins.keys())
+    ys = [last_wins[x] for x in xs]
+    if not xs or xs[0] != 0:
+        xs.insert(0, 0)
+        ys.insert(0, 0)
+    if xs[-1] != 255:
+        xs.append(255)
+        ys.append(255)
+    lut = np.interp(np.arange(256), xs, ys)
+    return np.clip(np.round(lut), 0, 255).astype(np.uint8)
+
+
+def curves_page(
+    image_rgb: np.ndarray,
+    master_points: list[tuple[int, int]],
+    channel_points: dict[str, list[tuple[int, int]]],
+) -> np.ndarray:
+    """Apply master + per-channel curves to the page pixels — geometry-free
+    by design (D-15): only the image is touched, mask and boxes are NOT
+    arguments. Composition (A1, PROJ-04): the master LUT applies to ALL
+    channels first, then each per-channel LUT applies to its plane AFTER the
+    master (``out_c = channel_lut_c[master_lut[v]]``). Validates (H,W,3)
+    uint8 (ValueError otherwise, the ``levels_page`` message); the trailing
+    ``.copy()`` detaches the result (Pitfall 2).
+    """
+    if (
+        image_rgb.ndim != 3
+        or image_rgb.shape[2] != 3
+        or image_rgb.dtype != np.uint8
+    ):
+        raise ValueError("expected (H,W,3) uint8 RGB")
+    master = curve_lut(master_points)
+    out = master[image_rgb]
+    for ch, idx in (("R", 0), ("G", 1), ("B", 2)):
+        pts = channel_points.get(ch)
+        if pts:
+            out[..., idx] = curve_lut(pts)[out[..., idx]]
+    return out.copy()
