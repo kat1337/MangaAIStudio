@@ -1146,6 +1146,16 @@ class MainWindow(QMainWindow):
             finally:
                 self._suppress_boxes_push = False
 
+        # CR-01 (D-05/D-15 contract): the write-back must land in the model.
+        # ``_snapshot_current_page`` above captured the PRE-op image; without
+        # this update, navigation and save embed the pre-op image for any
+        # page that is not the current page at the time (rotate page 2 ->
+        # switch to page 3 -> rotation lost / saved boxes misaligned).
+        # ``.copy()`` detaches from the op's buffer (Pitfall 2).
+        idx = self._current_page_index()
+        if idx is not None and 0 <= idx < len(self.image_files):
+            self.image_files[idx].current_image = new_image.copy()
+
         self._record_geometry_op_name(op_name)
         self.history.push_geometry_state(
             pre_image,
@@ -1548,25 +1558,24 @@ class MainWindow(QMainWindow):
         # the preceding ``select_path`` already flipped
         # ``file_table.current_path()`` to the incoming page, and the
         # placeholder path stored on the ImageFile equals it by construction.
-        # When the incoming page's original is unverified (missing/mismatched
-        # checksum) AND it carries an embedded image, that embedded image IS
-        # the page (D-06: a missing original is a NORMAL state for portable
-        # projects) — display it via set_image_from_numpy and SKIP the
-        # "Couldn't open file" warning (the resume-work contract; the
-        # placeholder path NEVER reaches set_image_from_path). Sessions
-        # without an embedded image fall through to the existing path-based
-        # load unchanged.
+        # CR-01: ``current_image`` is the AUTHORITATIVE in-memory state — the
+        # D-05 "resume exactly where you left off" contract. It is populated
+        # for every page at project load (D-08 embedded image), after every
+        # image op / undo (plan 05-06 apply path), and by the save-side flush
+        # (``_snapshot_current_page``). When present it is displayed directly
+        # (a disk re-load is the fallback for pages never touched in memory —
+        # a page whose canvas image was never captured). The D-06 rule is
+        # subsumed: an unverified-original page with an embedded image has
+        # ``current_image`` set, so the "Couldn't open file" warning is
+        # correctly skipped for it (the placeholder path NEVER reaches
+        # ``set_image_from_path``).
         incoming_idx = self._current_page_index()
         imf = (
             self.image_files[incoming_idx]
             if incoming_idx is not None and 0 <= incoming_idx < len(self.image_files)
             else None
         )
-        if (
-            imf is not None
-            and (not imf.original_verified or not imf.path.is_file())
-            and imf.current_image is not None
-        ):
+        if imf is not None and imf.current_image is not None:
             # Pitfall 2: the .copy() detaches the embedded numpy before the
             # QImage build (canvas.py:658-663); decode-time .convert("RGB")
             # already guarantees the (H,W,3) uint8 contract.
@@ -1832,26 +1841,25 @@ class MainWindow(QMainWindow):
     def _page_image_source(self, idx: int) -> np.ndarray | None:
         """Resolve the per-page image to embed at save time (RESEARCH A3).
 
-        The canvas holds only the live page, so the CURRENT page (index ==
-        ``_last_page_index``) uses the just-flushed ``current_image``; each
-        NON-current page uses ``cleaned/<stem>`` in its source dir when that
+        CR-01: ``ImageFile.current_image`` is the AUTHORITATIVE state — it is
+        refreshed by every image op / undo and by the save-side flush
+        (``_snapshot_current_page``), so a non-current page that was edited
+        embeds its POST-op image (the D-05 "resume exactly where you left
+        off" contract). Pages never touched in memory (``current_image`` is
+        None) fall back to ``cleaned/<stem>`` in their source dir when that
         file exists (the Phase 2 convention), else the source file at
-        ``ImageFile.path``, else the embedded ``current_image`` (the D-08
-        portable-project fallback — a re-save of a project whose originals
-        are missing must not fail). Reads are ``.copy()``-detached
-        (Pitfall 2). Returns None when no source exists at all (the page is
-        skipped by the caller with a warning).
+        ``ImageFile.path``, else None (the page is skipped by the caller with
+        a warning). Reads are ``.copy()``-detached (Pitfall 2). Returns None
+        when no source exists at all.
         """
         imf = self.image_files[idx]
-        if idx == self._last_page_index and imf.current_image is not None:
+        if imf.current_image is not None:
             return imf.current_image
         cleaned = imf.path.parent / "cleaned" / imf.path.name
         if cleaned.is_file():
             return np.asarray(Image.open(cleaned).convert("RGB")).copy()
         if imf.path.is_file():
             return np.asarray(Image.open(imf.path).convert("RGB")).copy()
-        if imf.current_image is not None:
-            return imf.current_image
         return None
 
     def _save_project(self, force_as: bool = False) -> None:
@@ -2813,6 +2821,15 @@ class MainWindow(QMainWindow):
                 # (canvas.py:522-565 handles full-frame).
                 x, y, patch = value
                 self.canvas.apply_undo_image(x, y, patch)
+                # CR-01 companion: undo changes the displayed image, so keep
+                # ImageFile.current_image authoritative (the same write-back
+                # rule as the op apply path) — otherwise navigation/save
+                # after Ctrl+Z resurrects the undone state.
+                idx = self._current_page_index()
+                if idx is not None and 0 <= idx < len(self.image_files):
+                    current_img = self.canvas.get_image_numpy()
+                    if current_img is not None:
+                        self.image_files[idx].current_image = current_img
             elif kind == "mask":
                 # value is a QImage snapshot (or None if the stack was empty).
                 self.canvas.apply_undo_mask(value)
@@ -3587,6 +3604,18 @@ class MainWindow(QMainWindow):
                 original_patch_numpy = pre_inpaint[y1 : y1 + bh, x1 : x1 + bw].copy()
 
         self.canvas.set_image_from_numpy(result_rgb, bbox=bbox)
+
+        # CR-01 (D-05/D-15 contract): persist the composite into the model so
+        # navigation and project save embed the post-inpaint image. Reading
+        # the canvas back is REQUIRED: ``set_image_from_numpy(bbox=...)``
+        # composites only the masked region, so ``result_rgb`` alone is not
+        # the full displayed state. ``get_image_numpy`` returns a detached
+        # copy (Pitfall 2).
+        idx = self._current_page_index()
+        if idx is not None and 0 <= idx < len(self.image_files):
+            composite = self.canvas.get_image_numpy()
+            if composite is not None:
+                self.image_files[idx].current_image = composite
 
         # D-07 (plan 05-05): the inpaint result is a page mutation — mark
         # the session dirty + refresh the title (the * suffix).
