@@ -791,3 +791,59 @@ def test_save_project_trigger_saves_in_place(qtbot, tmp_path, monkeypatch) -> No
     assert window._project_dir == project_dir
     assert (project_dir / "manifest.json").is_file()
     assert not window._session_dirty()  # the in-place save wrote + cleared
+
+
+@pytest.mark.gui
+def test_save_as_default_dir_precreated(qtbot, tmp_path, monkeypatch) -> None:
+    """G-05-2 regression: ``_choose_project_dir`` pre-creates the default
+    ``<chapter>.mas-project`` folder BEFORE the dialog — the captured dir
+    argument (positional index 2 of the QFileDialog.getExistingDirectory
+    call) must be an EXISTING directory. The native dialog refuses a
+    non-existent default and silently falls back to the source parent,
+    which is exactly how saves leaked into the album root (D-02
+    violation)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    default = tmp_path / "chapter.mas-project"
+    calls = _stub_dir_dialog(monkeypatch, default)
+
+    picked = window._choose_project_dir()
+
+    assert picked == default
+    assert len(calls) == 1
+    assert Path(calls[0][0][2]).is_dir()  # the dialog default EXISTS
+    assert calls[0][0][2] == str(default)
+
+
+@pytest.mark.gui
+def test_save_as_cancel_cleanup(qtbot, tmp_path, monkeypatch) -> None:
+    """G-05-2: cancelling the dialog removes the self-created empty default
+    folder — a cancelled Save As leaves NO stray ``.mas-project`` folder
+    behind."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    default = tmp_path / "chapter.mas-project"
+    _stub_dir_dialog(monkeypatch, None)  # cancel
+
+    picked = window._choose_project_dir()
+
+    assert picked is None
+    assert not default.exists()  # the pre-created stray folder was removed
+
+
+@pytest.mark.gui
+def test_save_as_different_pick_cleanup(qtbot, tmp_path, monkeypatch) -> None:
+    """G-05-2: picking a DIFFERENT folder removes the stray self-created
+    default and returns the user's pick (the default pick itself keeps the
+    folder — the save populates it)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    default = tmp_path / "chapter.mas-project"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(exist_ok=True)
+    _stub_dir_dialog(monkeypatch, elsewhere)
+
+    picked = window._choose_project_dir()
+
+    assert picked == elsewhere
+    assert not default.exists()  # the stray pre-created default was removed
