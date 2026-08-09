@@ -2117,7 +2117,12 @@ class MainWindow(QMainWindow):
             imf.current_image = np.asarray(
                 Image.open(BytesIO(parsed["image_png"])).convert("RGB")
             ).copy()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            # CR-03: a huge embedded PNG can also raise PIL's
+            # DecompressionBombError (not an OSError/ValueError) — it must
+            # surface as ProjectFormatError too, so _open_project's
+            # (ProjectFormatError, OSError) handler shows the corrupt-project
+            # dialog instead of an unhandled Qt-event exception (T-05-01).
             raise project_io.ProjectFormatError(
                 f"corrupt embedded image: {exc}"
             ) from exc

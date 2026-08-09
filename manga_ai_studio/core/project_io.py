@@ -444,8 +444,24 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
             raise ProjectFormatError(
                 "meta.json declares a mask but the mask.bin entry is missing"
             ) from exc
+        # CR-03: ``validate_meta`` cross-checks the declared dims against each
+        # other and MAX_IMAGE_DIMENSION, but never against the blob LENGTH. A
+        # crafted/corrupt container whose mask.bin length does not match its
+        # declared dims would otherwise raise a raw numpy ValueError here
+        # ("cannot reshape array of size N into shape (h,w)") that escapes the
+        # ProjectFormatError boundary and crashes the app (T-05-01..T-05-04
+        # contract: every malformed-input failure surfaces as
+        # ProjectFormatError). The dims are guaranteed ints in range by
+        # validate_meta's _coerce_int, so ``int()`` here is safe.
+        mask_h = int(mask_meta["h"])
+        mask_w = int(mask_meta["w"])
+        if len(mask_bytes) != mask_h * mask_w:
+            raise ProjectFormatError(
+                f"mask.bin length {len(mask_bytes)} does not match declared "
+                f"dims {mask_h}x{mask_w}"
+            )
         mask = np.frombuffer(mask_bytes, dtype=np.uint8).reshape(
-            int(mask_meta["h"]), int(mask_meta["w"])
+            mask_h, mask_w
         ).copy()
 
     original = None
