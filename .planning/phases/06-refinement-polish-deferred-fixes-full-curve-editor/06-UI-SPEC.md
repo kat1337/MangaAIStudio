@@ -1,10 +1,11 @@
 ---
 phase: 6
 slug: refinement-polish-deferred-fixes-full-curve-editor
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-09
+reviewed_at: 2026-08-09
 ---
 
 # Phase 6 — UI Design Contract (Refinement & Polish: deferred fixes + full curve editor)
@@ -160,7 +161,7 @@ Phase 1–5 copy is inherited. The table lists Phase 6 additions/changes. All di
 > `🧪 backstop` = held-out visual test (lifts as `{ statement, verification:
 > backstop }`); `⚠ unresolved` = explicit planner assumption.
 
-Applicable state considerations resolved: **13 covered, 2 backstop, 0 unresolved, 14 dismissed**
+Applicable state considerations resolved: **8 covered, 2 backstop, 0 unresolved, 4 dismissed**
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
