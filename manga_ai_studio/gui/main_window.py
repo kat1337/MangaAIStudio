@@ -1948,6 +1948,25 @@ class MainWindow(QMainWindow):
                 )
             )
 
+        # WR-03: duplicate stems (a folder with both ``page.png`` and
+        # ``page.jpg``) would silently write both pages to the same
+        # ``<stem>.mas`` — the second overwrites the first and the manifest
+        # lists two pages pointing at one file. Surface a save error listing
+        # the colliding stems BEFORE writing anything (the dirty flags stay
+        # untouched).
+        stems = [stem for stem, _ in page_files]
+        if len(stems) != len(set(stems)):
+            duplicates = sorted({s for s in stems if stems.count(s) > 1})
+            logger.error(f"Save Project failed: duplicate page stems {duplicates}")
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{name}'.",
+                "Two or more pages share the same file name"
+                f" ({', '.join(duplicates)}). Rename the source files so each"
+                " page has a unique name, then save again.",
+            )
+            return False
+
         # WR-02: every page's image source unresolvable (e.g. originals
         # deleted before a folder session's first save) would write a 0-page
         # manifest and then clear the dirty flags — the user believes the
