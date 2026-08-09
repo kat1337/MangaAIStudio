@@ -23,6 +23,7 @@ pushes ONE geometry undo entry, re-baselines Show Original (D-14) and marks
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -94,6 +95,12 @@ class ResizeDialog(QDialog):
         current_h: int = 1,
     ) -> None:
         super().__init__(parent)
+        # 14px Body base font (UI-SPEC typography, D-12): dialog field
+        # values and labels render at 14px; children inherit it (none of the
+        # resize widgets set their own font).
+        f = QFont()
+        f.setPixelSize(14)
+        self.setFont(f)
         self.setWindowTitle("Resize")
         self.setObjectName("resize_dialog")
         self.setModal(True)

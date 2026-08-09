@@ -96,6 +96,13 @@ class LoadTranslationsDialog(QDialog):
         current_page_index: int = 0,
     ) -> None:
         super().__init__(parent)
+        # 14px Body base font (UI-SPEC typography, D-12): dialog field values
+        # and labels render at 14px. Children inherit it EXCEPT the paste
+        # area, which keeps its explicit Consolas 10 mono font (the format is
+        # line-oriented — the mono exception stays).
+        f = QFont()
+        f.setPixelSize(14)
+        self.setFont(f)
         self.setWindowTitle("Load Translations")
         self.setObjectName("load_translations_dialog")
         self.setModal(True)

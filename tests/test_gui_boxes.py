@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QTransform  # noqa: E402
+from PySide6.QtGui import QColor, QFontInfo, QImage, QKeyEvent, QMouseEvent, QTransform  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QDialog,
@@ -3270,6 +3270,19 @@ def test_on_canvas_ocr_requested_skipped_when_op_running(qtbot, tmp_path, monkey
 # ===========================================================================
 # Plan 04-07 Task 1 — Load Translations dialog + apply (RED gate)
 # ===========================================================================
+
+
+@pytest.mark.gui
+def test_load_translations_dialog_font_14px(qtbot) -> None:
+    """D-12 typography: LoadTranslationsDialog's base font renders at 14px
+    Body — dialog field values and labels (UI-SPEC typography table row).
+    The paste area's mono exception (Consolas 10) is preserved, not asserted
+    away."""
+    from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+
+    dlg = LoadTranslationsDialog(page_names=["a.png"])
+    qtbot.addWidget(dlg)
+    assert QFontInfo(dlg.font()).pixelSize() == 14
 
 
 @pytest.mark.gui

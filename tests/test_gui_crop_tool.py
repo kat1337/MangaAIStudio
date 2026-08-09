@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QKeyEvent, QShortcut
+from PySide6.QtGui import QColor, QFontInfo, QKeyEvent, QShortcut
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QGraphicsRectItem, QToolButton
 
@@ -572,6 +572,15 @@ def test_crop_apply_drop_clip_count(qtbot, tmp_path) -> None:
         (150, 120, 180, 150),
         (80, 60, 140, 120),
     ]
+
+
+@pytest.mark.gui
+def test_crop_dialog_font_14px(qtbot) -> None:
+    """D-12 typography: CropDialog's base font renders at 14px Body — dialog
+    field values and labels (UI-SPEC typography table row)."""
+    dlg = CropDialog(page_w=200, page_h=160)
+    qtbot.addWidget(dlg)
+    assert QFontInfo(dlg.font()).pixelSize() == 14
 
 
 @pytest.mark.gui

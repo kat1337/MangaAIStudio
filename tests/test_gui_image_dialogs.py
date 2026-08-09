@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image as PILImage
+from PySide6.QtGui import QFontInfo
 from PySide6.QtWidgets import QApplication, QDialog
 
 from manga_ai_studio.config.profile_manager import ProfileManager
@@ -291,6 +292,15 @@ def test_levels_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None
 # ===========================================================================
 # Task 3 — Resize dialog contract + end-to-end apply
 # ===========================================================================
+
+@pytest.mark.gui
+def test_resize_dialog_font_14px(qtbot) -> None:
+    """D-12 typography: ResizeDialog's base font renders at 14px Body —
+    dialog field values and labels (UI-SPEC typography table row)."""
+    dlg = ResizeDialog(current_w=60, current_h=40)
+    qtbot.addWidget(dlg)
+    assert QFontInfo(dlg.font()).pixelSize() == 14
+
 
 @pytest.mark.gui
 def test_resize_dialog_contract(qtbot) -> None:

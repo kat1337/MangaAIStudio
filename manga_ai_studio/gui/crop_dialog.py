@@ -20,6 +20,7 @@ ranges make invalid user input impossible).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
@@ -70,6 +71,12 @@ class CropDialog(QDialog):
         page_h: int = 1,
     ) -> None:
         super().__init__(parent)
+        # 14px Body base font (UI-SPEC typography, D-12): dialog field
+        # values and labels render at 14px; children inherit it (none of the
+        # crop widgets set their own font).
+        f = QFont()
+        f.setPixelSize(14)
+        self.setFont(f)
         self.setWindowTitle("Crop")
         self.setObjectName("crop_dialog")
         self.setModal(True)
