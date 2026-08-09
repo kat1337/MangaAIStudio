@@ -455,3 +455,82 @@ def test_resize_rejects_bad_input() -> None:
         image_ops.levels_lut(64, 192, -1.0)  # negative gamma
     with pytest.raises(ValueError):
         image_ops.resize_boxes([], 0, 8, 5, 4)  # w < 1 -> ZeroDiv guard
+
+
+# ---------------------------------------------------------------------------
+# Curves (plan 06-01 Task 1, PROJ-04 "curves" half) — curve_lut + curves_page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_curve_lut_linear_is_identity() -> None:
+    """The Linear curve (no interior points) is byte-identical to
+    ``np.arange(256, dtype=np.uint8)`` — the identity map (D-04/D-05; the
+    plan's Linear-preset truth, must_haves #1)."""
+    for points in ([], [(0, 0), (255, 255)]):
+        lut = image_ops.curve_lut(points)
+        assert lut.dtype == np.uint8
+        assert lut.shape == (256,)
+        assert np.array_equal(lut, np.arange(256, dtype=np.uint8))
+
+
+@pytest.mark.unit
+def test_curve_lut_s_curve_monotone() -> None:
+    """The S-curve preset points produce a monotone non-decreasing LUT with
+    fixed endpoints (D-05; A2 preset coordinates)."""
+    lut = image_ops.curve_lut([(0, 0), (64, 40), (192, 215), (255, 255)])
+    assert lut.dtype == np.uint8 and lut.shape == (256,)
+    assert lut[0] == 0
+    assert lut[255] == 255
+    # Monotone non-decreasing (never an inverted map, T-05-07 discipline).
+    assert bool(np.all(np.diff(lut.astype(np.int16)) >= 0))
+    # The (64,40) control point sits on the curve: interpolation tolerance.
+    assert lut[64] >= 40
+
+
+@pytest.mark.unit
+def test_curve_lut_degenerate_backstop() -> None:
+    """A degenerate point set (duplicate x, out-of-range y) never produces
+    NaN, out-of-range values, or a non-uint8 map — the T-05-07 backstop
+    (sort, dedupe last-wins, clip, np.interp, round, astype)."""
+    lut = image_ops.curve_lut([(255, 300), (255, -5), (0, 0)])
+    assert lut.dtype == np.uint8
+    assert lut.shape == (256,)
+    assert bool(np.isfinite(lut.astype(float)).all())
+    assert bool((lut >= 0).all()) and bool((lut <= 255).all())
+
+
+@pytest.mark.unit
+def test_curves_page_master_apply_byte_exact() -> None:
+    """``curves_page`` with a Linear master is the identity; a darkening
+    master maps every pixel per ``lut[image]`` byte-exact (the fancy-index
+    apply pattern, levels_page style)."""
+    rng = np.random.default_rng(42)
+    img = rng.integers(0, 256, size=(10, 10, 3), dtype=np.uint8)
+
+    # Linear master with no channel curves: byte-identical output.
+    out = image_ops.curves_page(img, [(0, 0), (255, 255)], {})
+    assert np.array_equal(out, img)
+
+    # Darkening master: per-pixel fancy-index apply.
+    master = image_ops.curve_lut([(0, 0), (128, 100), (255, 255)])
+    out = image_ops.curves_page(img, [(0, 0), (128, 100), (255, 255)], {})
+    assert np.array_equal(out, master[img])
+    assert not np.array_equal(out, img)  # the darkening actually applied
+
+
+@pytest.mark.unit
+def test_curves_page_validation_and_detach() -> None:
+    """``curves_page`` validates (H,W,3) uint8 (ValueError for 2-D and float
+    inputs with the levels_page message) and returns a detached .copy()."""
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match=r"expected \(H,W,3\) uint8 RGB"):
+        image_ops.curves_page(np.zeros((10, 10), np.uint8), [(0, 0), (255, 255)], {})
+    with pytest.raises(ValueError, match=r"expected \(H,W,3\) uint8 RGB"):
+        image_ops.curves_page(
+            np.zeros((10, 10, 3), np.float32), [(0, 0), (255, 255)], {}
+        )
+
+    out = image_ops.curves_page(img, [(0, 0), (255, 255)], {})
+    assert out.flags["OWNDATA"]
+    assert not np.shares_memory(out, img)
