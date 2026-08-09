@@ -312,7 +312,19 @@ class MainWindow(QMainWindow):
         self.action_open_project.setToolTip(
             "Open a saved project (manifest.json or a page .mas file)."
         )
-        self.action_open_project.triggered.connect(self._open_project)
+        # Wiring audit (G-05-1, plan 05-10): QAction.triggered ALWAYS emits
+        # the checked bool as its first argument, so a parameterized slot
+        # would misread it (the pre-fix connect crashed _open_project with
+        # AttributeError at selected.name). The zero-arg lambda lets PySide6
+        # drop the bool — the established in-file pattern (tool actions
+        # 696-735, rotate actions 758-774). Audit of EVERY remaining
+        # triggered.connect target: all are zero-arg methods, zero-arg
+        # lambdas, or signal-to-signal (toggleViewAction().trigger at
+        # 543/546); canvas.zoom_in/zoom_out accept wheel: bool = False and
+        # are benign because triggered emits False == the default. Do NOT
+        # add a _checked param to _open_project — the D-09 recent-opener
+        # closures (2414) already absorb it.
+        self.action_open_project.triggered.connect(lambda: self._open_project())
         self.action_open_project.setEnabled(False)
 
         # Recent Projects submenu (D-07, max 8 via QSettings). Mirrors the
@@ -336,7 +348,11 @@ class MainWindow(QMainWindow):
             "Save the full page state (images, masks, boxes, text,"
             " translations) as a project (Ctrl+S)."
         )
-        self.action_save_project.triggered.connect(self._save_project)
+        # Zero-arg lambda (G-05-1, plan 05-10): the triggered checked-bool
+        # would otherwise land in _save_project's force_as param. Benign
+        # today (emitted False == the default) but identical to the crash
+        # class fixed at line 315 — closed the same way.
+        self.action_save_project.triggered.connect(lambda: self._save_project())
         self.action_save_project.setEnabled(False)
 
         # Save Project As (D-07): choose the project folder first. Ctrl+Shift+S.
