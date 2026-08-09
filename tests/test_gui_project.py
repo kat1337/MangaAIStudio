@@ -809,9 +809,10 @@ def test_save_as_default_dir_precreated(qtbot, tmp_path, monkeypatch) -> None:
     default = chapter / "chapter.mas-project"
     calls = _stub_dir_dialog(monkeypatch, default)
 
-    picked = window._choose_project_dir()
+    picked, created = window._choose_project_dir()
 
     assert picked == default
+    assert created is True  # WR-01: the created flag reaches the caller
     assert len(calls) == 1
     assert Path(calls[0][0][2]).is_dir()  # the dialog default EXISTS
     assert calls[0][0][2] == str(default)
@@ -827,9 +828,10 @@ def test_save_as_cancel_cleanup(qtbot, tmp_path, monkeypatch) -> None:
     default = chapter / "chapter.mas-project"
     _stub_dir_dialog(monkeypatch, None)  # cancel
 
-    picked = window._choose_project_dir()
+    picked, created = window._choose_project_dir()
 
     assert picked is None
+    assert created is True  # the dialog was offered the pre-created default
     assert not default.exists()  # the pre-created stray folder was removed
 
 
@@ -845,7 +847,38 @@ def test_save_as_different_pick_cleanup(qtbot, tmp_path, monkeypatch) -> None:
     elsewhere.mkdir(exist_ok=True)
     _stub_dir_dialog(monkeypatch, elsewhere)
 
-    picked = window._choose_project_dir()
+    picked, created = window._choose_project_dir()
 
     assert picked == elsewhere
+    assert created is True  # the stray default was self-created -> removed
     assert not default.exists()  # the stray pre-created default was removed
+
+
+@pytest.mark.gui
+def test_save_as_abort_removes_stray_default(qtbot, tmp_path, monkeypatch) -> None:
+    """WR-01 regression: when the dialog accepts the pre-created default
+    folder and the save then aborts BEFORE writing (duplicate page stems),
+    the empty self-created ``.mas-project`` folder must be removed — a
+    failed Save As leaves no stray empty folder behind (plan 05-10
+    must-have)."""
+    chapter = tmp_path / "chapter"
+    chapter.mkdir(exist_ok=True)
+    # Two pages sharing the stem ``page`` (page.png + page.jpg) -> the
+    # duplicate-stem abort fires after the dialog, before any write.
+    PILImage.new("RGB", (60, 60), color=(30, 60, 90)).save(chapter / "page.png")
+    PILImage.new("RGB", (60, 60), color=(30, 60, 90)).save(chapter / "page.jpg")
+    window = _make_window(qtbot, tmp_path)
+    window._load_folder(chapter)
+    QApplication.processEvents()
+    assert [imf.path.stem for imf in window.image_files] == ["page", "page"]
+
+    default = chapter / "chapter.mas-project"
+    _stub_dir_dialog(monkeypatch, default)  # pick the pre-created default
+    criticals = _capture_critical(monkeypatch)
+
+    saved = window._save_project(force_as=True)
+    QApplication.processEvents()
+
+    assert saved is False  # the save aborted on the duplicate stems
+    assert criticals  # the save-failure dialog was shown
+    assert not default.exists()  # WR-01: the stray empty folder was removed

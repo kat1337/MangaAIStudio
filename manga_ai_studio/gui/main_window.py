@@ -1862,7 +1862,7 @@ class MainWindow(QMainWindow):
         if image_np is not None:
             self.image_files[idx].current_image = image_np
 
-    def _choose_project_dir(self) -> Path | None:
+    def _choose_project_dir(self) -> tuple[Path | None, bool]:
         """The Save Project As… folder dialog (D-02).
 
         Defaults to ``<source-parent>/<chapter-name>.mas-project`` (the
@@ -1876,8 +1876,13 @@ class MainWindow(QMainWindow):
         the "only if created by us and left empty" guard); a pick equal to
         the default keeps it (the save populates it). On mkdir failure the
         dialog falls back to the source parent (the pre-fix behavior) and
-        Save As stays functional on read-only parents. Returns None on
-        cancel.
+        Save As stays functional on read-only parents.
+
+        WR-01: returns ``(picked, created)`` — ``created`` reports whether
+        THIS call pre-created the default folder, so ``_save_project`` can
+        clean it up when the save aborts AFTER the dialog accepted the
+        default (duplicate-stem / no-resolvable-source abort, save OSError)
+        before anything was written. Returns ``(None, created)`` on cancel.
         """
         first = self.image_files[0]
         if len(self.image_files) == 1:
@@ -1902,11 +1907,11 @@ class MainWindow(QMainWindow):
         if not directory:
             if created:
                 self._discard_stray_project_dir(default)
-            return None
+            return None, created
         picked = Path(directory)
         if picked != default and created:
             self._discard_stray_project_dir(default)
-        return picked
+        return picked, created
 
     def _discard_stray_project_dir(self, folder: Path) -> None:
         """Best-effort cleanup of a self-created, unused project folder.
@@ -1960,7 +1965,10 @@ class MainWindow(QMainWindow):
         an OSError surfaces the save-failure copy (T-05-12) and the in-memory
         session is untouched. On success: dirty cleared, project dir/name
         recorded, Recent Projects updated, title refreshed (no ``*``), and
-        the "Saved project …" transient shows.
+        the "Saved project …" transient shows. WR-01: when the dialog
+        accepted a folder this save pre-created, an abort before/at the
+        write (duplicate stems, no resolvable page source, save OSError)
+        removes the empty stray folder best-effort.
 
         :return: True when the project was written (or there was nothing to
             save); False when the save was aborted (cancelled folder dialog)
@@ -1975,9 +1983,10 @@ class MainWindow(QMainWindow):
             return True
         self._snapshot_current_page()
 
+        created_default = False
         project_dir = self._project_dir
         if project_dir is None or force_as:
-            project_dir = self._choose_project_dir()
+            project_dir, created_default = self._choose_project_dir()
             if project_dir is None:
                 return False  # dialog cancelled — nothing written, session untouched
 
@@ -2041,6 +2050,8 @@ class MainWindow(QMainWindow):
                 f" ({', '.join(duplicates)}). Rename the source files so each"
                 " page has a unique name, then save again.",
             )
+            if created_default:
+                self._discard_stray_project_dir(project_dir)
             return False
 
         # WR-02: every page's image source unresolvable (e.g. originals
@@ -2059,6 +2070,8 @@ class MainWindow(QMainWindow):
                 "No page could be read for saving. Check that the source"
                 " images still exist and see the log for details.",
             )
+            if created_default:
+                self._discard_stray_project_dir(project_dir)
             return False
 
         try:
@@ -2072,6 +2085,8 @@ class MainWindow(QMainWindow):
                 f"Couldn't save '{name}'.",
                 "Check that the folder is writable and see the log for details.",
             )
+            if created_default:
+                self._discard_stray_project_dir(project_dir)
             return False
 
         self._project_dir = project_dir
