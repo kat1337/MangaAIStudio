@@ -723,3 +723,71 @@ def test_show_original_gating(qtbot, tmp_path, monkeypatch) -> None:
     assert np.array_equal(window3.canvas._original_image_numpy, now)
     window3.canvas.show_original(True)
     assert np.array_equal(window3.canvas.get_image_numpy(), now)
+
+
+# ===========================================================================
+# Plan 05-10 — G-05-1/G-05-2 gap closure (UAT test 1 CR-01 repro)
+# ===========================================================================
+# G-05-1: QAction.triggered emits the checked bool as its first argument;
+# the pre-fix wiring landed it in _open_project's manifest_path slot and
+# crashed at selected.name with AttributeError. These tests drive the REAL
+# signal path (action.trigger()) so the pre-fix crash propagates out of the
+# call and fails the test.
+# G-05-2: the Save As folder dialog must open at an EXISTING default
+# <chapter>.mas-project folder (the native dialog refuses a non-existent
+# default and silently falls back to the album root), and a cancelled or
+# redirected Save As must leave no stray self-created folder behind.
+
+@pytest.mark.gui
+def test_open_project_trigger_loads_session(qtbot, tmp_path, monkeypatch) -> None:
+    """G-05-1 regression: ``action_open_project.trigger()`` (the real
+    QAction.triggered signal path — menu click / Ctrl+O) loads the stubbed
+    manifest session with NO exception. The pre-fix wiring injected the
+    checked bool into the manifest_path slot, so ``selected`` was ``False``
+    and ``selected.name`` raised AttributeError: 'bool' object has no
+    attribute 'name' (main_window.py:2065)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # A FRESH window on the open side; the dialog returns the manifest path.
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2.action_open_project.trigger()
+    QApplication.processEvents()
+
+    # Session state matches the dialog-path open (D-08/D-09).
+    assert [imf.path.name for imf in window2.image_files] == [
+        "page_01.png",
+        "page_02.png",
+    ]
+    assert window2._project_dir == project_dir
+    assert window2._project_name == "chapter"
+
+
+@pytest.mark.gui
+def test_save_project_trigger_saves_in_place(qtbot, tmp_path, monkeypatch) -> None:
+    """G-05-1 wiring-contract guard: ``action_save_project.trigger()`` with
+    an existing project dir saves IN PLACE — the folder dialog is never
+    shown (captured calls == []) and the write lands in the recorded dir.
+    Guards against a future change silently flipping the save into Save-As
+    mode (the triggered bool would otherwise land in ``force_as``)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    assert window._project_dir == project_dir
+
+    # Dirty again; capture (and stub) the folder dialog — it must NOT open.
+    _dirty(window)
+    calls = _stub_dir_dialog(monkeypatch, project_dir)
+    window.action_save_project.trigger()
+    QApplication.processEvents()
+
+    assert calls == []  # no Save-As dialog for an in-place save
+    assert window._project_dir == project_dir
+    assert (project_dir / "manifest.json").is_file()
+    assert not window._session_dirty()  # the in-place save wrote + cleared
