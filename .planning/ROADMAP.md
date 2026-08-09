@@ -201,7 +201,7 @@ Plans:
   2. User can export OCR/box data as a mokuro-style `_ocr.json` file per page for use in downstream tools
   3. User can apply basic image operations to a page: crop, rotate, levels/curves adjustment, resize
 
-**Plans**: 9/9 plans executed
+**Plans**: 10 plans (9 executed + 1 gap closure)
 
 Plans:
 
@@ -231,6 +231,10 @@ Plans:
 **Wave 6** *(blocked on 05-03 + 05-07)*
 
 - [x] 05-08-PLAN.md — Export OCR JSON… single + Batch Export OCR JSON (Worker + progress + Cancel) (PROJ-03)
+
+**Gap-closure waves** (UAT fixes — run via `/gsd-execute-phase 5 --gaps-only`)
+
+- [ ] 05-10-PLAN.md — *(Wave 1)* Open Project… triggered-bool crash (G-05-1) + Save Project As… default .mas-project folder pre-creation (G-05-2) — PROJ-01
 
 **UI hint**: yes
 
