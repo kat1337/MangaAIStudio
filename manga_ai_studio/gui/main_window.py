@@ -1271,6 +1271,14 @@ class MainWindow(QMainWindow):
             return
         new_w, new_h = dialog.result_values
 
+        # WR-05: an identity resize (unchanged dims — 100% in percent mode,
+        # or typing the current dims) is a no-op: applying it would push an
+        # IMAGE-stack undo entry, re-baseline Show Original, and flip
+        # ImageFile.geometry_altered — which moves the D-22 _ocr.json export
+        # to cleaned/ for a page with no actual geometry change.
+        if (new_w, new_h) == (w_img, h_img):
+            return
+
         def _transform():
             mask = self.canvas.get_mask()
             if mask is not None:
