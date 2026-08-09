@@ -534,3 +534,75 @@ def test_curves_page_validation_and_detach() -> None:
     out = image_ops.curves_page(img, [(0, 0), (255, 255)], {})
     assert out.flags["OWNDATA"]
     assert not np.shares_memory(out, img)
+
+
+# ---------------------------------------------------------------------------
+# Curves composition probes (plan 06-01 Task 2) — A1 order, independence,
+# idempotency, duplicate-x last-wins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_curves_page_channel_after_master_order() -> None:
+    """A1 order pin: a per-channel curve applies AFTER the master LUT —
+    ``out_c == channel_lut_c[master_lut[v]]`` byte-exact, not before and not
+    multiplicative (RESEARCH Assumption A1; the probe's job)."""
+    rng = np.random.default_rng(7)
+    img = rng.integers(0, 256, size=(12, 12, 3), dtype=np.uint8)
+    master_pts = [(0, 0), (128, 100), (255, 255)]  # darkening master
+    ch_pts = [(0, 0), (128, 200), (255, 255)]  # brightening R channel
+
+    master_lut = image_ops.curve_lut(master_pts)
+    ch_lut = image_ops.curve_lut(ch_pts)
+    out = image_ops.curves_page(img, master_pts, {"R": ch_pts})
+
+    # Per-channel applied AFTER the master: the pinned A1 composition.
+    assert np.array_equal(out[..., 0], ch_lut[master_lut[img[..., 0]]])
+    # The channel curve is NOT a no-op on the master result...
+    assert not np.array_equal(out[..., 0], master_lut[img[..., 0]])
+    # ...and the order is not commutative: before-master differs at 128.
+    assert not np.array_equal(
+        out[..., 0], master_lut[ch_lut[img[..., 0]]]
+    )
+
+
+@pytest.mark.unit
+def test_curves_page_channel_independence() -> None:
+    """Editing only channel G's points leaves the R and B planes byte-
+    identical to the master-only output (per-channel curves are isolated)."""
+    rng = np.random.default_rng(11)
+    img = rng.integers(0, 256, size=(10, 10, 3), dtype=np.uint8)
+    master_pts = [(0, 0), (128, 100), (255, 255)]
+
+    master_only = image_ops.curves_page(img, master_pts, {})
+    with_g = image_ops.curves_page(
+        img, master_pts, {"G": [(0, 0), (128, 180), (255, 255)]}
+    )
+    assert np.array_equal(with_g[..., 0], master_only[..., 0])  # R untouched
+    assert np.array_equal(with_g[..., 2], master_only[..., 2])  # B untouched
+    assert not np.array_equal(with_g[..., 1], master_only[..., 1])  # G edited
+
+
+@pytest.mark.unit
+def test_curve_lut_and_page_idempotent() -> None:
+    """Idempotency probe: identical inputs yield byte-identical outputs —
+    both for a single ``curve_lut`` call and for repeated ``curves_page``
+    application (deterministic curve-of-curve composition)."""
+    pts = [(0, 0), (64, 40), (192, 215), (255, 255)]
+    assert np.array_equal(image_ops.curve_lut(pts), image_ops.curve_lut(pts))
+
+    rng = np.random.default_rng(3)
+    img = rng.integers(0, 256, size=(8, 8, 3), dtype=np.uint8)
+    master_pts = [(0, 0), (128, 100), (255, 255)]
+    ch = {"R": [(0, 0), (128, 200), (255, 255)]}
+    first = image_ops.curves_page(img, master_pts, ch)
+    second = image_ops.curves_page(img, master_pts, ch)
+    assert np.array_equal(first, second)
+
+
+@pytest.mark.unit
+def test_curve_lut_duplicate_x_last_wins() -> None:
+    """Duplicate-x points dedupe LAST-WINS (A6): the (64,200) point wins over
+    (64,40), so lut[64] == 200."""
+    lut = image_ops.curve_lut([(64, 40), (64, 200), (0, 0), (255, 255)])
+    assert lut[64] == 200
