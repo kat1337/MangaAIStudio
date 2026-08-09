@@ -348,6 +348,39 @@ def test_open_project_restores_session(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
+def test_project_open_hides_empty_state_trio(qtbot, tmp_path, monkeypatch) -> None:
+    """D-09 regression (project-open numpy path): reopening a saved session
+    must hide the z=2000 empty-state trio over the loaded page, and show the
+    empty-box hint on a box-less page (UI-SPEC E2).
+
+    The project-open path runs ``_display_page_state`` ->
+    ``canvas.set_image_from_numpy`` — the ONLY display path that missed the
+    ``_update_empty_state()`` call. This test MUST fail on pre-fix code (the
+    trio stays visible over the loaded page).
+    """
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # Fresh window starts on the empty state (the D-09 pre-condition).
+    window2 = _make_window(qtbot, tmp_path)
+    assert window2.canvas._empty_heading.isVisible()
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+
+    canvas = window2.canvas
+    # D-09: the empty-state trio must not persist over the loaded page.
+    assert not canvas._empty_heading.isVisible()
+    assert not canvas._empty_body.isVisible()
+    assert not canvas._empty_hint.isVisible()
+    # Zero boxes on the reopened page -> the empty-box hint IS visible.
+    assert canvas.empty_box_hint.isVisible()
+
+
+@pytest.mark.gui
 def test_open_project_populates_all_current_images(qtbot, tmp_path, monkeypatch) -> None:
     """BOTH pages get their embedded image decoded into current_image — incl.
     the non-displayed second page whose original was deleted (the 05-08 batch

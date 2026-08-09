@@ -272,6 +272,67 @@ def _canvas_with_image(qtbot, size: int = 100) -> EditorCanvas:
     return canvas
 
 
+# ---------------------------------------------------------------------------
+# Plan 06 Task 1 tests — D-09 empty-state overlay cleared on numpy display
+# ---------------------------------------------------------------------------
+#
+# D-09 (deferred from 05-UAT/05-UI-REVIEW): `_set_image_from_numpy` never
+# called `_update_empty_state()`, so the z=2000 "No page open" trio stayed
+# rendered over a loaded page on the numpy display path (project open via
+# `_display_page_state`, image-op write-back, undo). These tests MUST fail on
+# pre-fix code; the preview-path test is the idempotence guard (RESEARCH
+# Pitfall 1 — the fix call is benign on the preview path).
+
+
+@pytest.mark.gui
+def test_numpy_display_hides_empty_state(qtbot) -> None:
+    """D-09 regression (numpy path): set_image_from_numpy on a fresh canvas
+    showing the empty state must hide the trio and show the empty-box hint."""
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(300, 300)
+    canvas.show()
+    canvas.viewport().show()
+    QApplication.processEvents()
+    # Fresh canvas: the empty state is showing (the D-09 pre-condition).
+    assert canvas._empty_heading.isVisible()
+
+    rgb = np.zeros((60, 60, 3), dtype=np.uint8)
+    canvas.set_image_from_numpy(rgb)
+
+    # The z=2000 trio is gone (D-09: the numpy path must refresh the overlay).
+    assert not canvas._empty_heading.isVisible()
+    assert not canvas._empty_body.isVisible()
+    assert not canvas._empty_hint.isVisible()
+    # Zero boxes on the loaded page -> the empty-box hint IS visible.
+    assert canvas.empty_box_hint.isVisible()
+
+
+@pytest.mark.gui
+def test_preview_path_keeps_empty_state_hidden(qtbot) -> None:
+    """D-09 idempotence (preview path): set_image_from_numpy_preview over a
+    loaded image never re-shows the empty-state trio and never raises.
+
+    RESEARCH Pitfall 1: the fix `_update_empty_state()` call is benign on the
+    live-preview path (Levels dialog) — an image is present, so the trio
+    stays hidden and the call must not crash (unlike the empty-state
+    positioning code, the non-empty branch skips the viewport math).
+    """
+    canvas = _canvas_with_image(qtbot)
+    # Image loaded via set_image: the trio is hidden.
+    assert not canvas._empty_heading.isVisible()
+
+    rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+    canvas.set_image_from_numpy_preview(rgb, capture_original=False)
+
+    # The preview display mutation never re-shows the trio.
+    assert not canvas._empty_heading.isVisible()
+    assert not canvas._empty_body.isVisible()
+    assert not canvas._empty_hint.isVisible()
+    # The preview result is displayed; no exception was raised.
+    assert canvas.get_image_numpy().shape[:2] == (100, 100)
+
+
 # --- ToolsPanel tests ---
 
 def test_tools_panel_tool_group_exclusive(qtbot) -> None:
