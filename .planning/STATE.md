@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: refinement-polish-deferred-fixes-full-curve-editor
 status: executing
-stopped_at: Completed 06-01-PLAN.md (curves headless math)
-last_updated: "2026-08-09T21:10:49.438Z"
+stopped_at: Completed 06-02-PLAN.md (empty-state overlay + hint copy fixes)
+last_updated: "2026-08-09T21:20:59.867Z"
 last_activity: 2026-08-09
 last_activity_desc: Phase 06 execution started
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 44
-  completed_plans: 40
+  completed_plans: 41
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 06 (refinement-polish-deferred-fixes-full-curve-editor) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-08-09 — Phase 06 execution started
 
-Progress: [█████████░] 91% (4/4 phases, 29/29 plans)
+Progress: [█████████░] 93% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -108,6 +108,7 @@ Progress: [█████████░] 91% (4/4 phases, 29/29 plans)
 | Phase 05-project-persistence-image-ops-export P05-08 | 55min | 2 tasks | 2 files |
 | Phase 05-project-persistence-image-ops-export P10 | 8min | 2 tasks | 2 files |
 | Phase 06 P01 | 4 | 2 tasks | 2 files |
+| Phase 06 P02 | 15min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -238,6 +239,7 @@ Recent decisions affecting current work:
 - [Phase 05-project-persistence-image-ops-export]: Pre-create the default .mas-project folder before QFileDialog.getExistingDirectory; best-effort rmdir cleanup only for self-created empty folders — The native dialog refuses a non-existent default and silently falls back to the album root (D-02 violation)
 - [Phase 06]: A1 composition order (per-channel LUT applied AFTER the master, out_c = channel_lut_c[master_lut[v]]) is pinned by a passing probe test, not prose - Task 2's probe passed immediately against the Task 1 implementation; no production change was needed. — A1 composition order (per-channel LUT applied AFTER the master, out_c = channel_lut_c[master_lut[v]]) is pinned by a passing probe test, not prose - Task 2's probe passed immediately against the Task 1 implementation; no production change was needed.
 - [Phase 06]: Duplicate-x curve points dedupe LAST-WINS (A6): sorted dict pass keeps the final y per x - locked by test_curve_lut_duplicate_x_last_wins (lut[64] == 200). — Duplicate-x curve points dedupe LAST-WINS (A6): sorted dict pass keeps the final y per x - locked by test_curve_lut_duplicate_x_last_wins (lut[64] == 200).
+- [Phase 06]: D-09 fix placed inside _set_image_from_numpy (shared impl), one call covers preview path idempotently — plan's verbatim prescription
 
 ### Roadmap Evolution
 
@@ -269,8 +271,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-09T21:10:38.279Z
-Stopped at: Completed 06-01-PLAN.md (curves headless math)
+Last session: 2026-08-09T21:20:59.840Z
+Stopped at: Completed 06-02-PLAN.md (empty-state overlay + hint copy fixes)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

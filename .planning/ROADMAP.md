@@ -269,14 +269,14 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 
 **Wave 1** (parallel)
 
 - [x] 06-01-PLAN.md — Curve math core: `curve_lut` + `curves_page` (master→channel composition, T-05-07 backstop, idempotency probe) in core/image_ops.py (PROJ-04)
-- [ ] 06-02-PLAN.md — Canvas fixes: D-09 empty-state overlay cleared on the numpy display path + D-11 hint copy references Open Folder (Ctrl+Shift+O)
+- [x] 06-02-PLAN.md — Canvas fixes: D-09 empty-state overlay cleared on the numpy display path + D-11 hint copy references Open Folder (Ctrl+Shift+O)
 - [ ] 06-03-PLAN.md — Chrome fixes: D-10 toolbar active-tool highlight (checkable window actions in the exclusive group) + D-12 dialog typography 14px Body
 
 **Wave 2** *(blocked on 06-01)*
