@@ -1872,7 +1872,7 @@ class MainWindow(QMainWindow):
             return np.asarray(Image.open(imf.path).convert("RGB")).copy()
         return None
 
-    def _save_project(self, force_as: bool = False) -> None:
+    def _save_project(self, force_as: bool = False) -> bool:
         """Save Project… (Ctrl+S) — write the session as a project folder.
 
         D-07/D-02 flow: no page open → no-op (the action is disabled too);
@@ -1885,19 +1885,25 @@ class MainWindow(QMainWindow):
         session is untouched. On success: dirty cleared, project dir/name
         recorded, Recent Projects updated, title refreshed (no ``*``), and
         the "Saved project …" transient shows.
+
+        :return: True when the project was written (or there was nothing to
+            save); False when the save was aborted (cancelled folder dialog)
+            or failed (WR-01: the Unsaved-Changes gate keys on this — a
+            failed save must abort the session-replacing action, even when a
+            project dir already exists from a previous save).
         """
         if self._current_page_index() is None:
-            return
+            return False
         if not force_as and not self._session_dirty():
             self._show_transient_status("No changes to save.")
-            return
+            return True
         self._snapshot_current_page()
 
         project_dir = self._project_dir
         if project_dir is None or force_as:
             project_dir = self._choose_project_dir()
             if project_dir is None:
-                return  # dialog cancelled — nothing written, session untouched
+                return False  # dialog cancelled — nothing written, session untouched
 
         # Project name: keep an open project's name; derive for new sessions
         # (chapter = source-folder name; single-image session = image stem).
@@ -1953,7 +1959,7 @@ class MainWindow(QMainWindow):
                 f"Couldn't save '{name}'.",
                 "Check that the folder is writable and see the log for details.",
             )
-            return
+            return False
 
         self._project_dir = project_dir
         self._project_name = name
@@ -1964,6 +1970,7 @@ class MainWindow(QMainWindow):
         self._show_transient_status(
             f"Saved project '{name}' ({len(page_files)} pages)."
         )
+        return True
 
     def _save_project_as(self) -> None:
         """Save Project As… (Ctrl+Shift+S): choose the folder, then save."""
@@ -2186,8 +2193,11 @@ class MainWindow(QMainWindow):
         if clicked is save_btn:
             # Save → the normal save flow (As… first when there is no path);
             # a cancelled folder dialog or failed write aborts the action.
-            self._save_project()
-            return self._project_dir is not None
+            # WR-01: key the gate on the save RESULT, not on the project dir
+            # existing — a save that fails while a project dir is already set
+            # (disk full, unwritable) must still abort, never silently
+            # discard the unsaved edits.
+            return self._save_project()
         return True  # Discard — continue without saving
 
     def _load_project_session(self, manifest_path: Path) -> None:
