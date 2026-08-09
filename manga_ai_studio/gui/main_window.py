@@ -2187,6 +2187,24 @@ class MainWindow(QMainWindow):
             raise project_io.ProjectFormatError(
                 f"corrupt embedded image: {exc}"
             ) from exc
+        # WR-06: the declared ``meta.img`` dims must match the actual decoded
+        # PNG. ``validate_meta`` cross-checks declared-vs-declared and the
+        # MAX_IMAGE_DIMENSION cap but never the blob; a crafted file declaring
+        # 100x100 with a 10000x10000 PNG would otherwise reshape the mask to
+        # 100x100 while the canvas displays 10000x10000 — restored mask
+        # misaligned with the displayed image, and exported _ocr.json dims
+        # (canvas) inconsistent with the mask bbox coordinates (model). The
+        # declared dims are ints by validate_meta's _coerce_int; the .get
+        # defaults are belt-and-suspenders.
+        img_meta = parsed["meta"].get("img") or {}
+        declared_w = img_meta.get("w")
+        declared_h = img_meta.get("h")
+        actual_h, actual_w = imf.current_image.shape[:2]
+        if declared_w != actual_w or declared_h != actual_h:
+            raise project_io.ProjectFormatError(
+                f"embedded image is {actual_w}x{actual_h} but meta.img"
+                f" declares {declared_w}x{declared_h}"
+            )
         return imf
 
     def _display_page_state(self, imf: ImageFile) -> None:
