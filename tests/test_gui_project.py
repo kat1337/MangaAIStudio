@@ -461,7 +461,12 @@ def test_open_verified_original_flag(qtbot, tmp_path, monkeypatch) -> None:
 
     # Original present + matching -> verified True. The first page displays
     # the EMBEDDED image at open (D-05 resume contract); NAVIGATING back to
-    # the page renders the re-verified ORIGINAL (D-06).
+    # the page renders the SAVED in-memory state (current_image — the CR-01
+    # D-05 "resume exactly where you left off" contract). The re-verified
+    # original stays the Show-Original base and the fallback for pages never
+    # loaded into memory; it is NOT re-displayed on navigation (the pre-CR-01
+    # behavior reloaded the pre-save disk image and silently dropped the
+    # saved edits from view).
     window2 = _make_window(qtbot, tmp_path)
     _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
     window2._open_project()
@@ -473,8 +478,9 @@ def test_open_verified_original_flag(qtbot, tmp_path, monkeypatch) -> None:
     window2.file_table.select_path(window2.image_files[0].path)
     window2.on_page_selected(window2.image_files[0].path)
     shown = window2.canvas.get_image_numpy()
-    assert not np.array_equal(shown, alt)  # the source, not the embedded alt
-    assert np.all(shown == [30, 60, 90])  # the original page_01 pixels
+    assert np.array_equal(shown, alt)  # the saved in-memory state (CR-01) —
+    # NOT a re-load of the pre-save disk original
+    assert window2.image_files[0].original_verified is True  # D-06 flag intact
 
     # Original deleted -> verified False, embedded image renders.
     (chapter / "page_01.png").unlink()
