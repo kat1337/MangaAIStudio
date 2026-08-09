@@ -804,7 +804,9 @@ def test_save_as_default_dir_precreated(qtbot, tmp_path, monkeypatch) -> None:
     violation)."""
     chapter = tmp_path / "chapter"
     window = _make_window(qtbot, tmp_path, folder=chapter)
-    default = tmp_path / "chapter.mas-project"
+    # The computed default for a 2-page chapter session (D-02):
+    # <source-parent>/<chapter-name>.mas-project.
+    default = chapter / "chapter.mas-project"
     calls = _stub_dir_dialog(monkeypatch, default)
 
     picked = window._choose_project_dir()
@@ -822,7 +824,7 @@ def test_save_as_cancel_cleanup(qtbot, tmp_path, monkeypatch) -> None:
     behind."""
     chapter = tmp_path / "chapter"
     window = _make_window(qtbot, tmp_path, folder=chapter)
-    default = tmp_path / "chapter.mas-project"
+    default = chapter / "chapter.mas-project"
     _stub_dir_dialog(monkeypatch, None)  # cancel
 
     picked = window._choose_project_dir()
@@ -838,7 +840,7 @@ def test_save_as_different_pick_cleanup(qtbot, tmp_path, monkeypatch) -> None:
     folder — the save populates it)."""
     chapter = tmp_path / "chapter"
     window = _make_window(qtbot, tmp_path, folder=chapter)
-    default = tmp_path / "chapter.mas-project"
+    default = chapter / "chapter.mas-project"
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir(exist_ok=True)
     _stub_dir_dialog(monkeypatch, elsewhere)

@@ -1867,19 +1867,62 @@ class MainWindow(QMainWindow):
 
         Defaults to ``<source-parent>/<chapter-name>.mas-project`` (the
         sibling-of-source convention), or ``<image-parent>/<image-stem>
-        .mas-project`` for a single-image session. Returns None on cancel.
+        .mas-project`` for a single-image session. G-05-2 (plan 05-10): the
+        default folder is PRE-CREATED before the dialog — the native dialog
+        refuses a non-existent default and silently falls back to the source
+        parent, which is exactly how saves leaked into the album root. A
+        self-created default that ends up unused (cancel / different pick)
+        is removed best-effort (``rmdir`` removes EMPTY directories only —
+        the "only if created by us and left empty" guard); a pick equal to
+        the default keeps it (the save populates it). On mkdir failure the
+        dialog falls back to the source parent (the pre-fix behavior) and
+        Save As stays functional on read-only parents. Returns None on
+        cancel.
         """
         first = self.image_files[0]
         if len(self.image_files) == 1:
             default = first.path.parent / f"{first.path.stem}.mas-project"
         else:
             default = first.path.parent / f"{first.path.parent.name}.mas-project"
+        created = False
+        if not default.exists():
+            try:
+                default.mkdir(parents=True, exist_ok=True)
+                created = True
+            except OSError:
+                logger.warning(
+                    f"Save Project As: could not pre-create the default"
+                    f" folder '{default}' — falling back to the source"
+                    " parent as the dialog default"
+                )
+                default = first.path.parent
         directory = QFileDialog.getExistingDirectory(
             self, "Save Project As", str(default)
         )
         if not directory:
+            if created:
+                self._discard_stray_project_dir(default)
             return None
-        return Path(directory)
+        picked = Path(directory)
+        if picked != default and created:
+            self._discard_stray_project_dir(default)
+        return picked
+
+    def _discard_stray_project_dir(self, folder: Path) -> None:
+        """Best-effort cleanup of a self-created, unused project folder.
+
+        G-05-2 (plan 05-10): ``_choose_project_dir`` pre-creates the default
+        folder so the native dialog accepts it; when the dialog is cancelled
+        or redirected elsewhere, the stray empty folder is removed. ``rmdir``
+        only removes EMPTY directories, so a folder the user populated (or
+        that pre-existed with content) is never touched; OSError is
+        swallowed + debug-logged (cleanup is best-effort).
+        """
+        try:
+            if folder.is_dir():
+                folder.rmdir()
+        except OSError:
+            logger.debug(f"Could not remove stray project folder '{folder}'")
 
     def _page_image_source(self, idx: int) -> np.ndarray | None:
         """Resolve the per-page image to embed at save time (RESEARCH A3).
