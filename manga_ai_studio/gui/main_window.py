@@ -707,33 +707,47 @@ class MainWindow(QMainWindow):
         # Shortcuts are installed via QShortcut in _wire_tool_actions so they
         # don't conflict with the ToolsPanel's own action shortcuts.
         # Each action's data() carries its ToolMode for toolbar-button sync.
+        # D-10: the actions are CHECKABLE members of the ToolsPanel's
+        # exclusive QActionGroup — the group's exclusivity unchecks the
+        # previous tool, so the toolbar buttons (which mirror their default
+        # action) highlight the active tool in sync with the dock.
         self.action_tool_move = QAction("Move/Pan", self)
+        self.action_tool_move.setCheckable(True)
         self.action_tool_move.setData(ToolMode.MOVE)
         self.action_tool_move.triggered.connect(lambda: self.set_active_tool(ToolMode.MOVE))
+        self.tools_panel.tool_group.addAction(self.action_tool_move)
 
         self.action_tool_brush = QAction("Brush", self)
+        self.action_tool_brush.setCheckable(True)
         self.action_tool_brush.setData(ToolMode.BRUSH)
         self.action_tool_brush.triggered.connect(
             lambda: self.set_active_tool(ToolMode.BRUSH)
         )
+        self.tools_panel.tool_group.addAction(self.action_tool_brush)
 
         self.action_tool_rectangle = QAction("Rectangle", self)
+        self.action_tool_rectangle.setCheckable(True)
         self.action_tool_rectangle.setData(ToolMode.RECTANGLE)
         self.action_tool_rectangle.triggered.connect(
             lambda: self.set_active_tool(ToolMode.RECTANGLE)
         )
+        self.tools_panel.tool_group.addAction(self.action_tool_rectangle)
 
         self.action_tool_lasso = QAction("Lasso", self)
+        self.action_tool_lasso.setCheckable(True)
         self.action_tool_lasso.setData(ToolMode.LASSO)
         self.action_tool_lasso.triggered.connect(
             lambda: self.set_active_tool(ToolMode.LASSO)
         )
+        self.tools_panel.tool_group.addAction(self.action_tool_lasso)
 
         self.action_tool_eraser = QAction("Eraser", self)
+        self.action_tool_eraser.setCheckable(True)
         self.action_tool_eraser.setData(ToolMode.ERASER)
         self.action_tool_eraser.triggered.connect(
             lambda: self.set_active_tool(ToolMode.ERASER)
         )
+        self.tools_panel.tool_group.addAction(self.action_tool_eraser)
 
         # The 6th tool (D-11, plan 05-07): Crop — same wiring as the other
         # tool actions (setData(ToolMode) + set_active_tool via lambda; the
@@ -743,6 +757,7 @@ class MainWindow(QMainWindow):
         # _wire_tool_actions (the established pattern — an action-level
         # setShortcut would collide with it, CR-14).
         self.action_tool_crop = QAction("Crop", self)
+        self.action_tool_crop.setCheckable(True)
         self.action_tool_crop.setData(ToolMode.CROP)
         self.action_tool_crop.setToolTip(
             "Crop tool (G): drag a rectangle on the page, Enter applies,"
@@ -751,6 +766,7 @@ class MainWindow(QMainWindow):
         self.action_tool_crop.triggered.connect(
             lambda: self.set_active_tool(ToolMode.CROP)
         )
+        self.tools_panel.tool_group.addAction(self.action_tool_crop)
 
         # Cancel Batch (D-09) — plan 04: emits batch_abort_requested, which the
         # running Worker.abort consumes (worker_thread.py abort_signal wiring).
@@ -3106,9 +3122,12 @@ class MainWindow(QMainWindow):
     def _make_tool_toolbar_button(self, action: QAction) -> QToolButton:
         """Build a checkable toolbar tool-button bound to ``action``.
 
-        The buttons share the ToolsPanel's QActionGroup (passed implicitly via
-        the action's group membership) so the toolbar and dock highlight the
-        same active tool.
+        The button's checked state mirrors its DEFAULT ACTION (QToolButton
+        syncs its checkability to the action): the six tool actions are
+        checkable members of the ToolsPanel's exclusive QActionGroup (added
+        in ``_build_tools_menu``), so checking one action unchecks the
+        previous tool via the group's exclusivity and the toolbar stays in
+        sync with the Tools dock.
         """
         btn = QToolButton(self.toolbar)
         btn.setDefaultAction(action)
