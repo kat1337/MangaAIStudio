@@ -262,19 +262,20 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 **Goal:** User gets a polished, consistent editor — deferred v1.1 bugs fixed (empty-state overlay on project open, toolbar active-tool highlight, stale Ctrl+O hint copy, dialog typography) and a full draggable curve editor replacing the Levels dialog's fixed black/white/gamma controls.
 
 **Scope (inherited deferrals):**
+
 - Deferred fixes: empty-state overlay persists after project open (`_update_empty_state()` in `_set_image_from_numpy`, canvas.py:710-767 — 05-UAT.md deferred follow-up 2026-08-08); toolbar tool buttons never highlight active tool (window actions not checkable / not in ToolsPanel QActionGroup, deferred-items.md 2026-08-08); empty-state hint advertises stale Ctrl+O binding (canvas.py:278, remapped to Open Project in 05); dialog field values at Qt default ~12px not contracted 14px Body (05-UI-REVIEW.md Pillar 3).
 - Full curve editor (05-CONTEXT.md/05-DISCUSSION-LOG.md deferred idea — Levels dialog D-12 is the v1 fallback): draggable curve control for tones adjustment, replacing/upgrading the Levels dialog.
 - Explicitly NOT in scope: typesetting styling toolbar (TRAN-02 → Phase 7).
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 Plans:
 
 **Wave 1** (parallel)
 
-- [ ] 06-01-PLAN.md — Curve math core: `curve_lut` + `curves_page` (master→channel composition, T-05-07 backstop, idempotency probe) in core/image_ops.py (PROJ-04)
+- [x] 06-01-PLAN.md — Curve math core: `curve_lut` + `curves_page` (master→channel composition, T-05-07 backstop, idempotency probe) in core/image_ops.py (PROJ-04)
 - [ ] 06-02-PLAN.md — Canvas fixes: D-09 empty-state overlay cleared on the numpy display path + D-11 hint copy references Open Folder (Ctrl+Shift+O)
 - [ ] 06-03-PLAN.md — Chrome fixes: D-10 toolbar active-tool highlight (checkable window actions in the exclusive group) + D-12 dialog typography 14px Body
 
@@ -291,6 +292,7 @@ Plans:
 **Goal:** User can typeset translated text into the page with full styling controls — font selection, style, size, color, alignment, and effects — producing renderable output rather than Phase 4's translucent review overlay.
 
 **Scope (inherited from 04-CONTEXT.md Deferred Ideas, decision 2026-08-04):**
+
 - Font selection (per-box, per-selected-boxes, per-page) — implies multi-select (Phase 3 D-08 single-select must be lifted)
 - Font style selector, font size selector, increase/decrease font size
 - Font color, horizontal alignment, vertical alignment
