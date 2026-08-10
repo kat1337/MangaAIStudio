@@ -580,11 +580,11 @@ def test_curves_action_in_tools_menu(qtbot, tmp_path) -> None:
     """Tools ▸ Image shows 'Curves…' — the Levels slot is renamed (D-01)."""
     window = _window_with_page(qtbot, tmp_path)
     assert window.action_curves.text() == "Curves\u2026"
-    tools_menu = next(
-        a.menu()
-        for a in window.menuBar().actions()
-        if a.menu() is not None and a.menu().title() == "&Tools"
-    )
+    # PySide6 wrapper-lifetime quirk: hold the top-level action wrappers
+    # while resolving the menu, or the C++ QMenus vanish with the temps.
+    menu_actions = window.menuBar().actions()
+    menus = [a.menu() for a in menu_actions]
+    tools_menu = next(m for m in menus if m is not None and m.title() == "&Tools")
     assert window.action_curves in tools_menu.actions()
     # The Levels action/surface is gone — replaced, not appended.
     assert not hasattr(window, "action_levels")

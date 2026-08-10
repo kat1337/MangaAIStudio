@@ -189,7 +189,7 @@ class MainWindow(QMainWindow):
         # here via `_record_geometry_op_name` right before pushing its ONE
         # geometry undo entry. When the unified undo/redo pops a multi-kind
         # geometry record, the transient flashes "Undo: {op_name}" /
-        # "Redo: {op_name}" (rotate|crop|levels|resize — the extended op-name
+        # "Redo: {op_name}" (rotate|crop|curves|resize — the extended op-name
         # set). None = no geometry op pushed yet on this page.
         self._last_geometry_op_name: str | None = None
 
@@ -776,9 +776,9 @@ class MainWindow(QMainWindow):
         self.action_cancel_batch.triggered.connect(self._cancel_batch)
         self.action_cancel_batch.setEnabled(False)
 
-        # Image section (plan 05-06, UI-SPEC surface 23/25/26): Rotate ▸
-        # (90° CW / 90° CCW / 180°), Levels…, Resize…. Rotate applies
-        # SILENTLY (D-14 — no confirmation); Levels/Resize open dialogs.
+        # Image section (plan 05-06/06-05, UI-SPEC surfaces 23/25/26/30):
+        # Rotate ▸ (90° CW / 90° CCW / 180°), Curves…, Resize…. Rotate applies
+        # SILENTLY (D-14 — no confirmation); Curves/Resize open dialogs.
         # All three are synchronous and enabled iff a page is open AND no
         # async op is running (gated in _refresh_action_states). No shortcuts
         # (menu-accelerable per UI-SPEC §Accessibility).
@@ -806,12 +806,13 @@ class MainWindow(QMainWindow):
         self.action_rotate_180.triggered.connect(lambda: self._rotate_page(2))
         self.action_rotate_180.setEnabled(False)
 
-        self.action_levels = QAction("Levels\u2026", self)
-        self.action_levels.setToolTip(
-            "Adjust the black/white points and gamma with a live preview."
+        self.action_curves = QAction("Curves\u2026", self)
+        self.action_curves.setToolTip(
+            "Adjust tones with a draggable curve — presets, per-channel"
+            " curves, and black/white/gamma quick controls, with live preview."
         )
-        self.action_levels.triggered.connect(self._on_levels)
-        self.action_levels.setEnabled(False)
+        self.action_curves.triggered.connect(self._on_curves)
+        self.action_curves.setEnabled(False)
 
         self.action_resize = QAction("Resize\u2026", self)
         self.action_resize.setToolTip(
@@ -837,7 +838,7 @@ class MainWindow(QMainWindow):
         rotate_menu.addAction(self.action_rotate_cw)
         rotate_menu.addAction(self.action_rotate_ccw)
         rotate_menu.addAction(self.action_rotate_180)
-        tools_menu.addAction(self.action_levels)
+        tools_menu.addAction(self.action_curves)
         tools_menu.addAction(self.action_resize)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_cancel_batch)
@@ -1095,15 +1096,15 @@ class MainWindow(QMainWindow):
             folder_open and not self._op_running and not self._batch_active
         )
 
-        # Plan 05-06 image ops (Tools -> Image section): Rotate/Levels/Resize
-        # are enabled iff a page is open AND no async op is running (UI-SPEC
-        # surfaces 23/25/26 gating — synchronous ops must not interleave with
-        # a model worker).
+        # Plan 05-06/06-05 image ops (Tools -> Image section):
+        # Rotate/Curves/Resize are enabled iff a page is open AND no async op
+        # is running (UI-SPEC surfaces 23/25/26/30 gating — synchronous ops
+        # must not interleave with a model worker).
         for act in (
             self.action_rotate_cw,
             self.action_rotate_ccw,
             self.action_rotate_180,
-            self.action_levels,
+            self.action_curves,
             self.action_resize,
         ):
             act.setEnabled(page_open and not self._op_running)
@@ -1112,7 +1113,7 @@ class MainWindow(QMainWindow):
         self.action_crop_dialog.setEnabled(page_open and not self._op_running)
 
     # -------------------------------------------------- image ops (plan 05-06)
-    # PROJ-04's GUI apply layer: Rotate / Levels / Resize all funnel through
+    # PROJ-04's GUI apply layer: Rotate / Curves / Resize all funnel through
     # _apply_geometry_op — the ONE place the image-op contract lives (one undo
     # entry, D-14 re-baseline, D-22 geometry flag). The pure pixel/geometry
     # math is core/image_ops (plan 05-02); this section owns the canvas
@@ -1134,9 +1135,9 @@ class MainWindow(QMainWindow):
         3. Capture the PRE-op state: image (detached ``.copy()``), mask QImage
            (detached ``.copy()`` when one exists), boxes snapshot — the
            one-press undo record.
-        4. ``transform_fn()`` -> ``(new_image, new_mask_bin, new_boxes)``:
+        4.          ``transform_fn()`` -> ``(new_image, new_mask_bin, new_boxes)``:
            the op's pure math (core/image_ops). A None mask/boxes means the op
-           does NOT touch that layer (levels is geometry-free, D-15).
+           does NOT touch that layer (curves is geometry-free, D-15).
         5. Write back: ``set_image_from_numpy`` (the setter copies), ``set_mask``
            via ``numpy_binary_to_mask_qimage`` when the op transformed an
            existing mask, and ``set_boxes`` (split by origin) UNDER the
@@ -1146,7 +1147,7 @@ class MainWindow(QMainWindow):
            Original (D-14): the post-op image is now the "original"; the pre-op
            image is recoverable only via Ctrl+Z.
         7. Mark ``ImageFile.geometry_altered`` for geometry ops (rotate/resize/
-           crop per D-22; NEVER levels), dirty the session, flash the status
+           crop per D-22; NEVER curves), dirty the session, flash the status
            copy (UI-SPEC §Copywriting), and refresh the action states.
         """
         if self._op_running or self._current_page_index() is None:
@@ -1240,8 +1241,8 @@ class MainWindow(QMainWindow):
             "rotate", geometry=True, transform_fn=_transform, flash=flash
         )
 
-    def _on_levels(self) -> None:
-        """Tools -> Levels… (plan 05-06, UI-SPEC surface 25): live preview.
+    def _on_curves(self) -> None:
+        """Tools -> Curves… (plan 06-05, UI-SPEC surface 30): live preview.
 
         The pre-dialog image is detached with ``.copy()`` BEFORE the dialog
         opens (Pitfall 2 — the restore/apply base). The dialog is a collector
@@ -1254,39 +1255,39 @@ class MainWindow(QMainWindow):
         """
         if self._op_running or self._current_page_index() is None:
             return
-        from manga_ai_studio.gui.levels_dialog import LevelsDialog
+        from manga_ai_studio.gui.curves_dialog import CurvesDialog
 
         base = self.canvas.get_image_numpy()
         if base is None:
             return
         base = base.copy()
-        dialog = LevelsDialog(
+        dialog = CurvesDialog(
             self,
             page_image=base,
-            preview_callback=lambda values: self.canvas.set_image_from_numpy_preview(
-                image_ops.levels_page(base, *values), capture_original=False
+            preview_callback=lambda composed: self.canvas.set_image_from_numpy_preview(
+                composed, capture_original=False
             ),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             # Cancel: restore the pre-dialog image exactly — silently (no
-            # undo entry, no status flash — UI-SPEC surface 25).
+            # undo entry, no status flash — UI-SPEC surface 30).
             self.canvas.set_image_from_numpy(base.copy())
             return
-        black, white, gamma = dialog.result_values
+        master, channels = dialog.result_values
 
-        # UI-review FLAG (surface 25/28): the dialog's live previews mutated
+        # UI-review FLAG (surface 30/28): the dialog's live previews mutated
         # the canvas (Pitfall 9), so _apply_geometry_op's pre-capture would
-        # see the LAST PREVIEW frame — the post-levels image — as the undo
+        # see the LAST PREVIEW frame — the post-curves image — as the undo
         # "before", making Ctrl+Z a no-op. Restore the detached pre-dialog
         # base first (mirroring the Cancel path above) so the undo record's
-        # before-state is the true pre-op image.
+        # before-state is the true pre-op image (b376f8a ordering).
         self.canvas.set_image_from_numpy(base.copy())
 
         def _transform():
-            return image_ops.levels_page(base, black, white, gamma), None, None
+            return image_ops.curves_page(base, master, channels), None, None
 
         self._apply_geometry_op(
-            "levels", geometry=False, transform_fn=_transform, flash="Levels applied."
+            "curves", geometry=False, transform_fn=_transform, flash="Curves applied."
         )
 
     def _on_resize(self) -> None:
@@ -2891,17 +2892,17 @@ class MainWindow(QMainWindow):
     # Plan 05-04 (PROJ-04 / UI-SPEC surface 28): undo()/redo() now return a
     # LIST of (kind, value) pairs — a geometry record (push_geometry_state)
     # pops image+mask+boxes together with ONE press, "never two"; the op-name
-    # set extends with rotate/crop/levels/resize.
+    # set extends with rotate/crop/curves/resize (06-05: 'levels' superseded).
 
     def _undo_op_label(self, kind_or_op: str) -> str:
         """Map the popped kind / geometry-op name to the §Copywriting op label.
 
         The Phase 3 set (mask edit / inpaint / box edit) extends with the four
-        image-op names — rotate / crop / levels / resize — per the UI-SPEC
+        image-op names — rotate / crop / curves / resize — per the UI-SPEC
         surface 28 undo-feedback row (D-14), so a geometry-record undo flashes
         e.g. "Undo: rotate".
         """
-        if kind_or_op in ("rotate", "crop", "levels", "resize"):
+        if kind_or_op in ("rotate", "crop", "curves", "resize"):
             return kind_or_op
         if kind_or_op == "mask":
             return "mask edit"
@@ -2919,7 +2920,7 @@ class MainWindow(QMainWindow):
         ``history.push_geometry_state(...)``. When the unified undo/redo pop
         returns a multi-kind geometry record, the transient flashes
         "Undo: {op_name}" / "Redo: {op_name}" — the extended op-name set
-        (rotate|crop|levels|resize, UI-SPEC surface 28).
+        (rotate|crop|curves|resize, UI-SPEC surface 28).
         """
         self._last_geometry_op_name = op_name
 
