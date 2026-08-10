@@ -21,13 +21,22 @@ import math
 
 import numpy as np
 import pytest
+from PIL import Image as PILImage
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QFontInfo, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
+from manga_ai_studio.config.profile_manager import ProfileManager
+from manga_ai_studio.core.box_model import USER, PageBox
 from manga_ai_studio.core.image_ops import curves_page
+from manga_ai_studio.core.mask_editor import (
+    mask_to_numpy_binary,
+    numpy_binary_to_mask_qimage,
+)
 from manga_ai_studio.gui.curves_dialog import CurveWidget, CurvesDialog
+from manga_ai_studio.gui.main_window import MainWindow
+from panelcleaner.structures import Box
 
 # A2 preset coordinates (RESEARCH A2, locked in 06-UI-SPEC surface 30).
 S_CURVE = [(0, 0), (64, 40), (192, 215), (255, 255)]
@@ -82,6 +91,36 @@ def _make_dialog(qtbot, img=None, callback=None) -> CurvesDialog:
     dlg = CurvesDialog(page_image=img, preview_callback=callback)
     qtbot.addWidget(dlg)
     return dlg
+
+
+def _window_with_page(qtbot, tmp_path, size=(60, 40)) -> MainWindow:
+    """A MainWindow with one real page open (the canvas shows the page)."""
+    folder = tmp_path / "chapter"
+    folder.mkdir(parents=True, exist_ok=True)
+    w, h = size
+    PILImage.new("RGB", (w, h), color=(40, 80, 120)).save(folder / "page_01.png")
+    pm = ProfileManager(tmp_path / "config")
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    window._load_folder(folder)
+    QApplication.processEvents()
+    return window
+
+
+def _seed_mask_and_box(window: MainWindow) -> tuple[np.ndarray, PageBox]:
+    """Seed a binary mask + one user box (suppressed — no undo push)."""
+    img = window.canvas.get_image_numpy()
+    h, w = img.shape[:2]
+    mask_bin = np.zeros((h, w), dtype=np.uint8)
+    mask_bin[10:20, 30:50] = 255
+    window.canvas.set_mask(numpy_binary_to_mask_qimage(mask_bin))
+    box = PageBox(box=Box(30, 10, 50, 20), origin=USER)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([box], [])
+    finally:
+        window._suppress_boxes_push = False
+    return mask_bin, box
 
 
 # ===========================================================================
@@ -527,3 +566,183 @@ def test_refresh_is_single_preview_driver(qtbot) -> None:
     src = inspect.getsource(CurvesDialog)
     # Only _preview calls the callback (its single call site in the file).
     assert src.count("preview_callback(") == 1
+
+
+# ===========================================================================
+# Plan 06-05 — MainWindow wiring: lifecycle tests migrated from the Levels
+# suite (D-01 supersession): apply-one-entry + b376f8a restore semantics,
+# cancel-restores-exactly, preview no-baseline-poison, defaults/clamp, and
+# the Tools ▸ Image menu surface rename.
+# ===========================================================================
+
+@pytest.mark.gui
+def test_curves_action_in_tools_menu(qtbot, tmp_path) -> None:
+    """Tools ▸ Image shows 'Curves…' — the Levels slot is renamed (D-01)."""
+    window = _window_with_page(qtbot, tmp_path)
+    assert window.action_curves.text() == "Curves\u2026"
+    tools_menu = next(
+        a.menu()
+        for a in window.menuBar().actions()
+        if a.menu() is not None and a.menu().title() == "&Tools"
+    )
+    assert window.action_curves in tools_menu.actions()
+    # The Levels action/surface is gone — replaced, not appended.
+    assert not hasattr(window, "action_levels")
+    assert not any(a.text() == "Levels\u2026" for a in tools_menu.actions())
+
+
+@pytest.mark.gui
+def test_curves_defaults_and_clamp(qtbot) -> None:
+    """CurvesDialog opens at 0/255/1.00 with the white>black cross-clamp.
+
+    Dragging black to 200 moves white's minimum to 201, and the preview
+    callback never receives an inverted curve (T-05-07 — no inverted map).
+    """
+    calls: list = []
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    dlg = CurvesDialog(page_image=img, preview_callback=lambda v: calls.append(v))
+    qtbot.addWidget(dlg)
+
+    assert dlg.black_spin.value() == 0
+    assert dlg.white_spin.value() == 255
+    assert dlg.gamma_spin.value() == 1.00
+
+    dlg.black_spin.setValue(200)
+    assert dlg.white_spin.minimum() == 201  # white min follows black+1
+    dlg.black_spin.setValue(254)
+    assert dlg.white_spin.minimum() == 255
+    dlg.white_spin.setValue(100)  # white below black+1 -> clamped up
+    assert dlg.black_spin.maximum() == dlg.white_spin.value() - 1
+    assert dlg.black_spin.value() <= dlg.white_spin.value() - 1
+
+    # The preview ran; every payload is a valid composed image.
+    assert calls, "preview callback never fired"
+    for payload in calls:
+        assert payload.shape == (10, 10, 3)
+        assert payload.dtype == np.uint8
+    # The cross-clamp holds on the curve state itself (T-05-07).
+    assert dlg.curve_widget._points[0][1] < dlg.curve_widget._points[-1][1]
+
+
+@pytest.mark.gui
+def test_curves_cancel_restores_exactly(qtbot, tmp_path, monkeypatch) -> None:
+    """Cancel restores the pre-dialog image byte-identical with zero entries.
+
+    Dragging the controls during the dialog mutates the canvas (live preview,
+    no pushes — Pitfall 9); Cancel re-displays the detached base silently:
+    no undo entry, no status flash (UI-SPEC surface 30).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+
+    def _fake_exec(dlg):
+        dlg.black_spin.setValue(120)  # preview mutates the canvas
+        dlg.white_spin.setValue(200)
+        dlg.gamma_spin.setValue(1.7)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(CurvesDialog, "exec", _fake_exec)
+    window._on_curves()
+    QApplication.processEvents()
+
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)  # exact restore
+    assert not window.history.can_undo()  # no undo entry was pushed
+    assert window.status_bar_left.text() != "Curves applied."  # no flash
+
+
+@pytest.mark.gui
+def test_curves_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
+    """Apply commits the previewed state: ONE image-only entry (D-15).
+
+    Curves is geometry-free: masks and boxes are untouched, the image entry
+    is the only store pushed, geometry_altered stays False, the status
+    flash fires, and Show Original re-baselines to the post-curves image
+    (D-14).
+
+    Restore semantics (b376f8a ordering, UI-review FLAG): the live preview
+    mutates the canvas mid-dialog, so Apply MUST capture the TRUE pre-op
+    image (the detached pre-dialog base) as the undo before-state — not the
+    last preview frame. ONE Ctrl+Z after Apply must restore the pre-dialog
+    image byte-identical and leave the geometry undo stack empty.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+    mask_bin, _box = _seed_mask_and_box(window)
+
+    def _fake_exec(dlg):
+        # A real user drags the curve: each change fires the live preview,
+        # mutating the canvas (Pitfall 9 — no pushes). The final preview
+        # leaves the canvas showing the curved state.
+        dlg.curve_widget._points = list(BRIGHTEN)
+        dlg._refresh()
+        dlg.result_values = (
+            list(dlg._channel_points["RGB"]),
+            {ch: list(pts) for ch, pts in dlg._channel_points.items()},
+        )
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CurvesDialog, "exec", _fake_exec)
+    window._on_curves()
+    QApplication.processEvents()
+
+    expected = curves_page(
+        pre,
+        list(BRIGHTEN),
+        {"R": [(0, 0), (255, 255)], "G": [(0, 0), (255, 255)], "B": [(0, 0), (255, 255)]},
+    )
+    assert np.array_equal(window.canvas.get_image_numpy(), expected)
+    # Geometry-free: mask + boxes untouched.
+    assert np.array_equal(mask_to_numpy_binary(window.canvas.get_mask()), mask_bin)
+    assert window.canvas.boxes_snapshot()[0].box.as_tuple == (30, 10, 50, 20)
+    # ONE image-only entry — the mask/boxes stores are untouched.
+    assert len(window.history._image_undo) == 1
+    assert len(window.history._mask_undo) == 0
+    assert len(window.history._boxes_undo) == 0
+    assert window.image_files[0].geometry_altered is False
+    assert "Curves applied." in window.status_bar_left.text()
+    # Show Original shows the POST-curves image (D-14 re-baseline).
+    assert np.array_equal(window.canvas._original_image_numpy, expected)
+
+    # Restore semantics: the undo before-state is the PRE-DIALOG image (the
+    # previews above mutated the canvas — without the b376f8a ordering, the
+    # before-state equals the post-op state and Ctrl+Z is a no-op).
+    window.on_undo()
+    QApplication.processEvents()
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    # The single geometry entry was consumed: the stack is empty again.
+    assert not window.history.can_undo()
+
+
+@pytest.mark.gui
+def test_curves_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None:
+    """The live preview never re-baselines Show Original (Pitfall 5/9).
+
+    The capture-suppressed preview path keeps the pre-dialog image as the
+    D-14 "original"; after Cancel, Show Original still shows the pre-dialog
+    image even though the canvas was mutated by previews.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+    window.canvas.rebaseline_original()  # honest pre-dialog baseline
+    assert np.array_equal(window.canvas._original_image_numpy, pre)
+
+    preview_seen: dict = {}
+
+    def _fake_exec(dlg):
+        dlg.black_spin.setValue(60)  # preview mutates the canvas mid-dialog
+        preview_seen["mid"] = window.canvas.get_image_numpy().copy()
+        dlg.gamma_spin.setValue(2.0)
+        dlg.white_spin.setValue(180)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(CurvesDialog, "exec", _fake_exec)
+    window._on_curves()
+    QApplication.processEvents()
+
+    # The preview ran mid-dialog (canvas mutated) but never touched the
+    # baseline; Cancel restored the pre-dialog image exactly (Pitfall 5/9).
+    assert not np.array_equal(preview_seen["mid"], pre)
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    assert np.array_equal(window.canvas._original_image_numpy, pre)
+    window.canvas.show_original(True)
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
