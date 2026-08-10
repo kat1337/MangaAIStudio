@@ -1287,8 +1287,12 @@ class MainWindow(QMainWindow):
         # see the LAST PREVIEW frame — the post-curves image — as the undo
         # "before", making Ctrl+Z a no-op. Restore the detached pre-dialog
         # base first (mirroring the Cancel path above) so the undo record's
-        # before-state is the true pre-op image (b376f8a ordering).
-        self.canvas.set_image_from_numpy(base.copy())
+        # before-state is the true pre-op image (b376f8a ordering). The
+        # restore is capture-suppressed too (CR-01, T-06-09): on a fresh
+        # page a capture-enabled restore would transiently store the last
+        # preview frame; the post-Apply baseline is established exclusively
+        # by _apply_geometry_op's tail rebaseline_original() (D-14).
+        self.canvas.set_image_from_numpy_preview(base.copy(), capture_original=False)
 
         def _transform():
             return image_ops.curves_page(base, master, channels), None, None
