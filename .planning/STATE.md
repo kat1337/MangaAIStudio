@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: refinement-polish-deferred-fixes-full-curve-editor
 status: executing
-stopped_at: Completed 06-04-PLAN.md (full curve editor dialog)
-last_updated: "2026-08-10T00:28:44.395Z"
+stopped_at: Completed 06-05-PLAN.md (Curves landed in the MainWindow)
+last_updated: "2026-08-10T00:46:53.249Z"
 last_activity: 2026-08-09
 last_activity_desc: Phase 06 execution started
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 44
-  completed_plans: 43
+  completed_plans: 44
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 06 (refinement-polish-deferred-fixes-full-curve-editor) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-08-09 — Phase 06 execution started
 
-Progress: [██████████] 98% (4/4 phases, 29/29 plans)
+Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -111,6 +111,7 @@ Progress: [██████████] 98% (4/4 phases, 29/29 plans)
 | Phase 06 P02 | 15min | 2 tasks | 3 files |
 | Phase 06 P03 | 6min | 2 tasks | 7 files |
 | Phase 06 P04 | 47 | 3 tasks | 2 files |
+| Phase 06 P05 | 25 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -249,6 +250,10 @@ Recent decisions affecting current work:
 - [Phase 06]: Gamma back-map snaps the diagonal to exactly 1.00 (raw 1.0054 rounds to 1.01) so the defaults contract 'gamma 1.00 <-> midpoint 128' holds at open; injection stays forward-only (user gamma edits) via _gamma_syncing (06-04)
 - [Phase 06]: Endpoint cross-clamp enforced on the curve points themselves (not just the slider/spin pairs): a widget-dragged endpoint inversion clamps immediately - the exact T-05-07 mirror of the Levels slider clamp (06-04)
 - [Phase 06]: In spinbox disabled for endpoints (x fixed at 0/255, range [x,x]) - 'endpoints never move horizontally' rendered in the numeric row (06-04)
+- [Phase 06]: The preview callback receives the ALREADY-composed curves_page image (CurvesDialog._preview composes master->channel and fires the payload) - the slot passes it straight to the capture-suppressed preview path instead of recomposing (06-05) — The preview callback receives the ALREADY-composed curves_page image (CurvesDialog._preview composes master->channel and fires the payload) - the slot passes it straight to the capture-suppressed preview path instead of recomposing (06-05)
+- [Phase 06]: PySide6 wrapper lifetime: hold the QMenuBar.actions() wrappers while resolving a top-level QMenu - temporary a.menu() wrappers GC-delete the C++ QMenu (06-05) — PySide6 wrapper lifetime: hold the QMenuBar.actions() wrappers while resolving a top-level QMenu - temporary a.menu() wrappers GC-delete the C++ QMenu (06-05)
+- [Phase 06]: curves_dialog.py's four 'LevelsDialog' docstring references reworded to 'Levels dialog' (design-lineage context kept) to honor the zero-stale-reference acceptance gate (06-05) — curves_dialog.py's four 'LevelsDialog' docstring references reworded to 'Levels dialog' (design-lineage context kept) to honor the zero-stale-reference acceptance gate (06-05)
+- [Phase 06]: The old Levels lifecycle tests fail between Task 1 (rename) and Task 2 (deletion) by design - the two-file verify is green only at Task 2 (06-05) — The old Levels lifecycle tests fail between Task 1 (rename) and Task 2 (deletion) by design - the two-file verify is green only at Task 2 (06-05)
 
 ### Roadmap Evolution
 
@@ -280,8 +285,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-10T00:28:05.291Z
-Stopped at: Completed 06-04-PLAN.md (full curve editor dialog)
+Last session: 2026-08-10T00:46:08.050Z
+Stopped at: Completed 06-05-PLAN.md (Curves landed in the MainWindow)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

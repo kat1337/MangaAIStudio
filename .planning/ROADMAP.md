@@ -269,7 +269,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 
@@ -285,7 +285,7 @@ Plans:
 
 **Wave 3** *(blocked on 06-03 + 06-04)*
 
-- [ ] 06-05-PLAN.md — MainWindow wiring: `action_curves`/`_on_curves` rename, `_apply_geometry_op("curves", geometry=False)` + b376f8a ordering, `_undo_op_label` curves, delete levels_dialog.py + migrate tests (PROJ-04)
+- [x] 06-05-PLAN.md — MainWindow wiring: `action_curves`/`_on_curves` rename, `_apply_geometry_op("curves", geometry=False)` + b376f8a ordering, `_undo_op_label` curves, delete levels_dialog.py + migrate tests (PROJ-04)
 
 ### Phase 7: Typesetting (TRAN-02): render translated text into the page
 
