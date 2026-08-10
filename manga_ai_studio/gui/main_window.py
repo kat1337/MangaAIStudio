@@ -2943,12 +2943,36 @@ class MainWindow(QMainWindow):
         share one stamp) — the op name was recorded at push time by the
         geometry apply path (``_record_geometry_op_name``). Ordinary
         single-store pops keep the Phase 3 kind-based labels.
+
+        WR-01 (06-VERIFICATION truth 26 / UI-SPEC surface 28): a geometry-free
+        op (``curves`` — D-15) pushes an IMAGE-ONLY record
+        (``push_geometry_state`` stores the full-frame patch at (0, 0) with
+        mask/boxes None), so its pop is a ONE-element list and the multi-kind
+        branch above never fires. The single-entry image branch below therefore
+        also prefers the recorded op name — but ONLY for full-frame (0, 0)
+        entries, the geometry-record shape (history_manager.py:435). An
+        ordinary bbox inpaint patch (non-origin, ``push_image_action``) keeps
+        the kind-based 'inpaint' label even while a stale geometry-op name is
+        recorded (T-06-11: the (0, 0) gate scopes the override).
+
+        Accepted limitation: after TWO consecutive image-only geometry ops,
+        the second undo labels by the LAST recorded op name (both pops are
+        single (0, 0) image entries and ``_last_geometry_op_name`` holds the
+        second op's name) — the stamp-based robust resolution is out of gap
+        scope; the code review's minimal fix is the prescribed shape.
         """
         if len(result) > 1:
             return self._undo_op_label(
                 self._last_geometry_op_name or "edit"
             )
-        kind, _value = result[0]
+        kind, value = result[0]
+        if kind == "image" and self._last_geometry_op_name is not None:
+            x, y, _patch = value
+            if (x, y) == (0, 0):
+                # Single-entry geometry record — curves pushes image-only, so
+                # the (0,0) full-frame shape identifies it; prefer the
+                # recorded op name over the kind-based 'inpaint' fallback.
+                return self._undo_op_label(self._last_geometry_op_name)
         return self._undo_op_label(kind)
 
     def _current_undo_state(self):
