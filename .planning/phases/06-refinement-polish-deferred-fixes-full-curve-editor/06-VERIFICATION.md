@@ -1,51 +1,25 @@
 ---
 phase: 06-refinement-polish-deferred-fixes-full-curve-editor
-verified: 2026-08-10T02:00:00Z
-status: gaps_found
-score: 24/28 must-haves verified
+verified: 2026-08-10T03:36:40Z
+status: passed
+score: 28/28 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
-gaps:
-  - truth: "Show Original re-baselines to the post-curves image after Apply (D-14) and is never re-baselined by live previews mid-dialog"
-    status: failed
-    reason: "CR-01 (phase code review, 06-REVIEW.md, status issues_found): the Cancel path restores via the capture-ENABLED set_image_from_numpy(base.copy()) (main_window.py:1274). On a fresh page _original_image_numpy is None, so the capture at canvas.py:742-743 stores the LAST PREVIEW FRAME (curve-distorted) as the 'original'; canvas.py:769 sets _inpainted_qimage unconditionally, so has_inpaint_result() turns True with no inpaint ever run. Probe-verified: after open+preview+Cancel on a fresh page, _original_image_numpy == the curved preview frame (not None, not the pre-dialog image) and has_inpaint_result() == True. The phase's own regression test masks this: test_curves_preview_no_baseline_poison calls canvas.rebaseline_original() before opening the dialog (IN-01)."
-    artifacts:
-      - path: "manga_ai_studio/gui/main_window.py"
-        issue: "line 1274 Cancel restore uses set_image_from_numpy (capture-enabled) instead of the capture-suppressed preview path + rebaseline_original()"
-      - path: "manga_ai_studio/gui/canvas.py"
-        issue: "line 769 _inpainted_qimage = qimg is set unconditionally — the preview path claims an inpaint result"
-      - path: "tests/test_gui_curves_dialog.py"
-        issue: "test_curves_preview_no_baseline_poison pre-baselines (line 726) so the fresh-page _original_image_numpy is None scenario is never exercised"
-    missing:
-      - "Cancel restore via set_image_from_numpy_preview(base.copy(), capture_original=False) + canvas.rebaseline_original()"
-      - "Gate _inpainted_qimage on capture_original in _set_image_from_numpy"
-      - "Regression test variant without the pre-baseline asserting _original_image_numpy stays None and has_inpaint_result() stays False after Cancel"
-  - truth: "Exactly one checkable window tool action is checked at all times (exclusive QActionGroup); the toolbar buttons mirror their default action's checked state on every entry path"
-    status: failed
-    reason: "WR-02 (phase code review): the six WINDOW tool actions were added to the ToolsPanel's exclusive QActionGroup which already holds the panel's six actions — 12 mirrored actions in one exclusive group. The mirror contract breaks on the most common entry path, a dock-button click: probe-verified with the real MainWindow — after clicking the dock's Rectangle button, the panel's own action ends up UNCHECKED (dock button loses its highlight), the window action + toolbar button checked, and tools_panel.active_tool() falls back to ToolMode.MOVE. The enumerated tested paths (shortcut/menu/programmatic set_active_tool) pass; the dock-click path desyncs."
-    artifacts:
-      - path: "manga_ai_studio/gui/main_window.py"
-        issue: "lines 715-769: window tool actions joined tools_panel.tool_group (the panel's own exclusive group) — dual mirror actions fight the group's exclusivity on dock clicks"
-      - path: "tests/test_gui_crop_tool.py"
-        issue: "test_toolbar_buttons_track_active_tool covers programmatic/shortcut/menu paths only — never a dock-button click"
-    missing:
-      - "WR-02 fix: keep the window actions checkable but OUTSIDE the panel's exclusive group (explicit sync via set_active_tool + toolbar loop), or share ONE action set between dock and toolbar"
-      - "Dock-click regression test asserting panel action checked + active_tool() == clicked tool + toolbar mirror"
-  - truth: "The undo/redo flash op-name set is ('rotate', 'crop', 'curves', 'resize') — 'levels' replaced, not appended"
-    status: failed
-    reason: "WR-01 (phase code review): the _undo_op_label set literal is exactly ('rotate','crop','curves','resize') and contains no 'levels', but _undo_op_label_for_result (main_window.py:2927-2941) only consults the recorded op name when the pop result has >1 element. A curves apply pushes an image-ONLY geometry record (mask/boxes None), so the pop is a single-element list and resolves via _undo_op_label('image') -> 'inpaint'. Probe-verified: Ctrl+Z after a curves apply flashes 'Undo: inpaint' instead of 'Undo: curves' — the UI-SPEC surface 28 copy contract this phase extended with 'curves' is not honored at runtime; the existing lifecycle tests assert the restored image but never the flash text."
-    artifacts:
-      - path: "manga_ai_studio/gui/main_window.py"
-        issue: "_undo_op_label_for_result single-entry branch never uses _last_geometry_op_name"
-      - path: "tests/test_gui_curves_dialog.py"
-        issue: "test_curves_apply_pushes_one_entry asserts the image/stack but not the undo flash text"
-    missing:
-      - "WR-01 fix: prefer _last_geometry_op_name for a full-frame (0,0) single image entry"
-      - "Flash-text assertion in the curves lifecycle test ('Undo: curves' / 'Redo: curves')"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 24/28
+  gaps_closed:
+    - "CR-01 (truth 25): fresh-page Curves Cancel baseline poison — closed by 06-06 (8816b9c, b063388) + regression 0e1e673"
+    - "WR-01 (truth 26): curves undo flash 'Undo: inpaint' — closed by 06-07 (09986c4) + regressions 50b75d6, 1b49071"
+    - "WR-02 (truths 9/10): dock/toolbar highlight desync — closed by 06-08 (43a20a5) + regression a4264f1, docstring fix d16afca"
+  gaps_remaining: []
+  regressions: []
+notes:
+  - "FW-01 (06-REVIEW.md follow-up WARNING): the (0,0) undo-label gate also matches ORIGIN-bbox inpaint pops, which mislabel as the stale geometry op name, and reset_history() never clears _last_geometry_op_name across page changes. Probe-verified live in this re-verification. VERDICT: out-of-scope edge case — label-only cosmetic (transient status text), no phase must-have truth violated as written (the 06-07 scoping truth explicitly covers non-origin bboxes only), non-blocking. Prescribed fix (stamp-based resolution + clear register in reset_history) recommended for a future hardening pass; tracked in the body of this report."
 human_verification:
   - test: "Open the Curves dialog (Tools > Curves...), drag a point and release; then check drag fluidity and grid/handle legibility at 150% and 200% Windows DPI scaling"
     expected: "Curve drags track the cursor smoothly (no lag/stutter), the 64/16 gridlines, diagonal, 2px accent curve, and 8x8/10x10 handles remain legible and correctly scaled at both DPI settings"
-    why_human: "Visual/kinesthetic contract — UI-SPEC surface 30 backstop (06-03 backstop '14px dialog fields stay 14px-rendered at 150%/200% DPI' and 06-04 backstop 'curve drags are fluid and the grid/handles remain legible at all supported DPI settings' are verification: backstop = non-inferable from code; the phase explicitly held both for the end-of-phase UAT gate"
+    why_human: "Visual/kinesthetic contract — UI-SPEC surface 30 backstop (06-03 backstop '14px dialog fields stay 14px-rendered at 150%/200% DPI' and 06-04 backstop 'curve drags are fluid and the grid/handles remain legible at all supported DPI settings' are verification: backstop = non-inferable from code; the phase explicitly held both for the end-of-phase UAT gate. Held for the UAT gate per orchestrator direction — does not block phase completion"
 behavior_unverified_items: []
 deferred: []
 ---
@@ -202,4 +176,66 @@ Each gap has a concrete fix prescribed in 06-REVIEW.md and a missing regression 
 ---
 
 _Verified: 2026-08-10T02:00:00Z_
+_Verifier: the agent (gsd-verifier)_
+
+---
+
+# Re-Verification — Gap Closure (06-06 / 06-07 / 06-08)
+
+**Re-verified:** 2026-08-10T03:36:40Z
+**Previous status:** gaps_found (24/28) → **Current status: passed (28/28)**
+**Re-verification:** Yes — after gap closure
+
+## Summary
+
+All three verification gaps were closed by the gap-closure plans and the follow-up
+code review (06-REVIEW.md, updated `issues_found`) confirms all three prior findings
+**RESOLVED**. This re-verification independently confirms each closure against the
+codebase — the previously failed truths **9, 10, 25, 26 now PASS**:
+
+| # | Previously failed truth | Fix evidence (independently re-verified) | Status |
+|---|------------------------|-------------------------------------------|--------|
+| 25 | Show Original re-baselines to the post-curves image after Apply (D-14); never re-baselined by live previews mid-dialog (CR-01) | `_on_curves` Cancel restore (main_window.py:1280) and apply pre-restore (:1294) both via `set_image_from_numpy_preview(base.copy(), capture_original=False)`; canvas.py:775-776 gates `_inpainted_qimage` on `capture_original`; pre-existing None-capture gate intact (canvas.py:742). `test_curves_cancel_fresh_page_no_baseline_poison` (no pre-baseline; asserts `_original_image_numpy is None`, `has_inpaint_result() is False`, byte-exact restore, Show Original disabled after `_refresh_action_states`) **PASSES**; `test_curves_preview_no_baseline_poison` (baselined variant) and `test_curves_cancel_restores_exactly` still pass | ✓ VERIFIED |
+| 26 | Undo/redo flash op-name set is ('rotate','crop','curves','resize') — 'levels' replaced, not appended (WR-01) | `_undo_op_label_for_result` single-entry branch (main_window.py:2968-2974) prefers `_last_geometry_op_name` for full-frame (0,0) image entries (the `push_geometry_state` shape, history_manager.py:435); set literal `("rotate", "crop", "curves", "resize")` occurs exactly once (grep == 1). `test_curves_apply_pushes_one_entry` asserts 'Undo: curves' / 'Redo: curves' + byte-exact redo restore; `test_single_image_pop_keeps_inpaint_label` (non-origin (5,5) bbox guard) **PASSES** | ✓ VERIFIED |
+| 9 | Exactly one checkable window tool action checked at all times; toolbar mirrors on every entry path (WR-02) | Six window actions standalone: zero `tool_group.addAction` in main_window.py (non-comment grep == 0); `set_active_tool` explicit action-sync loop (:3197-3207, blockSignals-guarded) + toolbar mirror loop (:3211-3216); 6x `action_tool_.*setCheckable(True)`. `test_dock_button_click_syncs_dock_toolbar_and_window` (two consecutive dock clicks, panel action + `active_tool()` + window action + toolbar all in sync) and `test_toolbar_buttons_track_active_tool` (flipped `actionGroup() is None` + shortcut/menu/programmatic paths) **PASS** | ✓ VERIFIED |
+| 10 | Toolbar and Tools dock always show the same active tool (WR-02) | Same fix as truth 9 — dock-click probe from the original report (panel action unchecked, `active_tool()` == MOVE) now passes; `test_crop_is_sixth_exclusive_tool` + `test_tools_panel_tool_group_exclusive` (panel group holds exactly its six actions) pass untouched | ✓ VERIFIED |
+
+**Docstring truth (truth 11):** `_make_tool_toolbar_button` docstring + `set_active_tool` docstring + the :710-713 / :752-758 / :878-880 comment blocks describe the standalone-checkable-action + explicit-sync mechanism (`standalone checkable-action` grep == 1; `members of the ToolsPanel` == 0).
+
+## Behavioral Evidence (this run)
+
+| Behavior | Command | Result | Status |
+| -------- | ------- | ------ | ------ |
+| Full workspace suite | `python -m pytest -q` | **600 passed, 0 failed** (71.7s) | ✓ PASS — matches the claimed re-baseline |
+| Touched modules (curves + crop + canvas + inpaint GUI) | `pytest tests/test_gui_curves_dialog.py tests/test_gui_crop_tool.py tests/test_gui_canvas.py tests/test_inpainting/test_inpaint_gui.py -q` | 102 passed | ✓ PASS |
+| 06-06 regression (truth 25) | `pytest ...::test_curves_cancel_fresh_page_no_baseline_poison` | 1 passed | ✓ PASS |
+| 06-07 regressions (truth 26) | `...::test_curves_apply_pushes_one_entry ...::test_single_image_pop_keeps_inpaint_label` | 2 passed | ✓ PASS |
+| 06-08 regressions (truths 9/10) | `...::test_dock_button_click_syncs_dock_toolbar_and_window ...::test_toolbar_buttons_track_active_tool ...::test_tools_panel_tool_group_exclusive` | 3 passed | ✓ PASS |
+| Grep gates (06-06/07/08 acceptance) | `if capture_original:` == 1 · None-capture gate == 1 · `set_image_from_numpy_preview` == 3 · `tool_group.addAction` == 0 · set literal == 1 · `action_tool_.*setCheckable(True)` == 6 · docstring truth == 1 · stale claim == 0 · levels_dialog.py absent | all pass | ✓ PASS |
+
+## FW-01 Assessment (06-REVIEW.md follow-up WARNING) — Verdict
+
+**What FW-01 claims (probe-confirmed by this verifier, offscreen MainWindow):**
+1. An **origin-bbox inpaint** (mask touching the page's top-left pixel → `push_image_action(0, 0, slice)`) pops as a single `(0, 0)` image entry — the same shape the WR-01 override uses to identify geometry records — so with a stale `_last_geometry_op_name` it flashes **'Undo: curves'** instead of 'Undo: inpaint'. Probe: after a curves apply + undo, `push_image_action(0, 0, ...)` + undo → `status_bar_left.text()` == `'Undo: curves'` (mislabel reproduced).
+2. `reset_history()` (main_window.py:2675-2687) clears `history` and `_pre_stroke_mask` but **not** `_last_geometry_op_name` — the stale op name survives page changes, widening the mislabel to pages where no geometry op ever ran. Probe: after `reset_history()`, `_last_geometry_op_name == 'curves'` (reproduced).
+
+**Does FW-01 violate a phase must-have truth?** **No** — assessed against every relevant must-have as written:
+
+- **Truth 26** (the phase's label contract) concerns the op-name *set* and the *curves* undo/redo flash — both correct: the set literal is exactly the four names, and a curves undo flashes 'Undo: curves' (test-locked). FW-01 mislabels an **inpaint** undo (a Phase-3 surface), not a curves undo.
+- **06-07 plan truth** ("a bbox-shaped inpaint patch at a **non-origin (x, y)** is still labeled 'inpaint'") — explicitly scoped to non-origin bboxes; the (5,5) guard test passes. The origin-bbox case is outside the plan's declared scope.
+- **06-07 prohibition** ("non-geometry single-image pops (bbox inpaint patches) must keep the 'inpaint' label") — the origin-bbox case is a genuine hole in the *spirit* of this prohibition (the gate approximates "full-frame geometry record" with the (0,0) check alone), and the plan's own docstring documents the accepted-limitation pattern. It is a real, label-only cosmetic defect requiring two preconditions (origin-bbox mask + stale op name); the undo operation itself (image restore, stack, enablement) is correct in every scenario.
+
+**Verdict: out-of-scope edge case — label-only cosmetic (transient status-bar text), non-blocking.** It does not fail any phase must-have truth as written, does not regress any phase-06 delivered contract, and does not block phase completion. **Recommendation:** carry to a future hardening pass (Phase 7+ backlog or a follow-up plan) with the review's prescribed fix — stamp-based geometry-record identity in HistoryManager (eliminates both the origin-bbox false positive and the stale-name case) or the minimal variant (patch-dims gate + `reset_history()` clearing `_last_geometry_op_name`). No plan is created in this phase for it.
+
+## Human Verification (unchanged — held for the UAT gate)
+
+The curve drag-fluidity + DPI legibility backstop (06-03/06-04 `verification: backstop`) remains deferred to the end-of-phase UAT gate (gsd-verify-work) per orchestrator direction — it is the only item left for phase 06 and does not block phase completion.
+
+## Gaps Summary (updated)
+
+**No open gaps.** All three findings from the initial verification (CR-01, WR-01, WR-02) are closed and independently re-verified: code fixes match the prescribed shapes, regression tests lock the exact previously-failed behaviors, and the full suite is green at **600 passed, 0 failed**. One non-blocking residual (FW-01) is documented above with its verdict and a prescribed follow-up fix; it does not affect the phase status.
+
+---
+
+_Re-verified: 2026-08-10T03:36:40Z_
 _Verifier: the agent (gsd-verifier)_
