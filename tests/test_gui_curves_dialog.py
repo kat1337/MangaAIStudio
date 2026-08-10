@@ -728,6 +728,50 @@ def test_curves_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
+def test_single_image_pop_keeps_inpaint_label(qtbot, tmp_path, monkeypatch) -> None:
+    """WR-01 scope: a non-origin bbox image pop keeps the 'inpaint' label.
+
+    The (0, 0) full-frame gate scopes the recorded-op-name override to
+    geometry records (T-06-11). Drive a REAL curves Apply (which leaves
+    ``_last_geometry_op_name == 'curves'``), undo it, then push an ordinary
+    bbox-shaped inpaint entry through the REAL HistoryManager at a NON-origin
+    position — the next undo must flash 'Undo: inpaint' despite the stale
+    geometry op name, and the stack must be empty after the pop.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+
+    def _fake_exec(dlg):
+        dlg.curve_widget._points = list(BRIGHTEN)
+        dlg._refresh()
+        dlg.result_values = (
+            list(dlg._channel_points["RGB"]),
+            {ch: list(pts) for ch, pts in dlg._channel_points.items()},
+        )
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CurvesDialog, "exec", _fake_exec)
+    window._on_curves()
+    QApplication.processEvents()
+
+    # The curves apply recorded the op name; undo it — 'Undo: curves'
+    # (Task 1 locked this). _last_geometry_op_name is now STALE == 'curves'.
+    window.on_undo()
+    QApplication.processEvents()
+    assert "Undo: curves" in window.status_bar_left.text()
+
+    # An ordinary bbox inpaint entry at a NON-origin position, pushed through
+    # the real HistoryManager (the shape a real inpaint push uses).
+    window.history.push_image_action(5, 5, np.zeros((10, 10, 3), dtype=np.uint8))
+    window.on_undo()
+    QApplication.processEvents()
+
+    # The (0, 0) gate keeps bbox-shaped inpaint undos mislabel-free even with
+    # a stale geometry op name; the single entry was consumed.
+    assert "Undo: inpaint" in window.status_bar_left.text()
+    assert not window.history.can_undo()
+
+
+@pytest.mark.gui
 def test_curves_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None:
     """The live preview never re-baselines Show Original (Pitfall 5/9).
 
