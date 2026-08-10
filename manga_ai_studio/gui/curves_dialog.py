@@ -434,6 +434,27 @@ class CurvesDialog(QDialog):
         self._gamma_syncing = False
         self._selected = 0
         self._current_channel = "RGB"
+        # D-08: per-channel histograms computed ONCE at open from a detached
+        # copy of the page image (Pitfall 2/5) — never recomputed while
+        # editing. Master = luminance, R/G/B = the plane (A7).
+        self._histograms: dict[str, np.ndarray | None] = {
+            ch: None for ch in self.CHANNELS
+        }
+        if page_image is not None:
+            hist_src = page_image.copy()
+            lum = (
+                0.299 * hist_src[..., 0].astype(np.float64)
+                + 0.587 * hist_src[..., 1].astype(np.float64)
+                + 0.114 * hist_src[..., 2].astype(np.float64)
+            )
+            self._histograms["RGB"] = np.histogram(
+                lum, bins=256, range=(0, 256)
+            )[0].astype(np.float64)
+            for ch, idx in (("R", 0), ("G", 1), ("B", 2)):
+                plane = hist_src[..., idx].astype(np.float64)
+                self._histograms[ch] = np.histogram(
+                    plane, bins=256, range=(0, 256)
+                )[0].astype(np.float64)
         # Per-channel point sets — the CurveWidget edits the current
         # channel's list by reference (D-06 channel independence).
         self._channel_points: dict[str, list[tuple[int, int]]] = {
@@ -508,6 +529,7 @@ class CurvesDialog(QDialog):
         # Hand the widget the CURRENT channel's list by reference — widget
         # edits land directly in _channel_points (single source of truth).
         self.curve_widget._points = self._channel_points[self._current_channel]
+        self.curve_widget._histogram = self._histograms[self._current_channel]
         root.addWidget(self.curve_widget, 1)
 
         # ---- gamma + In/Out rows (below the grid) ------------------------
@@ -565,6 +587,17 @@ class CurvesDialog(QDialog):
         # The widget's curve edits + selection changes -> the shared refresh.
         self.curve_widget.points_changed.connect(self._refresh)
         self.curve_widget.point_selected.connect(self._on_point_selected)
+
+        # Presets (D-05): one click replaces the CURRENT channel's points
+        # with the preset's starting points — fully editable afterwards.
+        for name in self.PRESETS:
+            self.preset_buttons[name].clicked.connect(
+                lambda checked=False, n=name: self._apply_preset(n)
+            )
+
+        # Channel switcher (D-06): exclusive checkable QToolButtons; the
+        # clicked channel's points + histogram load into the widget.
+        self.channel_group.buttonClicked.connect(self._on_channel_clicked)
 
         # Apply the initial state once: clamps + preview with the defaults.
         self._refresh()
@@ -651,6 +684,37 @@ class CurvesDialog(QDialog):
     def _on_point_selected(self, index: int) -> None:
         """The widget's selection change re-targets the In/Out spins."""
         self._selected = index
+        self._refresh()
+
+    def _apply_preset(self, name: str) -> None:
+        """Replace the current channel's points with the preset (D-05).
+
+        Presets are starting points, never locked: the applied points stay
+        fully editable (draggable/deletable). The selection resets to the
+        left endpoint; ``_refresh`` + preview fire afterwards.
+        """
+        self._channel_points[self._current_channel] = list(self.PRESETS[name])
+        self.curve_widget._points = self._channel_points[self._current_channel]
+        self._selected = 0
+        self.curve_widget._selected = 0
+        self._refresh()
+
+    def _on_channel_clicked(self, button) -> None:
+        """Load the clicked channel's points + histogram (D-06/D-08).
+
+        Per-channel state is preserved in ``_channel_points`` (each channel
+        edits an independent point set); the histogram switches to the
+        matching precomputed array (never recomputed — D-08).
+        """
+        name = button.text()
+        if name not in self._channel_points:
+            return
+        self._current_channel = name
+        self.curve_widget._points = self._channel_points[name]
+        self.curve_widget._histogram = self._histograms.get(name)
+        self._selected = min(self._selected, len(self._channel_points[name]) - 1)
+        self.curve_widget._selected = self._selected
+        self.curve_widget.update()
         self._refresh()
 
     # ---------------------------------------------------------------- driver

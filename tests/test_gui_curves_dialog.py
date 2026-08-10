@@ -397,3 +397,133 @@ def test_preview_fires_on_control_changes(qtbot) -> None:
     for payload in calls:
         assert payload.shape == img.shape
         assert payload.dtype == np.uint8
+
+
+# ===========================================================================
+# Task 3 — presets, channel switcher, histogram, preview composition driver
+# ===========================================================================
+
+@pytest.mark.gui
+def test_preset_replaces_points_and_stays_editable(qtbot) -> None:
+    """A preset click replaces the current channel's points (D-05/A2)."""
+    dlg = _make_dialog(qtbot)
+    QTest.mouseClick(dlg.preset_buttons["S-curve"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == S_CURVE
+    assert dlg._channel_points["RGB"] == S_CURVE
+    # Presets are editable starting points: a real drag moves the point.
+    _drag_to(dlg.curve_widget, (64, 40), (64, 90))
+    assert dlg.curve_widget._points[1] == (64, 90)
+    # Linear restores the pure diagonal.
+    QTest.mouseClick(dlg.preset_buttons["Linear"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == [(0, 0), (255, 255)]
+    QTest.mouseClick(dlg.preset_buttons["Brighten"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == BRIGHTEN
+    QTest.mouseClick(dlg.preset_buttons["Darken"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == DARKEN
+
+
+@pytest.mark.gui
+def test_channel_switcher_preserves_per_channel_edits(qtbot) -> None:
+    """Channels edit independent point sets; switching preserves them."""
+    dlg = _make_dialog(qtbot)
+    QTest.mouseClick(dlg.channel_buttons["R"], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(dlg.preset_buttons["S-curve"], Qt.MouseButton.LeftButton)
+    assert dlg._current_channel == "R"
+    assert dlg.curve_widget._points == S_CURVE
+    QTest.mouseClick(dlg.channel_buttons["G"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == [(0, 0), (255, 255)]  # G untouched
+    QTest.mouseClick(dlg.channel_buttons["R"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == S_CURVE  # R preserved
+    QTest.mouseClick(dlg.channel_buttons["RGB"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._points == [(0, 0), (255, 255)]  # master untouched
+
+
+@pytest.mark.gui
+def test_histogram_computed_once_at_open(qtbot) -> None:
+    """D-08: the histogram is computed ONCE; editing never recomputes."""
+    img = _make_image()
+    dlg = _make_dialog(qtbot, img=img)
+    assert dlg._histograms["RGB"] is not None
+    assert dlg._histograms["R"] is not None
+    stored = dlg._histograms["RGB"]
+    assert stored.shape == (256,)
+    assert dlg.curve_widget._histogram is stored
+    # Editing (point drag + slider + gamma) leaves the stored array intact.
+    dlg.curve_widget._points = list(S_CURVE)
+    dlg._refresh()
+    dlg.black_spin.setValue(50)
+    dlg.gamma_spin.setValue(1.5)
+    assert dlg._histograms["RGB"] is stored
+    assert np.array_equal(dlg._histograms["RGB"], stored)
+    # No page image -> histogram unset (the widget paints without it).
+    dlg2 = _make_dialog(qtbot)
+    assert dlg2._histograms["RGB"] is None
+    assert dlg2.curve_widget._histogram is None
+
+
+@pytest.mark.gui
+def test_channel_switch_updates_widget_histogram(qtbot) -> None:
+    """Channel switch loads the matching precomputed histogram (A7)."""
+    img = _make_image()
+    dlg = _make_dialog(qtbot, img=img)
+    assert dlg.curve_widget._histogram is dlg._histograms["RGB"]
+    QTest.mouseClick(dlg.channel_buttons["B"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._histogram is dlg._histograms["B"]
+    QTest.mouseClick(dlg.channel_buttons["RGB"], Qt.MouseButton.LeftButton)
+    assert dlg.curve_widget._histogram is dlg._histograms["RGB"]
+
+
+@pytest.mark.gui
+def test_preview_byte_exact_vs_curves_page(qtbot) -> None:
+    """The preview payload is byte-exact curves_page composition (A1)."""
+    img = _make_image()
+    calls: list = []
+    dlg = _make_dialog(qtbot, img=img, callback=calls.append)
+    dlg.curve_widget._points = list(S_CURVE)  # master S-curve
+    dlg._channel_points["R"] = list(BRIGHTEN)  # R channel brighten
+    dlg._refresh()
+    expected = curves_page(
+        img,
+        list(S_CURVE),
+        {"R": list(BRIGHTEN), "G": [(0, 0), (255, 255)], "B": [(0, 0), (255, 255)]},
+    )
+    assert np.array_equal(calls[-1], expected)
+
+
+@pytest.mark.gui
+def test_preset_and_channel_copy_verbatim(qtbot) -> None:
+    """UI-SPEC surface 30 copy strings match verbatim (D-05/D-06)."""
+    dlg = _make_dialog(qtbot)
+    expected_tooltips = {
+        "Linear": "Reset the curve to a straight line.",
+        "S-curve": "Add contrast — classic S-curve.",
+        "Brighten": "Brighten midtones.",
+        "Darken": "Darken midtones.",
+    }
+    for name, tip in expected_tooltips.items():
+        assert dlg.preset_buttons[name].toolTip() == tip
+    for name in ("RGB", "R", "G", "B"):
+        assert dlg.channel_buttons[name].text() == name
+    assert dlg.channel_group.exclusive()
+
+
+@pytest.mark.gui
+def test_refresh_is_single_preview_driver(qtbot) -> None:
+    """Every control path funnels into _refresh; no other call sites."""
+    img = _make_image()
+    calls: list = []
+    dlg = _make_dialog(qtbot, img=img, callback=calls.append)
+    baseline = len(calls)
+    dlg.black_spin.setValue(40)
+    dlg.gamma_spin.setValue(1.4)
+    QTest.mouseClick(dlg.preset_buttons["Darken"], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(dlg.channel_buttons["R"], Qt.MouseButton.LeftButton)
+    assert len(calls) > baseline
+    for payload in calls:
+        assert payload.shape == img.shape
+        assert payload.dtype == np.uint8
+    import inspect
+
+    src = inspect.getsource(CurvesDialog)
+    # Only _preview calls the callback (its single call site in the file).
+    assert src.count("preview_callback(") == 1
