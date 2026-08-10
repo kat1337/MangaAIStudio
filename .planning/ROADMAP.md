@@ -269,7 +269,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 5/5 plans executed
+**Plans:** 5/5 plans executed + 3 gap-closure plans (06-06..08)
 
 Plans:
 
@@ -286,6 +286,12 @@ Plans:
 **Wave 3** *(blocked on 06-03 + 06-04)*
 
 - [x] 06-05-PLAN.md — MainWindow wiring: `action_curves`/`_on_curves` rename, `_apply_geometry_op("curves", geometry=False)` + b376f8a ordering, `_undo_op_label` curves, delete levels_dialog.py + migrate tests (PROJ-04)
+
+**Gap-closure waves** (verification gaps CR-01/WR-01/WR-02 — run via `/gsd-execute-phase 6 --gaps-only`)
+
+- [ ] 06-06-PLAN.md — *(Wave 1)* CR-01: fresh-page Cancel no longer poisons the Show Original baseline (capture-suppressed restores + `_inpainted_qimage` gate + no-pre-baseline regression test) — PROJ-04
+- [ ] 06-07-PLAN.md — *(Wave 2, blocked on 06-06)* WR-01: curves undo flashes 'Undo: curves'/'Redo: curves' (single-entry `_undo_op_label_for_result` op-name override + flash assertions + scoping guard) — PROJ-04
+- [ ] 06-08-PLAN.md — *(Wave 3, blocked on 06-07)* WR-02: dock tool-button clicks sync dock/toolbar (window actions out of the panel's exclusive group + explicit set_active_tool sync + dock-click regression test) — PROJ-04
 
 ### Phase 7: Typesetting (TRAN-02): render translated text into the page
 
