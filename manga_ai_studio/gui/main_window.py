@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
         # don't conflict with the ToolsPanel's own action shortcuts.
         # Each action's data() carries its ToolMode for toolbar-button sync.
         # D-10 (WR-02): the actions are CHECKABLE but STANDALONE — deliberately
-        # NOT members of the ToolsPanel's exclusive QActionGroup (a 12-action
+        # outside the ToolsPanel's exclusive QActionGroup (a 12-action
         # mirrored group fought itself on dock clicks). set_active_tool's
         # action-sync loop drives their checked state explicitly, and the
         # toolbar buttons mirror their default actions, so the toolbar stays
@@ -3159,7 +3159,7 @@ class MainWindow(QMainWindow):
 
         The button's checked state mirrors its DEFAULT ACTION (QToolButton
         syncs its checkability to the action): the six window tool actions
-        are standalone checkable-actions — NOT members of the ToolsPanel's
+        are standalone checkable-actions — outside the ToolsPanel's
         exclusive QActionGroup — whose checked state is driven explicitly by
         ``set_active_tool``'s action-sync loop (check the matching action,
         uncheck the other five), so the toolbar stays in sync with the Tools
@@ -3180,7 +3180,7 @@ class MainWindow(QMainWindow):
         all three (UI-SPEC surface 6).
 
         The six WINDOW tool actions (``action_tool_*``) are standalone
-        checkable actions — deliberately NOT members of the ToolsPanel's
+        checkable actions — deliberately outside the ToolsPanel's
         exclusive QActionGroup (WR-02: a 12-action mirrored group fought
         itself on dock clicks). Their checked state is driven explicitly:
         check the matching action and uncheck the other five, with signals
