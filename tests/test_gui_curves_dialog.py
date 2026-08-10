@@ -712,6 +712,20 @@ def test_curves_apply_pushes_one_entry(qtbot, tmp_path, monkeypatch) -> None:
     # The single geometry entry was consumed: the stack is empty again.
     assert not window.history.can_undo()
 
+    # WR-01 (06-VERIFICATION truth 26 / UI-SPEC surface 28): the undo flash
+    # must name the op the user actually undid — 'curves', never the kind
+    # fallback 'inpaint'. A curves apply pushes an image-ONLY geometry record
+    # (D-15), so its pop is a SINGLE-element list and the multi-kind branch of
+    # _undo_op_label_for_result never fires — the recorded op name must be
+    # consulted for the single-entry (0, 0) geometry-record shape.
+    assert "Undo: curves" in window.status_bar_left.text()
+
+    # Redo restores the post-op image byte-exact and flashes the op name.
+    window.on_redo()
+    QApplication.processEvents()
+    assert np.array_equal(window.canvas.get_image_numpy(), expected)
+    assert "Redo: curves" in window.status_bar_left.text()
+
 
 @pytest.mark.gui
 def test_curves_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None:
