@@ -269,7 +269,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 7/8 plans executed
+**Plans:** 8/8 plans complete
 
 Plans:
 
