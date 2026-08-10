@@ -766,7 +766,14 @@ class EditorCanvas(QGraphicsView):
         self.image_item.setPixmap(QPixmap.fromImage(qimg))
         if (w, h) != (self.sceneRect().width(), self.sceneRect().height()):
             self.setSceneRect(QRectF(0, 0, w, h))
-        self._inpainted_qimage = qimg
+        # The inpaint-result claim is gated on capture_original (CR-01,
+        # T-06-10): the capture-suppressed preview path can never claim an
+        # inpaint result, so has_inpaint_result() stays False through the
+        # whole dialog preview+cancel lifecycle on a fresh page. The
+        # capture-enabled callers (inpaint result display, geometry-op
+        # write-back, project page display) keep the claim.
+        if capture_original:
+            self._inpainted_qimage = qimg
         # D-09 (deferred from 05-UAT/05-UI-REVIEW): the numpy display path is
         # the ONLY image display path that missed the empty-state refresh, so
         # the z=2000 "No page open" trio stayed rendered over a loaded page

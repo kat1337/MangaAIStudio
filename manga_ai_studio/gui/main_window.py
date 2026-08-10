@@ -1270,8 +1270,15 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             # Cancel: restore the pre-dialog image exactly — silently (no
-            # undo entry, no status flash — UI-SPEC surface 30).
-            self.canvas.set_image_from_numpy(base.copy())
+            # undo entry, no status flash — UI-SPEC surface 30). The restore
+            # is capture-suppressed (CR-01, T-06-09): on a fresh page the
+            # baseline is absent (_original_image_numpy is None — the
+            # folder-load state), so a capture-enabled restore would store
+            # the LAST PREVIEW FRAME as the Show Original baseline and claim
+            # an inpaint result. No rebaseline_original() here either — the
+            # honest D-14 baseline is established exclusively by
+            # _apply_geometry_op's tail rebaseline on Apply.
+            self.canvas.set_image_from_numpy_preview(base.copy(), capture_original=False)
             return
         master, channels = dialog.result_values
 
