@@ -149,3 +149,12 @@ None - no external service configuration required.
 ---
 *Phase: 06-refinement-polish-deferred-fixes-full-curve-editor*
 *Completed: 2026-08-09*
+
+## Self-Check: PASSED
+
+- FOUND: `.planning/phases/06-refinement-polish-deferred-fixes-full-curve-editor/06-08-SUMMARY.md`
+- FOUND: `a4264f1` test(06-08): dock-button click sync regression (RED)
+- FOUND: `43a20a5` feat(06-08): ungroup window tool actions + explicit sync loop
+- FOUND: `d16afca` fix(06-08): docstring gate compliance — no stale group-membership claim
+- FOUND: `756e88a` docs(06-08): complete WR-02 dock/toolbar active-tool desync closure plan
+- Full suite: 600 passed, 0 failed (run post-fix)

@@ -4,16 +4,16 @@ milestone: v1.1
 milestone_name: milestone
 current_phase: 06
 current_phase_name: refinement-polish-deferred-fixes-full-curve-editor
-status: executing
-stopped_at: Completed 06-07-PLAN.md (WR-01 undo/redo flash labels closed)
-last_updated: "2026-08-10T03:00:49.863Z"
+status: verifying
+stopped_at: Completed 06-08-PLAN.md (WR-02 dock/toolbar active-tool desync closed)
+last_updated: "2026-08-10T03:16:12.886Z"
 last_activity: 2026-08-09
 last_activity_desc: Phase 06 execution started
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 47
-  completed_plans: 46
+  completed_plans: 47
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 Phase: 06 (refinement-polish-deferred-fixes-full-curve-editor) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-09 — Phase 06 execution started
 
-Progress: [██████████] 98% (4/4 phases, 29/29 plans)
+Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -114,6 +114,7 @@ Progress: [██████████] 98% (4/4 phases, 29/29 plans)
 | Phase 06 P05 | 25 | 2 tasks | 5 files |
 | Phase 06 P06 | 14 | 2 tasks | 3 files |
 | Phase 06 P07 | 6 min | 2 tasks | 2 files |
+| Phase 06 P08 | 11 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -259,6 +260,8 @@ Recent decisions affecting current work:
 - [Phase ?]: Cancel restore does NOT call canvas.rebaseline_original() (deliberate deviation from the review's '+ rebaseline_original()' suggestion): VERIFICATION truth 25 prescribes _original_image_numpy STAYS None on fresh pages, and a rebaseline on Cancel would clobber a legitimate pre-inpaint baseline on an already-baselined page. The honest D-14 baseline is established exclusively by _apply_geometry_op's tail rebaseline on Apply.
 - [Phase ?]: IN-03 (Cancel leaves stale action enablement) needs no separate fix - moot: the canvas gate keeps _inpainted_qimage None through the whole preview+cancel lifecycle, so _refresh_action_states' has_inpaint gating is correct on every path (proven by Task 1 assertion (d)).
 - [Phase 06]: WR-01 fix: the (0,0) full-frame gate, not recorded-name presence, scopes the op-name override — push_geometry_state stores geometry records as (0, 0, patch) (history_manager.py:435), so (x, y) == (0, 0) identifies the geometry-record shape; a stale _last_geometry_op_name must never leak into ordinary bbox inpaint undos — Single-entry image pops are ambiguous between a curves pop and an inpaint pop; the patch origin is the only reliable discriminator
+- [Phase 06]: Ungroup, don't re-wire: the window actions keep their triggered->set_active_tool connections and stay checkable; the group-membership lines are removed and set_active_tool gains an explicit window-action sync loop BEFORE the existing toolbar loop - the group's exclusivity is no longer load-bearing for the toolbar — WR-02 fix: a 12-action mirrored exclusive group fought itself on dock clicks; the panel group holds exactly its own six actions, and set_active_tool drives the window actions explicitly
+- [Phase 06]: No toggled connections on window actions (RESEARCH Pitfall 1): the panel already connects toggled at tools_panel.py:150; a double connection would double-emit tool_changed — Preserves the single tool_changed emission per selection across all entry paths
 
 ### Roadmap Evolution
 
@@ -290,8 +293,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-10T03:00:33.641Z
-Stopped at: Completed 06-07-PLAN.md (WR-01 undo/redo flash labels closed)
+Last session: 2026-08-10T03:15:40.258Z
+Stopped at: Completed 06-08-PLAN.md (WR-02 dock/toolbar active-tool desync closed)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
