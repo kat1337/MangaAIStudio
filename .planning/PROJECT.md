@@ -16,6 +16,7 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - [x] Edit masks: brush paint/erase masks, fix auto-detect errors (missed sfx, false positives), set per-region LaMa params, preview mask overlay before committing — *Validated in Phase 1: Cleaning Workspace*
 - [x] Export cleaned raws as PNG/JPG — *Validated in Phase 2: Cleaning Output & Batch (single-page Export via Ctrl+E)*
 - [x] Dual-mode workflow: batch-process a whole chapter (clean + OCR), then open individual pages for per-page fixes, flipping freely — *Cleaning half validated in Phase 2 (Batch Detect / Batch Clean / Batch Detect+Clean + per-page mask persistence); OCR half pending later phases*
+- [x] Basic image operations: crop, rotate, levels/curves, resize — *Validated in Phase 5 (crop/rotate/levels/resize) + Phase 6 (full curve editor replacing the Levels dialog, PROJ-04)*
 
 ### Active
 
@@ -23,7 +24,6 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - [ ] Manual OCR: draw a rectangle on the page and run MangaOCR on just that region to fill a box the detector missed
 - [ ] Edit recognized text: correct OCR mistakes by typing into the box
 - [ ] Translation layer: add a manual translation as a second text layer per box (clean seam for future MT integration)
-- [ ] Basic image operations: crop, rotate, levels/curves, resize
 - [ ] Save/load projects as `.mas` files (boxes, masks, text, image state — resumable like a .psd)
 - [ ] Export OCR/box JSON (mokuro-style `_ocr.json`) alongside pages for downstream tools
 
@@ -106,4 +106,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-26 after Phase 2 (Cleaning Output & Batch) completion*
+*Last updated: 2026-08-09 after Phase 6 (Refinement & Polish) completion*
