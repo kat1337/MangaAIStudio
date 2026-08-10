@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: refinement-polish-deferred-fixes-full-curve-editor
 status: executing
-stopped_at: Completed 06-05-PLAN.md (Curves landed in the MainWindow)
-last_updated: "2026-08-10T02:37:50.393Z"
+stopped_at: Completed 06-06-PLAN.md (CR-01 Curves Cancel baseline-poison closed)
+last_updated: "2026-08-10T02:49:42.942Z"
 last_activity: 2026-08-09
 last_activity_desc: Phase 06 execution started
 progress:
   total_phases: 7
-  completed_phases: 6
+  completed_phases: 5
   total_plans: 47
-  completed_plans: 44
+  completed_plans: 45
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 06 (refinement-polish-deferred-fixes-full-curve-editor) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-08-09 — Phase 06 execution started
 
-Progress: [██████████] 100% (4/4 phases, 29/29 plans)
+Progress: [██████████] 96% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -112,6 +112,7 @@ Progress: [██████████] 100% (4/4 phases, 29/29 plans)
 | Phase 06 P03 | 6min | 2 tasks | 7 files |
 | Phase 06 P04 | 47 | 3 tasks | 2 files |
 | Phase 06 P05 | 25 | 2 tasks | 5 files |
+| Phase 06 P06 | 14 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -254,6 +255,8 @@ Recent decisions affecting current work:
 - [Phase 06]: PySide6 wrapper lifetime: hold the QMenuBar.actions() wrappers while resolving a top-level QMenu - temporary a.menu() wrappers GC-delete the C++ QMenu (06-05) — PySide6 wrapper lifetime: hold the QMenuBar.actions() wrappers while resolving a top-level QMenu - temporary a.menu() wrappers GC-delete the C++ QMenu (06-05)
 - [Phase 06]: curves_dialog.py's four 'LevelsDialog' docstring references reworded to 'Levels dialog' (design-lineage context kept) to honor the zero-stale-reference acceptance gate (06-05) — curves_dialog.py's four 'LevelsDialog' docstring references reworded to 'Levels dialog' (design-lineage context kept) to honor the zero-stale-reference acceptance gate (06-05)
 - [Phase 06]: The old Levels lifecycle tests fail between Task 1 (rename) and Task 2 (deletion) by design - the two-file verify is green only at Task 2 (06-05) — The old Levels lifecycle tests fail between Task 1 (rename) and Task 2 (deletion) by design - the two-file verify is green only at Task 2 (06-05)
+- [Phase ?]: Cancel restore does NOT call canvas.rebaseline_original() (deliberate deviation from the review's '+ rebaseline_original()' suggestion): VERIFICATION truth 25 prescribes _original_image_numpy STAYS None on fresh pages, and a rebaseline on Cancel would clobber a legitimate pre-inpaint baseline on an already-baselined page. The honest D-14 baseline is established exclusively by _apply_geometry_op's tail rebaseline on Apply.
+- [Phase ?]: IN-03 (Cancel leaves stale action enablement) needs no separate fix - moot: the canvas gate keeps _inpainted_qimage None through the whole preview+cancel lifecycle, so _refresh_action_states' has_inpaint gating is correct on every path (proven by Task 1 assertion (d)).
 
 ### Roadmap Evolution
 
@@ -285,8 +288,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-10T00:46:08.050Z
-Stopped at: Completed 06-05-PLAN.md (Curves landed in the MainWindow)
+Last session: 2026-08-10T02:49:32.293Z
+Stopped at: Completed 06-06-PLAN.md (CR-01 Curves Cancel baseline-poison closed)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
