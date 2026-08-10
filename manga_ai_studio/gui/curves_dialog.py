@@ -10,7 +10,7 @@ the D-07 keyboard story (arrows nudge ±1 / Shift=±10, Tab / Shift+Tab point
 selection).
 
 ``CurvesDialog`` is a **collector + preview driver** (RESEARCH Pitfall 3/9 —
-the LevelsDialog template): it never mutates models and no undo pushes
+the Levels dialog template (05-06)): it never mutates models and no undo pushes
 originate here. Every control change funnels into the single ``_refresh`` →
 ``_preview`` → ``preview_callback`` path (the capture-suppressed canvas
 preview); ``[Cancel]`` ``reject()``s and ``[Apply]`` stores
@@ -56,9 +56,9 @@ _HANDLE_SIZE = 8  # interior point handle (px)
 _ENDPOINT_SIZE = 10  # endpoint handle (px) — visually distinct
 _PLOT_MARGIN = 8  # plot square inset from the widget edges (px)
 
-# Dark QSS for the dialog (UI-SPEC §Color tokens — the LevelsDialog block
-# extended with QToolButton (channel switcher accent checked state) + the
-# Small muted helper labels ("Preset:" / "Channel:", 12px #9a9aa2)).
+# Dark QSS for the dialog (UI-SPEC §Color tokens — the Levels dialog QSS
+# block extended with QToolButton (channel switcher accent checked state) +
+# the Small muted helper labels ("Preset:" / "Channel:", 12px #9a9aa2)).
 _DIALOG_QSS = """
 QDialog { background: #232328; }
 QLabel { color: #e8e8ea; }
@@ -376,7 +376,7 @@ class CurveWidget(QWidget):
 class CurvesDialog(QDialog):
     """Collector + preview driver for the Curves flow (D-01…D-08, PROJ-04).
 
-    The LevelsDialog shape (05-06) extended with the CurveWidget: preset row
+    The Levels dialog shape (05-06) extended with the CurveWidget: preset row
     + channel switcher on top, black/white quick-access rows above the grid,
     gamma + In/Out below, [Cancel][Apply] at the bottom (UI-SPEC surface 30).
 
@@ -391,7 +391,7 @@ class CurvesDialog(QDialog):
     """
 
     # Gamma log-slider mapping (UI-SPEC surface 30 range 0.10..4.00) — the
-    # LevelsDialog constants, reused verbatim per the plan contract.
+    # Levels dialog constants, reused verbatim per the plan contract.
     GAMMA_MIN = 0.10
     GAMMA_MAX = 4.00
     GAMMA_STEPS = 1000
