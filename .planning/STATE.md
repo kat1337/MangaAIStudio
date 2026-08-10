@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 06
 current_phase_name: refinement-polish-deferred-fixes-full-curve-editor
 status: executing
-stopped_at: Completed 06-03-PLAN.md (toolbar active-tool highlight + dialog typography)
-last_updated: "2026-08-09T23:16:44.687Z"
+stopped_at: Completed 06-04-PLAN.md (full curve editor dialog)
+last_updated: "2026-08-10T00:28:44.395Z"
 last_activity: 2026-08-09
 last_activity_desc: Phase 06 execution started
 progress:
   total_phases: 7
   completed_phases: 5
   total_plans: 44
-  completed_plans: 42
+  completed_plans: 43
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 06 (refinement-polish-deferred-fixes-full-curve-editor) — EXECUTING
-Plan: 4 of 5
+Plan: 2 of 5
 Status: Ready to execute
 Last activity: 2026-08-09 — Phase 06 execution started
 
-Progress: [██████████] 95% (4/4 phases, 29/29 plans)
+Progress: [██████████] 98% (4/4 phases, 29/29 plans)
 
 ## Performance Metrics
 
@@ -110,6 +110,7 @@ Progress: [██████████] 95% (4/4 phases, 29/29 plans)
 | Phase 06 P01 | 4 | 2 tasks | 2 files |
 | Phase 06 P02 | 15min | 2 tasks | 3 files |
 | Phase 06 P03 | 6min | 2 tasks | 7 files |
+| Phase 06 P04 | 47 | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -243,6 +244,11 @@ Recent decisions affecting current work:
 - [Phase 06]: D-09 fix placed inside _set_image_from_numpy (shared impl), one call covers preview path idempotently — plan's verbatim prescription
 - [Phase 06]: D-10 fix follows RESEARCH Option 1: six window tool actions made checkable + members of tools_panel.tool_group; no toggled connects on window actions (Pitfall 1); QToolButton mirrors its default action's checkable state — Group exclusivity + checkable actions is the Qt contract; button-side checkable alone is a no-op
 - [Phase 06]: D-12 implemented via QFont().setPixelSize(14) (Assumption A4) - exact pixel contract; tests assert QFontInfo(font).pixelSize() == 14, never pointSize — A 14px font reports pointSize ~10.5, so pixelSize is the only exact assertion
+- [Phase 06]: CurveWidget._points is assigned BY REFERENCE from _channel_points[current]; _refresh re-points the dict from the widget's list each pass so external reassignment can never desync the collector (06-04)
+- [Phase 06]: points_changed fires on press-add / release (NOT per move pixel) - the T-06-06 preview-storm mitigation; the widget still repaints live during the drag (06-04)
+- [Phase 06]: Gamma back-map snaps the diagonal to exactly 1.00 (raw 1.0054 rounds to 1.01) so the defaults contract 'gamma 1.00 <-> midpoint 128' holds at open; injection stays forward-only (user gamma edits) via _gamma_syncing (06-04)
+- [Phase 06]: Endpoint cross-clamp enforced on the curve points themselves (not just the slider/spin pairs): a widget-dragged endpoint inversion clamps immediately - the exact T-05-07 mirror of the Levels slider clamp (06-04)
+- [Phase 06]: In spinbox disabled for endpoints (x fixed at 0/255, range [x,x]) - 'endpoints never move horizontally' rendered in the numeric row (06-04)
 
 ### Roadmap Evolution
 
@@ -274,8 +280,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-09T23:16:44.658Z
-Stopped at: Completed 06-03-PLAN.md (toolbar active-tool highlight + dialog typography)
+Last session: 2026-08-10T00:28:05.291Z
+Stopped at: Completed 06-04-PLAN.md (full curve editor dialog)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

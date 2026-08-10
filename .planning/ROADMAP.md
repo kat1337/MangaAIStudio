@@ -269,7 +269,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 **Requirements**: PROJ-04 (curves), plus tracked deferrals without REQ-IDs (fixes)
 **Depends on:** Phase 5
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 
@@ -281,7 +281,7 @@ Plans:
 
 **Wave 2** *(blocked on 06-01)*
 
-- [ ] 06-04-PLAN.md — Curves dialog surface: CurveWidget (QPainter grid/diagonal/histogram/points) + CurvesDialog collector (presets, RGB/R/G/B channels, black/white/gamma quick rows, In/Out spins, keyboard) (PROJ-04)
+- [x] 06-04-PLAN.md — Curves dialog surface: CurveWidget (QPainter grid/diagonal/histogram/points) + CurvesDialog collector (presets, RGB/R/G/B channels, black/white/gamma quick rows, In/Out spins, keyboard) (PROJ-04)
 
 **Wave 3** *(blocked on 06-03 + 06-04)*
 
