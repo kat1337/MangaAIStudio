@@ -229,10 +229,13 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
     entry path (programmatic set_active_tool, V/B/R/L/E/G shortcut, Tools-menu
     trigger), in sync with the ToolsPanel's active tool.
 
-    The six window tool actions must be checkable members of the ToolsPanel's
-    exclusive QActionGroup: the group's exclusivity unchecks the previous tool
-    and the dock + toolbar always agree (UI-SPEC surface 31 / E3). Fails on
-    the pre-fix code — a non-checkable action makes ``setChecked`` a no-op
+    The six window tool actions are standalone checkable-actions
+    (``actionGroup() is None`` — NOT members of the ToolsPanel's exclusive
+    QActionGroup, which holds only the panel's own six actions): set_active_tool's
+    action-sync loop checks the matching window action explicitly and unchecks
+    the other five, and the toolbar buttons mirror their default actions, so
+    the dock + toolbar always agree (UI-SPEC surface 31 / E3). Fails on the
+    pre-fix code — a non-checkable action makes ``setChecked`` a no-op
     (QToolButton mirrors its default action's checkable state).
     """
     window = _window_with_page(qtbot, tmp_path)
@@ -254,8 +257,10 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
             and btn.isChecked()
         ]
 
-    # Test 4 (group membership): every window tool action lives in the
-    # ToolsPanel's exclusive group.
+    # Test 4 (group membership): the six window tool actions are STANDALONE —
+    # NOT members of the ToolsPanel's exclusive group (WR-02: a 12-action
+    # mirrored group fought itself on dock clicks). The panel group holds
+    # exactly its own six actions.
     for action in (
         window.action_tool_move,
         window.action_tool_brush,
@@ -264,7 +269,7 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
         window.action_tool_eraser,
         window.action_tool_crop,
     ):
-        assert action.actionGroup() is window.tools_panel.tool_group
+        assert action.actionGroup() is None
 
     # Test 1 (programmatic path): set_active_tool checks the matching toolbar
     # button and unchecks the rest.
