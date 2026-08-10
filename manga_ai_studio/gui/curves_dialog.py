@@ -371,3 +371,395 @@ class CurveWidget(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class CurvesDialog(QDialog):
+    """Collector + preview driver for the Curves flow (D-01…D-08, PROJ-04).
+
+    The LevelsDialog shape (05-06) extended with the CurveWidget: preset row
+    + channel switcher on top, black/white quick-access rows above the grid,
+    gamma + In/Out below, [Cancel][Apply] at the bottom (UI-SPEC surface 30).
+
+    Pure collector (RESEARCH Pitfall 3/9): the dialog never mutates models
+    and no undo pushes originate here. The curve is the single source of
+    truth (D-02/D-03) — every control change funnels into ONE
+    ``_updating``-guarded ``_refresh`` that re-syncs every control from the
+    current channel's points (with the white>black cross-clamp, T-05-07) and
+    drives the composed preview through the single ``_preview`` driver.
+    ``[Apply]`` stores ``result_values = (master_points, channel_points)``
+    for the MainWindow (plan 06-05 ``_on_curves``).
+    """
+
+    # Gamma log-slider mapping (UI-SPEC surface 30 range 0.10..4.00) — the
+    # LevelsDialog constants, reused verbatim per the plan contract.
+    GAMMA_MIN = 0.10
+    GAMMA_MAX = 4.00
+    GAMMA_STEPS = 1000
+
+    # D-05 preset starting points (RESEARCH A2, locked in 06-UI-SPEC:30).
+    # Presets are fully editable afterwards — starting points, never locked.
+    PRESETS = {
+        "Linear": [(0, 0), (255, 255)],
+        "S-curve": [(0, 0), (64, 40), (192, 215), (255, 255)],
+        "Brighten": [(0, 0), (128, 150), (255, 255)],
+        "Darken": [(0, 0), (128, 105), (255, 255)],
+    }
+    _PRESET_TOOLTIPS = {
+        "Linear": "Reset the curve to a straight line.",
+        "S-curve": "Add contrast — classic S-curve.",
+        "Brighten": "Brighten midtones.",
+        "Darken": "Darken midtones.",
+    }
+    CHANNELS = ("RGB", "R", "G", "B")
+
+    def __init__(
+        self,
+        parent=None,
+        page_image=None,
+        preview_callback=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Curves")
+        self.setObjectName("curves_dialog")
+        self.setModal(True)
+
+        # The caller's detached pre-dialog image (restore/apply base). The
+        # preview composes from this base only (Pitfall 2/9).
+        self._page_image = page_image
+        self.preview_callback = preview_callback
+        self._updating = False
+        # True while _refresh back-maps the gamma spin (display mirror) —
+        # suppresses the forward gamma handler so a back-map never
+        # re-injects the (128, y) point (A3: inject on user gamma edits).
+        self._gamma_syncing = False
+        self._selected = 0
+        self._current_channel = "RGB"
+        # Per-channel point sets — the CurveWidget edits the current
+        # channel's list by reference (D-06 channel independence).
+        self._channel_points: dict[str, list[tuple[int, int]]] = {
+            ch: [(0, 0), (255, 255)] for ch in self.CHANNELS
+        }
+        # Result carrier (read by the MainWindow after exec() == Accepted).
+        self.result_values: tuple[
+            list[tuple[int, int]], dict[str, list[tuple[int, int]]]
+        ] = (
+            list(self._channel_points["RGB"]),
+            {ch: list(pts) for ch, pts in self._channel_points.items()},
+        )
+
+        # D-12: 14px Body base font from birth (A4 — assert pixelSize).
+        base_font = QFont(self.font())
+        base_font.setPixelSize(14)
+        self.setFont(base_font)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+
+        # ---- preset row (D-05) + channel switcher (D-06), top -----------
+        top = QHBoxLayout()
+        preset_label = QLabel("Preset:", self)
+        preset_label.setObjectName("helper_label")
+        top.addWidget(preset_label)
+        self.preset_buttons: dict[str, QPushButton] = {}
+        for name in self.PRESETS:
+            btn = QPushButton(name, self)
+            btn.setToolTip(self._PRESET_TOOLTIPS[name])
+            self.preset_buttons[name] = btn
+            top.addWidget(btn)
+        top.addSpacing(12)
+        channel_label = QLabel("Channel:", self)
+        channel_label.setObjectName("helper_label")
+        top.addWidget(channel_label)
+        self.channel_buttons: dict[str, QToolButton] = {}
+        self.channel_group = QButtonGroup(self)
+        self.channel_group.setExclusive(True)
+        for name in self.CHANNELS:
+            btn = QToolButton(self)
+            btn.setText(name)
+            btn.setCheckable(True)
+            self.channel_buttons[name] = btn
+            self.channel_group.addButton(btn)
+            top.addWidget(btn)
+        self.channel_buttons["RGB"].setChecked(True)
+        top.addStretch(1)
+        root.addLayout(top)
+
+        # ---- black/white quick-access rows (D-01: ABOVE the grid) -------
+        form = QFormLayout()
+        self.black_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.black_slider.setRange(0, 255)
+        self.black_slider.setValue(0)
+        self.black_spin = QSpinBox(self)
+        self.black_spin.setRange(0, 255)
+        self.black_spin.setValue(0)
+        form.addRow("Black point:", self._row(self.black_slider, self.black_spin))
+
+        self.white_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.white_slider.setRange(0, 255)
+        self.white_slider.setValue(255)
+        self.white_spin = QSpinBox(self)
+        self.white_spin.setRange(0, 255)
+        self.white_spin.setValue(255)
+        form.addRow("White point:", self._row(self.white_slider, self.white_spin))
+        root.addLayout(form)
+
+        # ---- the curve grid (stretch) ------------------------------------
+        self.curve_widget = CurveWidget(self)
+        # Hand the widget the CURRENT channel's list by reference — widget
+        # edits land directly in _channel_points (single source of truth).
+        self.curve_widget._points = self._channel_points[self._current_channel]
+        root.addWidget(self.curve_widget, 1)
+
+        # ---- gamma + In/Out rows (below the grid) ------------------------
+        form2 = QFormLayout()
+        self.gamma_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.gamma_slider.setRange(0, self.GAMMA_STEPS)
+        self.gamma_slider.setValue(self._gamma_to_slider(1.00))
+        self.gamma_spin = QDoubleSpinBox(self)
+        self.gamma_spin.setRange(self.GAMMA_MIN, self.GAMMA_MAX)
+        self.gamma_spin.setDecimals(2)
+        self.gamma_spin.setSingleStep(0.01)
+        self.gamma_spin.setValue(1.00)
+        form2.addRow("Gamma:", self._row(self.gamma_slider, self.gamma_spin))
+
+        self.in_spin = QSpinBox(self)
+        self.in_spin.setRange(0, 255)
+        self.out_spin = QSpinBox(self)
+        self.out_spin.setRange(0, 255)
+        form2.addRow("In:", self.in_spin)
+        form2.addRow("Out:", self.out_spin)
+        root.addLayout(form2)
+
+        # [Cancel] [Apply] (Apply default, accent border per the QSS).
+        buttons = QHBoxLayout()
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.clicked.connect(self.reject)
+        self.apply_btn = QPushButton("Apply", self)
+        self.apply_btn.setDefault(True)
+        self.apply_btn.clicked.connect(self._on_apply)
+        buttons.addStretch(1)
+        buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.apply_btn)
+        root.addLayout(buttons)
+
+        self.setStyleSheet(_DIALOG_QSS)
+
+        # ---- widget wiring ------------------------------------------------
+        # Black/white rows: slider <-> spin direct links (Qt does not re-emit
+        # identical values) + the endpoint mutation through the spin's
+        # valueChanged — every change funnels into ONE _refresh.
+        self.black_spin.valueChanged.connect(self.black_slider.setValue)
+        self.black_slider.valueChanged.connect(self.black_spin.setValue)
+        self.black_spin.valueChanged.connect(self._on_black_changed)
+        self.white_spin.valueChanged.connect(self.white_slider.setValue)
+        self.white_slider.valueChanged.connect(self.white_spin.setValue)
+        self.white_spin.valueChanged.connect(self._on_white_changed)
+        # Gamma: log-scaled slider <-> spin (Levels verbatim) + midpoint
+        # anchor injection through the spin's valueChanged.
+        self.gamma_spin.valueChanged.connect(self._on_gamma_spin_changed)
+        self.gamma_slider.valueChanged.connect(self._on_gamma_slider_changed)
+        self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
+        # In/Out spins drive the selected point.
+        self.in_spin.valueChanged.connect(self._on_in_changed)
+        self.out_spin.valueChanged.connect(self._on_out_changed)
+        # The widget's curve edits + selection changes -> the shared refresh.
+        self.curve_widget.points_changed.connect(self._refresh)
+        self.curve_widget.point_selected.connect(self._on_point_selected)
+
+        # Apply the initial state once: clamps + preview with the defaults.
+        self._refresh()
+
+    # ------------------------------------------------------------ structure
+    def _row(self, slider: QSlider, spin) -> QHBoxLayout:
+        """A slider + spinbox row (spin right-aligned after a stretch)."""
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(spin)
+        return row
+
+    # -------------------------------------------------------------- gamma map
+    def _gamma_to_slider(self, gamma: float) -> int:
+        """Map a linear gamma value onto the log-scaled slider position."""
+        span = math.log(self.GAMMA_MAX) - math.log(self.GAMMA_MIN)
+        t = (math.log(gamma) - math.log(self.GAMMA_MIN)) / span
+        return int(round(t * self.GAMMA_STEPS))
+
+    def _slider_to_gamma(self, t: int) -> float:
+        """Map a log-scaled slider position back to a linear gamma value."""
+        span = math.log(self.GAMMA_MAX) - math.log(self.GAMMA_MIN)
+        g = math.exp(math.log(self.GAMMA_MIN) + span * t / self.GAMMA_STEPS)
+        return round(g, 2)
+
+    def _on_gamma_slider_changed(self, t: int) -> None:
+        """Sync the gamma spinbox from the log-scaled slider."""
+        self.gamma_spin.setValue(self._slider_to_gamma(t))
+
+    def _on_gamma_spin_changed(self, g: float) -> None:
+        """Sync the log-scaled slider from the gamma spinbox."""
+        self.gamma_slider.setValue(self._gamma_to_slider(g))
+
+    # ------------------------------------------------------------- handlers
+    def _on_black_changed(self, value: int) -> None:
+        """The black row drives the left endpoint's y (input 0)."""
+        self.curve_widget._points[0] = (0, value)
+        self._refresh()
+
+    def _on_white_changed(self, value: int) -> None:
+        """The white row drives the right endpoint's y (input 255)."""
+        self.curve_widget._points[-1] = (255, value)
+        self._refresh()
+
+    def _on_gamma_changed(self, g: float) -> None:
+        """Position the (128, y) midpoint anchor (D-03/A3).
+
+        Setting gamma injects or moves the point at input 128 with
+        ``y = round(255 * 0.5^(1/g))`` — gamma 1.00 positions y = 128 (the
+        diagonal). Suppressed while ``_refresh`` back-maps the spin (the
+        back-map is a display mirror — the injection is forward-only).
+        """
+        if self._gamma_syncing:
+            return
+        y = int(round(255.0 * 0.5 ** (1.0 / g)))
+        pts = self.curve_widget._points
+        for i, (px, _py) in enumerate(pts):
+            if px == 128:
+                pts[i] = (128, y)
+                break
+        else:
+            i = 0
+            while i < len(pts) and pts[i][0] < 128:
+                i += 1
+            pts.insert(i, (128, y))
+        self._refresh()
+
+    def _on_in_changed(self, value: int) -> None:
+        """The In spin drives the selected point's x (range-constrained)."""
+        pts = self.curve_widget._points
+        sel = min(self._selected, len(pts) - 1)
+        if sel in (0, len(pts) - 1):
+            return  # endpoints never move horizontally (D-04)
+        pts[sel] = (value, pts[sel][1])
+        self._refresh()
+
+    def _on_out_changed(self, value: int) -> None:
+        """The Out spin drives the selected point's y."""
+        pts = self.curve_widget._points
+        sel = min(self._selected, len(pts) - 1)
+        pts[sel] = (pts[sel][0], value)
+        self._refresh()
+
+    def _on_point_selected(self, index: int) -> None:
+        """The widget's selection change re-targets the In/Out spins."""
+        self._selected = index
+        self._refresh()
+
+    # ---------------------------------------------------------------- driver
+    def _refresh(self) -> None:
+        """Sync every control from the curve — ONE guarded pass (D-02/D-03).
+
+        Reads the current channel's points (the single source of truth),
+        applies the white>black cross-clamp to the ENDPOINTS themselves
+        (T-05-07: the mirror of the Levels clamp — black max = white−1,
+        white min = black+1), syncs the black/white rows, back-maps gamma
+        from the sampled output at input 128 (A3), re-targets the In/Out
+        spins to the selected point (In range [prev_x+1, next_x−1], disabled
+        for endpoints), then fires the composed preview through ``_preview``.
+        ``_updating`` guards the clamp's own value adjustments from
+        re-entering (the direct setValue links never recurse).
+        """
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            # The widget is the single mutation surface; re-point the
+            # channel dict at its list so the reference can never diverge.
+            pts = self.curve_widget._points
+            self._channel_points[self._current_channel] = pts
+            # Cross-clamp on the curve state (the slider-side mirror):
+            # black max = white−1 / white min = black+1 — endpoints can
+            # never invert, so the preview can never receive an inverted map.
+            black = max(0, min(254, pts[0][1]))
+            white = max(1, min(255, pts[-1][1]))
+            white = max(white, black + 1)
+            black = min(black, white - 1)
+            pts[0] = (0, black)
+            pts[-1] = (255, white)
+
+            # Black/white rows mirror the endpoints (spin min/max follow).
+            self.white_slider.setMinimum(black + 1)
+            self.white_spin.setMinimum(black + 1)
+            self.black_slider.setMaximum(white - 1)
+            self.black_spin.setMaximum(white - 1)
+            self.black_spin.setValue(black)
+            self.white_spin.setValue(white)
+
+            # Gamma row: back-map from the sampled output at input 128
+            # (display mirror only — the forward injection is suppressed).
+            mid_out = self._sample_output(pts, 128)
+            if 0 < mid_out < 255:
+                raw = math.log(0.5) / math.log(mid_out / 255.0)
+                if abs(raw - 1.0) < 0.01:
+                    g = 1.00  # the diagonal back-maps to exactly 1.00 (A3)
+                else:
+                    g = round(raw, 2)
+                if self.GAMMA_MIN <= g <= self.GAMMA_MAX:
+                    self._gamma_syncing = True
+                    try:
+                        self.gamma_spin.setValue(g)
+                    finally:
+                        self._gamma_syncing = False
+
+            # In/Out spins track the selected point (x-order preserved).
+            sel = min(self._selected, len(pts) - 1)
+            self.curve_widget._selected = sel
+            x, y = pts[sel]
+            if sel in (0, len(pts) - 1):
+                self.in_spin.setEnabled(False)  # endpoints never move in x
+                self.in_spin.setRange(x, x)
+                self.in_spin.setValue(x)
+            else:
+                self.in_spin.setEnabled(True)
+                self.in_spin.setRange(pts[sel - 1][0] + 1, pts[sel + 1][0] - 1)
+                self.in_spin.setValue(x)
+            self.out_spin.setValue(y)
+            self.curve_widget.update()
+        finally:
+            self._updating = False
+        self._preview()
+
+    @staticmethod
+    def _sample_output(points, x_in: int) -> float:
+        """The curve's piecewise-linear output at ``x_in`` (A3 sampling).
+
+        Always well-defined for any point set — the piecewise-linear
+        interpolation makes gamma independent of whether an explicit (128,y)
+        point exists.
+        """
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        return float(np.interp(x_in, xs, ys))
+
+    def _preview(self) -> None:
+        """The single preview driver: compose master→channel and fire.
+
+        Only call site of ``preview_callback`` in this file — every control
+        change funnels through ``_refresh`` into here (Task 3 gate). The
+        composition is ``image_ops.curves_page`` (A1: per-channel LUTs
+        applied after the master). No image, no callback -> no-op.
+        """
+        if self._page_image is None or self.preview_callback is None:
+            return
+        composed = image_ops.curves_page(
+            self._page_image,
+            self._channel_points["RGB"],
+            {ch: self._channel_points[ch] for ch in ("R", "G", "B")},
+        )
+        self.preview_callback(composed)
+
+    def _on_apply(self) -> None:
+        """Store the collected curve state and accept (no mutation here)."""
+        self.result_values = (
+            list(self._channel_points["RGB"]),
+            {ch: list(pts) for ch, pts in self._channel_points.items()},
+        )
+        self.accept()
