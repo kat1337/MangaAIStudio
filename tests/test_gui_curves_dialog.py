@@ -746,3 +746,53 @@ def test_curves_preview_no_baseline_poison(qtbot, tmp_path, monkeypatch) -> None
     assert np.array_equal(window.canvas._original_image_numpy, pre)
     window.canvas.show_original(True)
     assert np.array_equal(window.canvas.get_image_numpy(), pre)
+
+
+@pytest.mark.gui
+def test_curves_cancel_fresh_page_no_baseline_poison(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """CR-01: fresh-page Cancel must never poison the Show Original baseline.
+
+    The folder-load display path (``set_image_from_path``) never captures, so
+    ``_original_image_numpy`` is None at dialog open — the common fresh-page
+    state the IN-01 regression masked by pre-baselining. Opening the Curves
+    dialog, touching controls (live previews mutate the canvas mid-dialog),
+    and pressing Cancel must restore the pre-dialog image byte-identical
+    WITHOUT capturing a baseline and WITHOUT claiming an inpaint result:
+    ``_original_image_numpy`` stays None, ``has_inpaint_result()`` stays
+    False, and after ``_refresh_action_states`` Show Original (P) stays
+    disabled (IN-03 folded in — no before/after compare without an inpaint).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    pre = window.canvas.get_image_numpy().copy()
+    # Fresh page: the pre-dialog baseline is absent (set_image_from_path
+    # never enters _set_image_from_numpy — the state CR-01 poisoned).
+    assert window.canvas._original_image_numpy is None
+
+    preview_seen: dict = {}
+
+    def _fake_exec(dlg):
+        dlg.black_spin.setValue(120)  # preview mutates the canvas mid-dialog
+        preview_seen["mid"] = window.canvas.get_image_numpy().copy()
+        dlg.gamma_spin.setValue(1.7)
+        dlg.white_spin.setValue(200)
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(CurvesDialog, "exec", _fake_exec)
+    window._on_curves()
+    QApplication.processEvents()
+
+    # The live previews really mutated the canvas mid-dialog...
+    assert not np.array_equal(preview_seen["mid"], pre)
+    # (a) Cancel restored the pre-dialog image byte-exact...
+    assert np.array_equal(window.canvas.get_image_numpy(), pre)
+    # (b) ...without capturing a baseline (it stays None — the pre-dialog
+    # image is NOT stored as "the original")...
+    assert window.canvas._original_image_numpy is None
+    # (c) ...and without claiming an inpaint result (no inpaint ever ran).
+    assert window.canvas.has_inpaint_result() is False
+    # (d) IN-03: Show Original stays disabled — the fresh-page preview+cancel
+    # lifecycle never established a compare baseline.
+    window._refresh_action_states()
+    assert window.action_show_original.isEnabled() is False
