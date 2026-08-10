@@ -294,6 +294,62 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
+def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> None:
+    """WR-02 RED gate: dock-button clicks sync dock + toolbar + window actions.
+
+    The dock-click path — the most common entry — flows through the panel's
+    toggled -> tool_changed -> set_active_tool chain (main_window.py:2574).
+    Before the WR-02 fix the 12-action exclusive group (6 panel + 6 window
+    mirrored actions) fought itself: after a dock Rectangle click the panel
+    action ended up UNCHECKED (the dock button loses its highlight),
+    ``active_tool()`` fell back to ToolMode.MOVE, and a SECOND dock click
+    desynced everything. This test locks the D-10 contract on the dock path,
+    including two consecutive dock clicks (probe-verified pre-fix).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+
+    def toolbar_btn(mode: ToolMode) -> QToolButton:
+        return next(
+            btn
+            for btn in window.toolbar.findChildren(QToolButton)
+            if btn.defaultAction() is not None
+            and btn.defaultAction().data() == mode
+        )
+
+    def checked_tools() -> list:
+        return [
+            btn.defaultAction().data()
+            for btn in window.toolbar.findChildren(QToolButton)
+            if btn.defaultAction() is not None
+            and btn.defaultAction().data() is not None
+            and btn.isChecked()
+        ]
+
+    # First dock click (Rectangle): the panel action stays checked, the active
+    # tool is RECTANGLE everywhere, the window action mirrors it, and the
+    # toolbar button is checked — with no other tool checked anywhere.
+    window.tools_panel.action_rectangle.trigger()
+    QApplication.processEvents()
+    assert window.tools_panel.action_rectangle.isChecked()
+    assert window.tools_panel.active_tool() == ToolMode.RECTANGLE
+    assert window.action_tool_rectangle.isChecked()
+    assert window.action_tool_move.isChecked() is False
+    assert toolbar_btn(ToolMode.RECTANGLE).isChecked()
+    assert checked_tools() == [ToolMode.RECTANGLE]
+
+    # Second consecutive dock click (Brush): the same contract for BRUSH —
+    # the probe's second click desynced EVERYTHING pre-fix.
+    window.tools_panel.action_brush.trigger()
+    QApplication.processEvents()
+    assert window.tools_panel.action_brush.isChecked()
+    assert window.tools_panel.active_tool() == ToolMode.BRUSH
+    assert window.action_tool_brush.isChecked()
+    assert window.action_tool_rectangle.isChecked() is False
+    assert toolbar_btn(ToolMode.BRUSH).isChecked()
+    assert checked_tools() == [ToolMode.BRUSH]
+
+
+@pytest.mark.gui
 def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     """The Tools-menu Crop action exists with the same data and wires end-to-end.
 
