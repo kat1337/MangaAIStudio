@@ -222,6 +222,27 @@ def default_ocr_json_path(page_path: Path, geometry_altered: bool) -> Path:
     return target / f"{page_path.stem}_ocr.json"
 
 
+def default_typeset_path(page_path: Path, geometry_altered: bool) -> Path:
+    """The D-03 default bake-sidecar path for ``page_path`` (plan 07-01).
+
+    Mirrors D-22 (the ``_ocr.json`` rule) verbatim: pristine page ->
+    ``{stem}_typeset.png`` NEXT TO the source; geometry-altered page ->
+    ``<source>/cleaned/{stem}_typeset.png`` (the ``cleaned/`` sibling is
+    created by the writer — ``save_image_optimized`` mkdirs the parent).
+
+    Args:
+        page_path: The source page path — its ``parent`` is the D-03 anchor
+            and its ``stem`` the sidecar name.
+        geometry_altered: D-22 flag — pristine -> sidecar beside the source;
+            altered -> ``<source>/cleaned/``.
+
+    Returns:
+        The default ``{stem}_typeset.png`` destination path.
+    """
+    target = ocr_json_target_dir(page_path.parent, geometry_altered)
+    return target / f"{page_path.stem}_typeset.png"
+
+
 def write_page_ocr_json(
     page_boxes: list,
     img_w: int,

@@ -25,9 +25,15 @@ from panelcleaner.structures import Box  # noqa: E402
 
 # The default fill (UI-SPEC A1) as an RGB tuple — opaque (D-01).
 _FILL_RGB = (232, 232, 234)
-# A deterministic fixed-size style for pixel probes (no auto-fit variability).
-_FIXED_STYLE = TextStyle(
-    font_size_px=8.0, auto_fit=False, align_h="left", align_v="top"
+# A deterministic fixed-size style for pixel probes: outline OFF so the fill
+# pixels are observable (the default 2px outline swallows glyph interiors at
+# small sizes), left/top so the ink starts at the inner rect's top-left.
+_PIXEL_STYLE = TextStyle(
+    font_size_px=12.0,
+    auto_fit=False,
+    align_h="left",
+    align_v="top",
+    outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
 )
 
 
@@ -39,9 +45,7 @@ def _page(size: int = 16, color=(30, 40, 50)) -> np.ndarray:
 def _box_with_text(
     recognized: str = "", translation: str = "", style: TextStyle | None = None
 ) -> PageBox:
-    pb = PageBox(
-        box=Box(2, 2, 12, 12), origin=DETECTED, style=style or _FIXED_STYLE
-    )
+    pb = PageBox(box=Box(2, 2, 62, 22), origin=DETECTED, style=style or _PIXEL_STYLE)
     if recognized:
         pb.set_recognized_text(recognized)
     if translation:
@@ -57,7 +61,7 @@ def _box_with_text(
 @pytest.mark.unit
 def test_bake_renders_translation_when_present(qapp) -> None:
     """A box with BOTH texts bakes the translation (D-04 current-focus rule)."""
-    page = _page()
+    page = _page(24)
     trans_box = _box_with_text(recognized="RECOG", translation="TRANS")
     baked = bake_typeset_page(page, [trans_box])
 
@@ -67,33 +71,33 @@ def test_bake_renders_translation_when_present(qapp) -> None:
     assert np.array_equal(baked, recog_only), (
         "the bake must render the translation, not the recognized text"
     )
-    # The text pixels landed inside the box rect; the page outside is intact.
-    region = baked[2:12, 2:12]
-    assert region is not None
-    outside = np.concatenate(
-        [baked[:2].reshape(-1, 3), baked[12:].reshape(-1, 3),
-         baked[2:12, :2].reshape(-1, 3), baked[2:12, 12:].reshape(-1, 3)]
+    # The opaque fill pixels landed inside the box rect...
+    region = baked[2:22, 2:62]
+    assert ((region == _FILL_RGB).all(axis=2)).any(), (
+        "opaque fill-colored glyph pixels must exist inside the box rect"
     )
-    assert (outside == page[:2].reshape(-1, 3)[0]).all(), (
-        "pixels outside the box must keep the source color (no chrome)"
-    )
+    # ...and the page outside the box keeps the source pixels (no chrome).
+    assert np.array_equal(baked[:2], page[:2])
+    assert np.array_equal(baked[22:], page[22:])
+    assert np.array_equal(baked[2:22, :2], page[2:22, :2])
+    assert np.array_equal(baked[2:22, 62:], page[2:22, 62:])
 
 
 @pytest.mark.unit
 def test_bake_renders_recognized_when_no_translation(qapp) -> None:
     """A box with recognized text only bakes the recognized text (D-04)."""
-    page = _page()
+    page = _page(24)
     baked = bake_typeset_page(page, [_box_with_text(recognized="TRANS")])
     # Opaque fill pixels (the default #e8e8ea) exist inside the box rect.
-    region = baked[2:12, 2:12]
+    region = baked[2:22, 2:62]
     assert ((region == _FILL_RGB).all(axis=2)).any(), (
         "opaque fill-colored glyph pixels must exist inside the box rect"
     )
     # The page changed inside the box...
-    assert not np.array_equal(region, page[2:12, 2:12])
+    assert not np.array_equal(region, page[2:22, 2:62])
     # ...and stayed identical outside it.
     assert np.array_equal(baked[:2], page[:2])
-    assert np.array_equal(baked[12:], page[12:])
+    assert np.array_equal(baked[22:], page[22:])
 
 
 @pytest.mark.unit
@@ -183,7 +187,6 @@ def test_placement_writes_sidecar_through_writer(tmp_path) -> None:
     page = _page(12)
     baked = bake_typeset_page(page, [_box_with_text(recognized="TRANS")])
     save_image_optimized(baked, dest, original=page_path)
-
     assert dest.is_file(), "the cleaned/ sidecar must exist after the write"
     with PILImage.open(dest) as im:
         assert im.size == (12, 12)

@@ -82,15 +82,20 @@ def test_align_h_shifts_ink_rect(qapp) -> None:
 
 @pytest.mark.unit
 def test_align_v_shifts_ink_rect(qapp) -> None:
-    """align_v top/middle/bottom shifts the ink rect's y within the inner rect."""
-    style = TextStyle(font_size_px=12.0, auto_fit=False, align_v="top")
+    """align_v top/middle/bottom shifts the PAINT ORIGIN's y (the vertical
+    offset rides the layout origin — the ink rect itself is doc-local)."""
     rect = QRectF(0, 0, 200, 60)
-    top_ink = layout("hello", style, rect).ink
-    middle_ink = layout("hello", TextStyle(font_size_px=12.0, auto_fit=False, align_v="middle"), rect).ink
-    bottom_ink = layout("hello", TextStyle(font_size_px=12.0, auto_fit=False, align_v="bottom"), rect).ink
-    assert top_ink.top() == pytest.approx(0.0, abs=0.5)
-    assert top_ink.top() < middle_ink.top() < bottom_ink.top()
-    assert bottom_ink.bottom() == pytest.approx(_inner(200, 60)[1], abs=0.5)
+    top = layout("hello", TextStyle(font_size_px=12.0, auto_fit=False, align_v="top"), rect)
+    middle = layout("hello", TextStyle(font_size_px=12.0, auto_fit=False, align_v="middle"), rect)
+    bottom = layout("hello", TextStyle(font_size_px=12.0, auto_fit=False, align_v="bottom"), rect)
+    inner_h = _inner(200, 60)[1]
+    block_h = top.document.size().height()
+    assert top.origin.y() == pytest.approx(_INNER_INSET, abs=0.5)
+    assert middle.origin.y() == pytest.approx(
+        _INNER_INSET + (inner_h - block_h) / 2.0, abs=0.5
+    )
+    assert bottom.origin.y() == pytest.approx(_INNER_INSET + inner_h - block_h, abs=0.5)
+    assert top.origin.y() < middle.origin.y() < bottom.origin.y()
 
 
 # ---------------------------------------------------------------------------

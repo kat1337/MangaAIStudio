@@ -43,6 +43,8 @@ from typing import Optional
 
 from panelcleaner.structures import Box
 
+from manga_ai_studio.core.text_style import TextStyle
+
 # D-03 origin discriminator — module-level string constants. Single source of
 # truth so the GUI (BoxItem), persistence (ImageFile.boxes), and undo (BOXES
 # snapshots) layers all agree on the spelling.
@@ -76,6 +78,11 @@ class PageBox:
             reading order is assigned.
         manual_override: Phase 4 (D-16). ``True`` when the user hand-set a
             field that a page-level re-auto must preserve.
+        style: Phase 7 (D-06 flat per-box typesetting style). The composed
+            ``TextStyle`` — ``None`` means the renderers fall back to the
+            defaults (fresh/legacy boxes). NEVER mutated in place: every
+            style change assigns a fresh instance via ``dataclasses.replace``
+            (RESEARCH Pitfall 1). ``copy()`` detaches it (Pitfall 8).
 
     D-15 seam note: ``mask`` and ``std_dev`` are ``None`` in Phase 3 by
     design. A later selective-inpaint phase fills them per box against the
@@ -92,6 +99,10 @@ class PageBox:
     edited: bool = False  # D-04 re-OCR gate
     bubble_no: Optional[int] = None  # D-15/D-16 reading-order number
     manual_override: bool = False  # D-16 preserve-manual conflict policy
+    # Phase 7 (D-06): flat per-box typesetting style. None = renderers use
+    # the TextStyle defaults. Composes (D-14 — the vendored Box/TextBlock
+    # stay untouched); copy() detaches it (Pitfall 8).
+    style: Optional[TextStyle] = None
 
     # --------------------------------------------------------- text setters
     def _ensure_payload(self) -> None:
@@ -164,18 +175,22 @@ class PageBox:
 
     # ------------------------------------------------------------ undo seam
     def copy(self) -> "PageBox":
-        """Return a NEW ``PageBox`` with a detached payload (RESEARCH Pitfall 8).
+        """Return a NEW ``PageBox`` with detached payload AND style (Pitfall 8).
 
-        Uses ``dataclasses.replace`` to clone the dataclass with a
-        ``copy.copy`` (shallow) of the payload. Shallow-copy is sufficient
-        because Phase 4 only mutates ``.text`` / ``.translation`` (top-level
-        attributes) on the payload (RESEARCH Assumption A3). The vendored
-        ``Box`` is ``@frozen`` so sharing it by reference is safe (D-10) — it
-        is NOT copied. This detachment is what makes ``boxes_snapshot()`` +
-        the BOXES undo stack restore the snapshot-time text instead of the
-        live (post-edit) text.
+        Uses ``dataclasses.replace`` to clone the dataclass with
+        ``copy.copy`` (shallow) of the payload and the style. Shallow-copy is
+        sufficient because Phase 4 only mutates ``.text`` / ``.translation``
+        (top-level attributes) on the payload (RESEARCH Assumption A3) and
+        Phase 7 NEVER mutates a ``TextStyle`` in place (every change assigns
+        a fresh instance via ``dataclasses.replace``). The vendored ``Box``
+        is ``@frozen`` so sharing it by reference is safe (D-10) — it is NOT
+        copied. This detachment is what makes ``boxes_snapshot()`` + the
+        BOXES undo stack restore the snapshot-time text AND style instead of
+        the live (post-edit) ones.
         """
-        return replace(self, payload=_copy.copy(self.payload))
+        return replace(
+            self, payload=_copy.copy(self.payload), style=_copy.copy(self.style)
+        )
 
 
 def textblock_to_box(blk) -> Box:

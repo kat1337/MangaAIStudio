@@ -1729,6 +1729,11 @@ class EditorCanvas(QGraphicsView):
         manual-override state. ``payload.text`` / ``payload.translation`` ride
         on the payload reference (detached at the history boundary by
         ``PageBox.copy()`` — Pitfall 8).
+
+        Phase 7 (plan 07-01): the snapshot forwards the live ``style`` so a
+        style edit survives every snapshot/restore round-trip (undo,
+        page-switch, ``_snapshot_current_page``) — the same Pitfall 1
+        discipline applied to the style field.
         """
         snapshots: list[PageBox] = []
         for item in self._box_items:
@@ -1741,6 +1746,7 @@ class EditorCanvas(QGraphicsView):
                     edited=item.pagebox.edited,
                     bubble_no=item.pagebox.bubble_no,
                     manual_override=item.pagebox.manual_override,
+                    style=item.pagebox.style,
                 )
             )
         return snapshots
