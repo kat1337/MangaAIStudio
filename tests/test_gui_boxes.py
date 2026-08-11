@@ -4253,6 +4253,34 @@ def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
+def test_vertical_toggle_constructs_payload_on_never_ocrd_box(
+    qtbot, tmp_path
+) -> None:
+    """WR-01: toggling Vertical on a payload-None (never-OCR'd user) box must
+    WRITE the flag — the lazy-construction guard turns the toggle into a real
+    change (no silent no-op with a spurious undo entry + checkbox flip-back)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 80, 80)])[0]
+    assert item.pagebox.payload is None  # a never-OCR'd user box
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    window.inspector_panel.vertical_check.setChecked(True)
+    QApplication.processEvents()
+    assert item.pagebox.payload is not None, (
+        "the vertical toggle must lazily construct the payload (WR-01)"
+    )
+    assert item.pagebox.payload.vertical is True
+
+    # ONE Ctrl+Z restores the pre-toggle state (payload None again).
+    window.on_undo()
+    QApplication.processEvents()
+    assert window.canvas._box_items[0].pagebox.payload is None, (
+        "undo must restore the payload-None pre-toggle state (WR-01)"
+    )
+
+
+@pytest.mark.gui
 def test_vertical_preflagged_box_renders_vertical(qtbot, tmp_path) -> None:
     """D-13: a CTD pre-flagged box (payload.vertical=True) renders tategaki
     with the DEFAULT style — the OR expression picks up payload.vertical."""

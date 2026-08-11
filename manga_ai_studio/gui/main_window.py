@@ -3226,6 +3226,12 @@ class MainWindow(QMainWindow):
         renderer's tategaki path immediately (Pitfall 9 — a toggle must
         re-render, not just write metadata). Records the "style change" op
         name (every style commit incl. the vertical toggle, D-10/surface 13).
+
+        WR-01 (07-REVIEW): a user-drawn box that was never OCR'd has
+        ``payload=None``; ``_ensure_payload()`` (the SINGLE centralized
+        payload-None guard the text setters use) lazily constructs the
+        ``TextBlock`` so the toggle actually writes instead of silently
+        dropping into a no-op undo entry with the checkbox flipping back.
         """
         selected = self._selected_box_items()
         if not selected:
@@ -3236,8 +3242,8 @@ class MainWindow(QMainWindow):
                 pb.payload = copy.copy(pb.payload)
         self._boxes_interaction_start_snapshot = before
         for item in selected:
-            if item.pagebox.payload is not None:
-                item.pagebox.payload.vertical = vertical
+            item.pagebox._ensure_payload()
+            item.pagebox.payload.vertical = vertical
         self.canvas.set_pending_boxes_op_name("style change")
         for item in selected:
             item.refresh_text_overlay()
