@@ -309,7 +309,7 @@ Plans:
 
 **Requirements**: TRAN-02 (currently deferred v2 line in REQUIREMENTS.md)
 **Depends on:** Phase 4, Phase 5
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 
@@ -325,7 +325,7 @@ Plans:
 
 **Wave 3** *(blocked on 07-02 + 07-03)*
 
-- [ ] 07-05-PLAN.md — Inspector Style section + Mixed common-value + live vertical checkbox + Size +/- actions (D-05/D-10/D-13/D-16)
+- [x] 07-05-PLAN.md — Inspector Style section + Mixed common-value + live vertical checkbox + Size +/- actions (D-05/D-10/D-13/D-16)
 
 ---
 *Roadmap created: 2026-07-11*
