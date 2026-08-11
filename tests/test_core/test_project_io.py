@@ -36,6 +36,7 @@ from manga_ai_studio.core.project_io import (
     save_page_file,
     save_project,
 )
+from manga_ai_studio.core.text_style import TextStyle
 from panelcleaner.comic_text_detector.utils.textblock import TextBlock
 from panelcleaner.structures import Box
 
@@ -110,6 +111,147 @@ def test_pagebox_json_round_trip() -> None:
     # D-15 seam: mask/std_dev are never serialized, always None on load.
     assert out.mask is None
     assert out.std_dev is None
+
+
+@pytest.mark.unit
+def test_style_field_round_trip() -> None:
+    """A non-default style survives pagebox_to_json -> json_to_pagebox (D-07).
+
+    Field-wise equality (never identity): the restored style equals the
+    source field-by-field — font family/flags/size, alignment, the effect
+    dicts — and is a NEW instance (the .mas load never aliases a live style,
+    Pitfall 8 discipline).
+    """
+    style = TextStyle(
+        font_family="Yu Gothic UI",
+        bold=True,
+        italic=False,
+        font_size_px=22.0,
+        auto_fit=False,
+        color="#ff6b6b",
+        align_h="right",
+        align_v="top",
+        vertical=True,
+        outline={"enabled": True, "color": "#111111", "width_px": 3.0},
+        glow={"enabled": True, "color": "#ffff00", "radius_px": 8.0, "opacity": 0.5},
+        shadow={
+            "enabled": True, "color": "#000000", "radius_px": 5.0,
+            "dx": 3.0, "dy": 4.0, "opacity": 0.7,
+        },
+    )
+    pb = PageBox(
+        box=Box(10, 20, 200, 300),
+        origin=USER,
+        payload=None,
+        edited=True,
+        bubble_no=3,
+        manual_override=True,
+        style=style,
+    )
+
+    out = json_to_pagebox(pagebox_to_json(pb))
+    assert out.style is not None
+    assert out.style is not style  # a fresh instance, never identity
+    assert out.style.font_family == "Yu Gothic UI"
+    assert out.style.bold is True
+    assert out.style.italic is False
+    assert out.style.font_size_px == 22.0
+    assert out.style.auto_fit is False
+    assert out.style.color == "#ff6b6b"
+    assert out.style.align_h == "right"
+    assert out.style.align_v == "top"
+    assert out.style.vertical is True
+    assert out.style.outline == {"enabled": True, "color": "#111111", "width_px": 3.0}
+    assert out.style.glow == {
+        "enabled": True, "color": "#ffff00", "radius_px": 8.0, "opacity": 0.5,
+    }
+    assert out.style.shadow == {
+        "enabled": True, "color": "#000000", "radius_px": 5.0,
+        "dx": 3.0, "dy": 4.0, "opacity": 0.7,
+    }
+
+
+@pytest.mark.unit
+def test_legacy_mas_without_style_loads_with_defaults() -> None:
+    """A Phase 5-shape pagebox dict (NO style key) loads with the default
+    style (Pitfall 8).
+
+    Old .mas files predate the D-07 style field: "style" is an OPTIONAL load
+    key — absent -> ``TextStyle()`` defaults, never ProjectFormatError.
+    """
+    legacy = {
+        "box": [0, 0, 100, 40],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    out = json_to_pagebox(legacy)
+    assert out.style == TextStyle()
+
+
+@pytest.mark.unit
+def test_style_none_round_trip() -> None:
+    """A style-None box writes "style": None and reloads with the DEFAULT
+    style (json null round-trip).
+
+    The projection is explicit about a missing style, and the load side
+    treats it exactly like an absent key (Pitfall 8).
+    """
+    pb = PageBox(box=Box(0, 0, 10, 10), origin=USER, payload=None, style=None)
+    d = pagebox_to_json(pb)
+    assert d["style"] is None
+    out = json_to_pagebox(d)
+    assert out.style == TextStyle()
+
+
+@pytest.mark.unit
+def test_style_v5_clamped_on_load() -> None:
+    """Crafted style values clamp on load — never reach the renderer raw
+    (T-07-09, the V5 coercion boundary).
+
+    width_px 300 -> 256, opacity 1.5 -> 1.0 (the ``TextStyle.from_dict``
+    bounds); font_size_px 300 stays (within the 1..1024 range).
+    """
+    crafted = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+        "style": {
+            "font_size_px": 300,
+            "auto_fit": False,
+            "outline": {"enabled": True, "color": "#0b0b0e", "width_px": 300},
+            "glow": {"enabled": True, "color": "#ffffff", "radius_px": 4.0, "opacity": 1.5},
+        },
+    }
+    out = json_to_pagebox(crafted)
+    s = out.style
+    assert s is not None
+    assert s.font_size_px == 300.0
+    assert s.outline["width_px"] == 256.0
+    assert s.glow["opacity"] == 1.0
+
+
+@pytest.mark.unit
+def test_required_keys_unchanged() -> None:
+    """The required-key validation is untouched: a pagebox dict missing
+    "box" still raises ProjectFormatError (style never joins the required
+    key set — it stays optional, Pitfall 8).
+    """
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox(
+            {
+                "origin": USER,
+                "edited": False,
+                "bubble_no": None,
+                "manual_override": False,
+                "payload": None,
+            }
+        )
 
 
 @pytest.mark.unit
