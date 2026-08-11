@@ -36,6 +36,7 @@ from manga_ai_studio.core.ocr_export import (
     split_text_onto_lines,
     write_page_ocr_json,
 )
+from manga_ai_studio.core.text_style import TextStyle
 
 
 def _two_line_payload(
@@ -176,6 +177,94 @@ def test_d15_seam_never_exported() -> None:
     assert set(blk.keys()) == {
         "box", "vertical", "text", "translation", "bubble_no", "origin", "lines",
     }
+
+
+@pytest.mark.unit
+def test_style_block_shape() -> None:
+    """The D-07 style block: "style" at BLOCK level with the to_dict spelling.
+
+    Pins the exact block JSON — the D-19 keys (box/vertical/text/translation/
+    bubble_no/origin/lines) unchanged, plus the block-level "style" entry
+    equal to ``TextStyle.to_dict()`` of the same box (Pitfall 6 — ONE
+    spelling; per-box flat style, D-06).
+    """
+    style = TextStyle(
+        font_family="Yu Gothic UI",
+        font_size_px=22.0,
+        auto_fit=False,
+        color="#ff6b6b",
+        outline={"enabled": True, "color": "#0b0b0e", "width_px": 3.0},
+    )
+    pb = PageBox(
+        box=Box(120, 340, 480, 410),
+        origin=DETECTED,
+        payload=_two_line_payload(),
+        bubble_no=3,
+        style=style,
+    )
+    data = build_page_ocr_json([pb], img_w=1600, img_h=2400)
+    assert data["blocks"][0] == {
+        "box": [120, 340, 480, 410],
+        "vertical": False,
+        "text": "First line\nSecond line",
+        "translation": "Two lines of dialogue",
+        "bubble_no": 3,
+        "origin": DETECTED,
+        "style": style.to_dict(),
+        "lines": [
+            {"box": [122, 342, 478, 372], "text": "First line"},
+            {"box": [122, 378, 478, 408], "text": "Second line"},
+        ],
+    }
+
+
+@pytest.mark.unit
+def test_version_is_task2_decision() -> None:
+    """The emitted "version" equals the Task 2 checkpoint decision ("2").
+
+    D-07 one-way: the bump signals the style block's presence to downstream
+    consumers (Option A — explicit published-contract extension, RESEARCH A5).
+    """
+    data = build_page_ocr_json(_page_with_two_boxes(), img_w=100, img_h=100)
+    assert data["version"] == "2"
+    assert OCR_JSON_VERSION == "2"
+
+
+@pytest.mark.unit
+def test_style_none_block() -> None:
+    """A style-None box emits "style": None in its block (D-07 json null).
+
+    The projection is explicit about a missing style; the D-19 key set is
+    otherwise unchanged.
+    """
+    pb = PageBox(box=Box(10, 10, 60, 30), origin=USER, payload=None, style=None)
+    data = build_page_ocr_json([pb], img_w=100, img_h=100)
+    blk = data["blocks"][0]
+    assert blk["style"] is None
+    assert set(blk.keys()) == {
+        "box", "vertical", "text", "translation", "bubble_no", "origin",
+        "style", "lines",
+    }
+
+
+@pytest.mark.unit
+def test_style_block_one_spelling() -> None:
+    """The block's style dict is byte-equal to ``TextStyle.to_dict()``.
+
+    Pitfall 6: the writer MUST call ``to_dict()`` — no hand-built dict at
+    the call site, so the .mas writer and the _ocr.json writer can never
+    drift (one dict builder under test).
+    """
+    style = TextStyle(
+        font_family="Yu Gothic UI",
+        bold=True,
+        font_size_px=22.0,
+        auto_fit=False,
+        glow={"enabled": True, "color": "#ffff00", "radius_px": 8.0, "opacity": 0.5},
+    )
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=USER, payload=None, style=style)
+    data = build_page_ocr_json([pb], img_w=100, img_h=100)
+    assert data["blocks"][0]["style"] == style.to_dict()
 
 
 @pytest.mark.unit
