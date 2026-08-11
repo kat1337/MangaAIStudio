@@ -122,7 +122,8 @@ def test_export_single_pristine_page(qtbot, tmp_path, monkeypatch) -> None:
     """The TRACER contract: Save As dialog (D-22 default) -> D-19 JSON written
     NEXT TO the source page as {stem}_ocr.json -> success flash.
 
-    The JSON carries version "1", the CURRENT canvas dims, and the seeded
+    The JSON carries version "2" (D-19 contract, plan 07-04 Task 2 decision —
+    the D-07 style block bump), the CURRENT canvas dims, and the seeded
     box's text/translation/bubble_no/origin + per-line entries (the shape the
     core tests pin on ``build_page_ocr_json`` — here asserted on DISK).
     """
@@ -144,7 +145,7 @@ def test_export_single_pristine_page(qtbot, tmp_path, monkeypatch) -> None:
     assert target.is_file(), "the D-22 sidecar must exist next to the source"
 
     data = json.loads(target.read_text(encoding="utf-8"))
-    assert data["version"] == "1"
+    assert data["version"] == "2"
     assert data["img_width"] == canvas_dims[1]  # CURRENT canvas dims (D-22)
     assert data["img_height"] == canvas_dims[0]
     blk = data["blocks"][0]
@@ -434,7 +435,7 @@ def test_batch_export_writes_all_pages(qtbot, tmp_path) -> None:
         (sidecar_3, (16, 16)),
     ):
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert data["version"] == "1"
+        assert data["version"] == "2"  # D-19 contract (plan 07-04 Task 2 decision)
         assert data["img_width"] == expected_dims[1]
         assert data["img_height"] == expected_dims[0]
     # The current page's box made it into its own JSON only.

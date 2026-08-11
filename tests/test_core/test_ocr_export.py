@@ -80,7 +80,7 @@ def test_json_shape() -> None:
 
     # Top level
     assert set(data.keys()) == {"version", "img_width", "img_height", "blocks"}
-    assert data["version"] == OCR_JSON_VERSION == "1"
+    assert data["version"] == OCR_JSON_VERSION == "2"
     assert data["img_width"] == 1600
     assert data["img_height"] == 2400
 

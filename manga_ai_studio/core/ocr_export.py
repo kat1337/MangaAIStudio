@@ -15,7 +15,7 @@ import here would drag Qt into this no-Qt core module.
 D-19 shape (one page)::
 
     {
-      "version": "1",
+      "version": "2",
       "img_width": 1600,
       "img_height": 2400,
       "blocks": [
@@ -26,6 +26,7 @@ D-19 shape (one page)::
           "translation": "Two lines of dialogue",
           "bubble_no": 3,
           "origin": "detected" | "user",
+          "style": { ... },  # D-07: TextStyle.to_dict() — "2" signals its presence
           "lines": [
             {"box": [122, 342, 478, 372], "text": "First line"},
             {"box": [122, 378, 478, 408], "text": "Second line"}
@@ -66,7 +67,11 @@ from manga_ai_studio.core.box_model import DETECTED, USER
 
 # The published version string — pinned once (D-19 contract). Downstream
 # typesetting tools may key on it; do not change without bumping consumers.
-OCR_JSON_VERSION = "1"
+# "2" (decision 2026-08-11, plan 07-04 Task 2 checkpoint): the D-07 style
+# block (per-block "style" entry) extends the published shape — the bump
+# signals the extension explicitly so consumers can branch on the version
+# to detect style presence. The D-19 key set is otherwise unchanged.
+OCR_JSON_VERSION = "2"
 
 
 def split_text_onto_lines(text, lines: list) -> list[str]:
