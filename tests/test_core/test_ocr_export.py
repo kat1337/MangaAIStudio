@@ -183,6 +183,24 @@ def test_d15_seam_never_exported() -> None:
 
 
 @pytest.mark.unit
+def test_bare_marker_payload_degrades_not_crashes() -> None:
+    """WR-03: a non-``TextBlock`` payload (e.g. a bare marker str — the suite
+    builds ``PageBox(payload="p")``) must DEGRADE in the export, mirroring
+    ``gui/text_renderer.current_focus_text``'s ``getattr`` contract — never an
+    ``AttributeError`` in the export worker."""
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=USER, payload="bare-marker")
+    data = build_page_ocr_json([pb], 100, 100)
+    blk = data["blocks"][0]
+    assert blk["vertical"] is False
+    assert blk["text"] == ""
+    assert blk["translation"] == ""
+    assert blk["lines"] == []
+    # The D-19 block still carries the box's own real fields.
+    assert blk["box"] == [1, 2, 3, 4]
+    assert blk["origin"] == USER
+
+
+@pytest.mark.unit
 def test_style_block_shape() -> None:
     """The D-07 style block: "style" at BLOCK level with the to_dict spelling.
 

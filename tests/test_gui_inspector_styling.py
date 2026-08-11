@@ -371,6 +371,31 @@ def test_mixed_state_presented(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_load_multi_selection_bare_payload_defensive(qtbot) -> None:
+    """WR-03: ``load_multi_selection`` must survive a bare-marker payload (a
+    non-``TextBlock`` object — the suite builds ``PageBox(payload="p")``): the
+    vertical read is ``getattr``-based, mirroring
+    ``gui/text_renderer.current_focus_text``, so no AttributeError in the
+    selection handler."""
+    from PySide6.QtCore import Qt
+
+    panel = _make_inspector(qtbot)
+    bare = PageBox(box=Box(10, 20, 60, 60), origin="user", payload="p")
+    normal = _pagebox_with_style()
+
+    # bare (False) vs normal (False) -> uniform; the panel populates without
+    # crashing on the bare marker.
+    panel.load_multi_selection([bare, normal])
+    assert panel.vertical_check.isChecked() is False
+
+    # bare (False) vs a vertical-True box -> tri-state Mixed, still no crash.
+    vertical_box = _pagebox_with_style()
+    vertical_box.payload.vertical = True
+    panel.load_multi_selection([bare, vertical_box])
+    assert panel.vertical_check.checkState() == Qt.CheckState.PartiallyChecked
+
+
+@pytest.mark.gui
 def test_style_commit_applies_to_all(qtbot, tmp_path) -> None:
     """D-10 end-to-end: ONE override on a Mixed selection applies to BOTH
     boxes; exactly ONE BOXES emission; ONE Ctrl+Z restores both PRE-edit

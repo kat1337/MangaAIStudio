@@ -693,8 +693,12 @@ class InspectorPanel(QWidget):
             self._load_effect_row_multi(key, styles)
 
         # Vertical checkbox — differing vertical flags -> tri-state (D-10).
+        # WR-03 (07-REVIEW): getattr keeps a bare-marker payload (any
+        # non-TextBlock object) defensive — same contract as the renderer.
         verticals = {
-            bool(pb.payload.vertical) if pb.payload is not None else False
+            bool(getattr(pb.payload, "vertical", False))
+            if pb.payload is not None
+            else False
             for pb in pageboxes
         }
         was = self.vertical_check.blockSignals(True)

@@ -114,10 +114,15 @@ def _payload_text(payload) -> str:
     ``TextBlock.text`` may be a str OR a list (textblock.py:65); a list is
     joined with ``"\\n"`` so the block-level ``text`` field spelling stays
     consistent with the D-20 split.
+
+    WR-03 (07-REVIEW): the access is defensive (``getattr``) — a bare-marker
+    payload (any non-``TextBlock`` object, e.g. a str) must degrade to
+    ``""``, mirroring ``gui/text_renderer.current_focus_text``, instead of
+    raising ``AttributeError`` in the export worker.
     """
     if payload is None:
         return ""
-    t = payload.text
+    t = getattr(payload, "text", None)
     if isinstance(t, list):
         return "\n".join(str(segment) for segment in t)
     return t if t is not None else ""
@@ -160,7 +165,7 @@ def build_page_ocr_json(page_boxes: list, img_w: int, img_h: int) -> dict:
         # D-20: per-line entries ONLY when the payload actually carries line
         # polygons; the block-level text still exports when lines are absent.
         lines = []
-        if payload is not None and payload.lines:
+        if payload is not None and getattr(payload, "lines", None):
             segments = split_text_onto_lines(text, payload.lines)
             lines = [
                 {"box": line_box(quad), "text": segment}
@@ -169,11 +174,17 @@ def build_page_ocr_json(page_boxes: list, img_w: int, img_h: int) -> dict:
         blocks.append(
             {
                 "box": list(pagebox.box.as_tuple),  # [x1, y1, x2, y2]
-                "vertical": payload.vertical if payload is not None else False,
+                "vertical": (
+                    getattr(payload, "vertical", False)
+                    if payload is not None
+                    else False
+                ),
                 "text": text,
-                "translation": (payload.translation or "")
-                if payload is not None
-                else "",
+                "translation": (
+                    (getattr(payload, "translation", "") or "")
+                    if payload is not None
+                    else ""
+                ),
                 "bubble_no": pagebox.bubble_no,  # None -> JSON null (04-10 rule)
                 "origin": pagebox.origin,  # DETECTED / USER strings (box_model)
                 "style": pagebox.style.to_dict()
