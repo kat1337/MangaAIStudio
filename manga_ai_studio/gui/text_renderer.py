@@ -146,6 +146,45 @@ def char_rotates(ch: str) -> bool:
     return ch in _ASCII_ROTATE or ch in _ROTATE_EXTRA
 
 
+# ---------------------------------------------------------------------------
+# Effect allocation bounds (D-14 / T-07-07 — the BallonsTranslator
+# EffectRasterAllocationError policy: an oversized effect surface degrades
+# to no-glow with a loguru warning, never an OOM)
+# ---------------------------------------------------------------------------
+_EFFECT_MAX_DIMENSION = 4096  # planner-pinned max effect surface dimension
+_EFFECT_MAX_PIXELS = 64_000_000  # planner-pinned pixel budget
+
+
+def effect_padding(style: TextStyle) -> float:
+    """The halo/shadow/outline margin around the ink (RESEARCH Pattern 3).
+
+    ``outline half-width + max(glow radius, shadow radius) + |max offset|``
+    — only enabled effects contribute (skipped effects add nothing). Callers
+    (the canvas overlay's bounding rect in plan 07-05, the effect surface
+    sizing here) expand the ink by this on every side so neither the canvas
+    nor the bake clips the halo (Pitfall 2 guard).
+    """
+    pad = 0.0
+    outline = style.outline if isinstance(style.outline, dict) else {}
+    if outline.get("enabled", True):
+        pad += float(outline.get("width_px", 0.0) or 0.0) / 2.0
+    radii: list[float] = []
+    offsets: list[float] = []
+    glow = style.glow if isinstance(style.glow, dict) else {}
+    shadow = style.shadow if isinstance(style.shadow, dict) else {}
+    if glow.get("enabled", False):
+        radii.append(float(glow.get("radius_px", 0.0) or 0.0))
+    if shadow.get("enabled", False):
+        radii.append(float(shadow.get("radius_px", 0.0) or 0.0))
+        offsets.append(abs(float(shadow.get("dx", 0.0) or 0.0)))
+        offsets.append(abs(float(shadow.get("dy", 0.0) or 0.0)))
+    if radii:
+        pad += max(radii)
+    if offsets:
+        pad += max(offsets)
+    return pad
+
+
 @dataclass
 class LayoutResult:
     """Geometry of a laid-out text block (horizontal mode).
@@ -235,6 +274,27 @@ def _valid_color(value: str, default: str) -> QColor:
     return color
 
 
+def _outline_pen(style: TextStyle) -> QPen | None:
+    """The D-14 outline pen from the style, or ``None`` when disabled/zero.
+
+    RoundCap/RoundJoin at the style's width/color (UI-SPEC outline row:
+    0..10 px / default 2; width 0 = off). ``None`` -> no outline pass.
+    """
+    outline = style.outline if isinstance(style.outline, dict) else {}
+    if not outline.get("enabled", True):
+        return None
+    width = float(outline.get("width_px", 0.0) or 0.0)
+    if width <= 0.0:
+        return None
+    return QPen(
+        _valid_color(str(outline.get("color", "#0b0b0e")), "#0b0b0e"),
+        width,
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+        Qt.PenJoinStyle.RoundJoin,
+    )
+
+
 def _build_document(
     text: str, style: TextStyle, size_px: float, inner_w: float
 ) -> QTextDocument:
@@ -257,15 +317,8 @@ def _build_document(
     fmt = QTextCharFormat()
     fmt.setFont(font)
     fmt.setForeground(QBrush(fill))
-    outline = style.outline if isinstance(style.outline, dict) else {}
-    if outline.get("enabled", True) and float(outline.get("width_px", 0.0) or 0.0) > 0:
-        pen = QPen(
-            _valid_color(str(outline.get("color", "#0b0b0e")), "#0b0b0e"),
-            float(outline["width_px"]),
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin,
-        )
+    pen = _outline_pen(style)
+    if pen is not None:
         fmt.setTextOutline(pen)
     cursor = QTextCursor(doc)
     cursor.select(QTextCursor.SelectionType.Document)
@@ -587,20 +640,267 @@ def _layout_vertical_result(
 
 
 def paint(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
-    """Draw ``result`` through ``painter`` — opaque fill + outline, unclipped.
+    """Draw ``result`` through ``painter`` — effect passes, then fill+outline.
 
-    The whole laid-out document is drawn at ``result.origin`` (the engine
-    already applied wrap + horizontal alignment; the merged char format
-    carries the fill and outline). No clip is ever installed (UI-SPEC A6 —
-    overflow renders unclipped on both the canvas and the bake). The
-    ``style`` argument keeps the plan's two-arg contract; the pixels come
-    from the result's document.
+    Shared by the canvas overlay and the bake (D-01, ONE code path): the
+    glow + drop-shadow silhouette passes (D-14) composite BEHIND the glyphs
+    (``CompositionMode_DestinationOver``) and the fill/outline pass draws on
+    top. Horizontal: the laid-out document at ``result.origin`` (engine wrap
+    + alignment; the merged char format carries the opaque fill and the
+    outline). Vertical: the per-char placements (upright or rotated 90 deg —
+    never the whole block, D-11) drawn through per-char plain documents
+    with the same merged format. No clip is ever installed (UI-SPEC A6 —
+    overflow renders unclipped on both the canvas and the bake). Effects
+    are skipped when disabled (the default); an oversized effect surface
+    degrades to no-glow with a loguru warning (T-07-07), never an OOM.
     """
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.translate(result.origin)
-    result.document.drawContents(painter)
+    _draw_effects(painter, result, style)
+    _paint_fill_pass(painter, result, style)
     painter.restore()
+
+
+def _paint_fill_pass(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
+    """The fill + outline pass only (no effects) — horizontal or vertical.
+
+    Also used by the effect silhouette builder, so the halo/shadow shape is
+    exactly the glyph shape the main pass draws (D-01: one shared path).
+    """
+    if result.vertical_placements:
+        _paint_vertical(painter, result, style)
+    else:
+        result.document.drawContents(painter)
+
+
+def _paint_vertical(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
+    """Per-char vertical painting (D-11).
+
+    Each placement's glyph is drawn centered in its box; classified runs
+    rotate 90 deg clockwise around the box center (per-RUN rotation — the
+    W3C mixed orientation; never the whole block). The fill and outline
+    ride ONE merged ``QTextCharFormat`` on a per-char PLAIN document — the
+    proven Phase 4 mechanism (``QPainterPath.addText``/``QTextLayout``
+    glyph paths crash this Python 3.14.2 / PySide6 6.10.1 stack — see the
+    module docstring and the 07-01 deviation note).
+    """
+    font = _style_font(style, result.used_font_size_px)
+    fill = _valid_color(style.color, "#e8e8ea")
+    pen = _outline_pen(style)
+    for p in result.vertical_placements:
+        doc = _char_document(p["char"], font, fill, pen)
+        ntr = _doc_ink_rect(doc)
+        if ntr.isNull():
+            continue
+        painter.save()
+        painter.translate(p["x"] + p["w"] / 2.0, p["y"] + p["h"] / 2.0)
+        if p["rotate"]:
+            painter.rotate(90.0)
+        painter.translate(-ntr.center())
+        doc.drawContents(painter)
+        painter.restore()
+
+
+def _char_document(char: str, font: QFont, fill: QColor, pen: QPen | None) -> QTextDocument:
+    """A single-char PLAIN document with the merged fill/outline format.
+
+    The vertical per-char paint path (the layout is forced before returning
+    so the ink-rect read is stack-safe).
+    """
+    doc = QTextDocument()
+    doc.setPlainText(char)  # ASVS V5: plain text only — no rich-text injection
+    doc.setDocumentMargin(0.0)
+    fmt = QTextCharFormat()
+    fmt.setFont(font)
+    fmt.setForeground(QBrush(fill))
+    if pen is not None:
+        fmt.setTextOutline(pen)
+    cursor = QTextCursor(doc)
+    cursor.select(QTextCursor.SelectionType.Document)
+    cursor.mergeCharFormat(fmt)
+    doc.documentLayout().documentSize()
+    return doc
+
+
+def _doc_ink_rect(doc: QTextDocument) -> QRectF:
+    """The first line's natural text rect — the doc-local glyph ink."""
+    block = doc.firstBlock()
+    layout = block.layout()
+    if layout.lineCount() == 0:
+        return QRectF()
+    return layout.lineAt(0).naturalTextRect()
+
+
+# ---------------------------------------------------------------------------
+# Effect passes — glow + drop shadow (D-14, RESEARCH Pattern 3 / Common
+# Operation 5): the glyph silhouette alpha -> numpy stack blur -> colorize
+# x opacity -> composited BEHIND the fill (DestinationOver) inside a
+# transparent offscreen surface, which is then blitted onto the target
+# painter with SourceOver — glow at zero offset, shadow at the style's
+# dx/dy. The intermediate surface is what makes the effects visible over
+# OPAQUE targets (the bake page, test images): DestinationOver directly
+# onto an opaque destination would hide the halo under it.
+# ---------------------------------------------------------------------------
+
+
+def _draw_effects(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
+    """The glow + shadow silhouette passes (skipped when disabled).
+
+    One shared pass for BOTH orientations (D-01): the fill pass is rendered
+    into a bounded transparent offscreen surface (the glyph silhouette),
+    the blurred/colorized shadow and glow images composite under it with
+    DestinationOver, and the combined surface blits onto the target painter
+    with SourceOver. An oversized surface degrades to no-glow with a loguru
+    warning (T-07-07) instead of OOMing — the caller then draws the fill
+    alone.
+    """
+    glow = style.glow if isinstance(style.glow, dict) else {}
+    shadow = style.shadow if isinstance(style.shadow, dict) else {}
+    glow_on = bool(glow.get("enabled", False)) and float(
+        glow.get("radius_px", 0.0) or 0.0
+    ) > 0.0
+    shadow_on = bool(shadow.get("enabled", False))
+    if not glow_on and not shadow_on:
+        return
+    ink = result.ink
+    if ink.isNull() or ink.width() <= 0.0 or ink.height() <= 0.0:
+        return
+    pad = effect_padding(style)
+    if pad <= 0.0:
+        return
+    rect = ink.adjusted(-pad, -pad, pad, pad)
+    surface = _new_effect_surface(rect)
+    if surface is None:
+        w = max(1, int(math.ceil(rect.width())))
+        h = max(1, int(math.ceil(rect.height())))
+        logger.warning(
+            "Effect surface {}x{} exceeds the bounded allocation ({} px max "
+            "dimension / {} px budget) - glow/shadow skipped",
+            w,
+            h,
+            _EFFECT_MAX_DIMENSION,
+            _EFFECT_MAX_PIXELS,
+        )
+        return
+
+    # 1) The glyph silhouette: the fill pass rendered into the surface
+    #    (transparent background) — the SAME code path as the main paint.
+    surface_painter = QPainter(surface)
+    surface_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    surface_painter.translate(-rect.left(), -rect.top())
+    _paint_fill_pass(surface_painter, result, style)
+    surface_painter.end()
+    alpha = _qimage_argb_to_numpy(surface)[..., 3]
+
+    # 2) Shadow + glow UNDER the fill (DestinationOver — the surface is
+    #    transparent where the fill is absent, so the halo shows through).
+    surface_painter = QPainter(surface)
+    surface_painter.setCompositionMode(
+        QPainter.CompositionMode.CompositionMode_DestinationOver
+    )
+    if shadow_on:
+        surface_painter.drawImage(
+            QPointF(
+                float(shadow.get("dx", 0.0) or 0.0), float(shadow.get("dy", 0.0) or 0.0)
+            ),
+            _colorize_alpha(alpha, shadow),
+        )
+    if glow_on:
+        surface_painter.drawImage(QPointF(0.0, 0.0), _colorize_alpha(alpha, glow))
+    surface_painter.end()
+
+    # 3) The combined surface over the target (SourceOver — works on opaque
+    #    targets like the bake and transparent ones like the overlay cache).
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    painter.drawImage(rect.topLeft(), surface)
+
+
+def _new_effect_surface(rect: QRectF) -> QImage | None:
+    """A bounded transparent ARGB surface for ``rect`` (``None`` when oversized).
+
+    The T-07-07 allocation bound: max dimension + pixel budget; beyond it
+    the caller degrades to no-glow (never an OOM).
+    """
+    w = max(1, int(math.ceil(rect.width())))
+    h = max(1, int(math.ceil(rect.height())))
+    if max(w, h) > _EFFECT_MAX_DIMENSION or w * h > _EFFECT_MAX_PIXELS:
+        return None
+    surface = QImage(w, h, QImage.Format.Format_ARGB32)
+    surface.fill(Qt.GlobalColor.transparent)
+    return surface
+
+
+def _colorize_alpha(alpha: np.ndarray, effect: dict) -> QImage:
+    """Blur + colorize the silhouette alpha into an ARGB effect image."""
+    h, w = alpha.shape
+    color = _valid_color(str(effect.get("color", "#ffffff")), "#ffffff")
+    opacity = float(effect.get("opacity", 1.0) or 1.0)
+    radius = float(effect.get("radius_px", 0.0) or 0.0)
+    blurred = _blur_alpha(alpha, radius)
+    arr = np.zeros((h, w, 4), dtype=np.uint8)
+    arr[..., 0] = color.blue()  # ARGB32 little-endian byte order: B, G, R, A
+    arr[..., 1] = color.green()
+    arr[..., 2] = color.red()
+    arr[..., 3] = (blurred.astype(np.float32) * opacity).astype(np.uint8)
+    return _numpy_rgba_to_qimage(arr)
+
+
+def _blur_alpha(alpha: np.ndarray, radius_px: float) -> np.ndarray:
+    """A separable numpy stack blur of the alpha channel (O(1)/px per axis).
+
+    Three box-blur passes give a Gaussian-ish falloff; zero padding keeps
+    the halo fading to transparent OUTSIDE the silhouette. Radius 0 is the
+    identity (a crisp shadow — the offset > radius contract).
+    """
+    if radius_px <= 0.0:
+        return alpha
+    radius = max(1, int(round(radius_px)))
+    a = alpha.astype(np.float64) / 255.0
+    for _ in range(3):
+        a = _box_blur_axis(a, radius, axis=1)
+        a = _box_blur_axis(a, radius, axis=0)
+    return (a * 255.0).astype(np.uint8)
+
+
+def _box_blur_axis(a: np.ndarray, radius: int, axis: int) -> np.ndarray:
+    """One box-blur pass along ``axis`` (window 2*radius+1, zero padding).
+
+    Cumulative sums make the cost O(1) per pixel regardless of the radius
+    (the BallonsTranslator stack-blur shape, numpy-reimplemented).
+    """
+    k = 2 * radius + 1
+    moved = np.moveaxis(a, axis, 0)
+    padded = np.pad(
+        moved, ((radius, radius),) + ((0, 0),) * (moved.ndim - 1), mode="constant"
+    )
+    c = np.cumsum(padded, axis=0)
+    n = moved.shape[0]
+    hi = c[k - 1 : k - 1 + n]
+    lo = np.zeros_like(hi)
+    lo[1:] = c[0 : n - 1]
+    return np.moveaxis((hi - lo) / float(k), 0, axis)
+
+
+def _qimage_argb_to_numpy(qimg: QImage) -> np.ndarray:
+    """An ARGB32 ``QImage`` -> a DETACHED ``(H, W, 4)`` uint8 array.
+
+    Byte order: B, G, R, A (ARGB32 on little-endian). 32-bit scanlines are
+    4-byte aligned, so no padding handling is needed; the trailing
+    ``.copy()`` detaches (Pitfall 2).
+    """
+    img = qimg.convertToFormat(QImage.Format.Format_ARGB32)
+    h, w = img.height(), img.width()
+    raw = bytes(img.bits())
+    arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
+    return arr.copy()
+
+
+def _numpy_rgba_to_qimage(argb: np.ndarray) -> QImage:
+    """A ``(H, W, 4)`` uint8 array (B, G, R, A order) -> a DETACHED ARGB32 QImage."""
+    h, w = argb.shape[:2]
+    qimg = QImage(argb.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+    return qimg.copy()  # Pitfall 2 — detach
 
 
 # ---------------------------------------------------------------------------
