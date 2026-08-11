@@ -193,6 +193,14 @@ class MainWindow(QMainWindow):
         # set). None = no geometry op pushed yet on this page.
         self._last_geometry_op_name: str | None = None
 
+        # Plan 07-02 (D-09): the last GROUP-op name ("Moved {n} boxes" /
+        # "Deleted {n} boxes") recorded at push time (consumed from
+        # ``canvas.take_pending_boxes_op_name()`` in ``_on_boxes_modified``) so
+        # the Ctrl+Z flash names the group op instead of the generic "box edit"
+        # (the 06-WR-01 recorded-op-name pattern, scoped to the BOXES stack).
+        # None = the last boxes push was an ordinary single-box op.
+        self._last_boxes_op_name: str | None = None
+
         # Plan 03-08 (FLOW-02 regression / UAT test 3 addendum): per-page
         # before-state snapshot for the mask push hook. The mask side
         # historically pushed ONLY the after-state (``canvas.get_mask()`` post-
@@ -482,13 +490,13 @@ class MainWindow(QMainWindow):
         # consumes, plan 07-05). Shortcut verified free in the Phase 1-6 map
         # (UI-SPEC conflict audit, T-07-05); single binding per sequence (the
         # CR-14 discipline). Enabled iff a page is open AND >= 1 box exists AND
-        # no async op is running (mirrors action_ocr_all's gate shape) -
+        # no async op is running (mirrors action_ocr_all's :1097-1099 shape) —
         # refreshed in _refresh_action_states.
         self.action_select_all_boxes = QAction("Select All Boxes", self)
         self.action_select_all_boxes.setShortcut(QKeySequence("Ctrl+A"))
-        # G-05-1 (plan 05-10): the zero-arg lambda - QAction.triggered ALWAYS
+        # G-05-1 (plan 05-10): the zero-arg lambda — QAction.triggered ALWAYS
         # emits the action's checked state as its first arg, so partials with
-        # \checked\ would make the call signature mismatch when the action is
+        # `checked` would make the call signature mismatch when the action is
         # unchecked.
         self.action_select_all_boxes.triggered.connect(
             lambda: self.canvas.select_all_boxes()
@@ -2806,6 +2814,23 @@ class MainWindow(QMainWindow):
         """
         if self.history is None or self._suppress_boxes_push:
             return
+        # Plan 07-02 (D-09): consume the pending group-op name BEFORE pushing
+        # (06-WR-01 pattern — recorded at push time so the Ctrl+Z flash names
+        # the group op). The group flash copy per UI-SPEC surface 32:
+        # "Moved {n} boxes — press Ctrl+Z to undo." / "Deleted {n} boxes —
+        # press Ctrl+Z to restore.". Single-box ops set no pending name, so
+        # they stay silent (Phase 3) and keep the generic undo label.
+        op_name = self.canvas.take_pending_boxes_op_name()
+        if op_name is not None:
+            self._last_boxes_op_name = op_name
+            if op_name.startswith("Deleted"):
+                self._show_transient_status(
+                    f"{op_name} — press Ctrl+Z to restore."
+                )
+            else:
+                self._show_transient_status(f"{op_name} — press Ctrl+Z to undo.")
+        else:
+            self._last_boxes_op_name = None
         self.history.push_boxes_state(before_snapshot)
         self._update_undo_redo_actions()
         # WR-05: keep the Inspector in sync — an inline-edit commit refreshes
@@ -2954,7 +2979,13 @@ class MainWindow(QMainWindow):
         image-op names — rotate / crop / curves / resize — per the UI-SPEC
         surface 28 undo-feedback row (D-14), so a geometry-record undo flashes
         e.g. "Undo: rotate".
+
+        Plan 07-02 (D-09): the group-op names ("Moved {n} boxes" / "Deleted
+        {n} boxes") pass through verbatim — the recorded op name IS the label
+        (surface 13 extended op set).
         """
+        if kind_or_op.startswith(("Moved ", "Deleted ")):
+            return kind_or_op
         if kind_or_op in ("rotate", "crop", "curves", "resize"):
             return kind_or_op
         if kind_or_op == "mask":
@@ -3015,6 +3046,12 @@ class MainWindow(QMainWindow):
                 # the (0,0) full-frame shape identifies it; prefer the
                 # recorded op name over the kind-based 'inpaint' fallback.
                 return self._undo_op_label(self._last_geometry_op_name)
+        if kind == "boxes" and self._last_boxes_op_name is not None:
+            # Plan 07-02 (D-09): a group move/delete pushes ONE ordinary
+            # single-kind BOXES entry — prefer the recorded group-op name so
+            # the flash reads "Undo: Moved 3 boxes" / "Undo: Deleted 2 boxes"
+            # instead of the generic "box edit" (06-WR-01 pattern).
+            return self._undo_op_label(self._last_boxes_op_name)
         return self._undo_op_label(kind)
 
     def _current_undo_state(self):

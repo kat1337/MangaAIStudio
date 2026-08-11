@@ -1148,18 +1148,16 @@ class EditorCanvas(QGraphicsView):
             self._advance_create(curr)
             event.accept()
             return
-        # --- Phase 3 box move: reposition the selected box by the scene delta.
-        if self._moving_box is not None:
+        # --- Phase 3 box move: reposition the selected box(es) by the scene
+        # delta. D-09 (plan 07-02): a GROUP move applies the SAME delta to
+        # every ``_group_move`` entry — reposition-only (setRect + handle
+        # sync per item, RC-1: no overlay refresh, no re-layout).
+        if self._moving_box is not None and self._group_move:
             dx = curr.x() - self._box_drag_anchor.x()
             dy = curr.y() - self._box_drag_anchor.y()
-            new_rect = QRectF(
-                self._move_anchor_box_pos.x() + dx,
-                self._move_anchor_box_pos.y() + dy,
-                self._moving_box.rect().width(),
-                self._moving_box.rect().height(),
-            )
-            self._moving_box.setRect(new_rect)
-            self._moving_box._sync_handles()
+            for item, start_rect in self._group_move.items():
+                item.setRect(start_rect.translated(dx, dy))
+                item._sync_handles(primary=(item is self._primary_box))
             event.accept()
             return
 
@@ -1211,10 +1209,16 @@ class EditorCanvas(QGraphicsView):
             # move emits.
             if self._moving_box is not None:
                 before = self._boxes_interaction_start_snapshot
-                _mb = self._moving_box
-                moved = _mb.rect() != self._move_start_rect
+                moved = any(
+                    item.rect() != start_rect
+                    for item, start_rect in self._group_move.items()
+                )
+                n = len(self._group_move)
                 self._moving_box = None
+                self._group_move = {}
                 if moved:
+                    if n > 1:
+                        self._pending_boxes_op_name = f"Moved {n} boxes"
                     self.boxes_modified.emit(before)
                 self.viewport().releaseMouse()
                 event.accept()
@@ -1469,8 +1473,22 @@ class EditorCanvas(QGraphicsView):
         base class accepts unhandled keys, which was shadowing those shortcuts
         when the canvas had focus (CR-09).
         """
-        # --- Phase 3 box Delete/Esc (D-12 silent delete, D-08 Esc deselect).
+        # --- Phase 3 box Delete/Esc (D-12 silent delete, D-08 Esc deselect;
+        # plan 07-02 D-09 grouped delete + Esc deselect-ALL).
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            selected_items = [it for it in self._box_items if it.isSelected()]
+            if len(selected_items) > 1:
+                before = self.boxes_snapshot()
+                for it in selected_items:
+                    self._scene.removeItem(it)
+                    self._box_items.remove(it)
+                self._refresh_empty_box_hint()
+                self._pending_boxes_op_name = f"Deleted {len(selected_items)} boxes"
+                self._selection_order = []
+                self._primary_box = None
+                self.boxes_modified.emit(before)
+                event.accept()
+                return
             selected = self._selected_box()
             if selected is not None:
                 self._remove_box(selected)
@@ -1894,6 +1912,11 @@ class EditorCanvas(QGraphicsView):
         self._primary_box = self._selection_order[-1] if self._selection_order else None
         self._sync_handles_visibility()
 
+    def take_pending_boxes_op_name(self) -> str | None:
+        """Return and clear the pending group-op name (D-09, plan 07-02)."""
+        name = self._pending_boxes_op_name
+        self._pending_boxes_op_name = None
+        return name
     def _box_item_at(self, scene_pos: QPointF) -> CornerHandle | BoxItem | None:
         """Return the topmost visible box handle or box at ``scene_pos``.
 
@@ -1926,21 +1949,20 @@ class EditorCanvas(QGraphicsView):
         driven via the scene's selection API so ``itemChange`` fires and the
         pen/handles update.
         """
-        self._deselect_box()
-        # Selecting through the scene (not item.setSelected) keeps Qt's
-        # selection machinery consistent; setSelected is fine too but going
-        # via the scene avoids edge cases with the current selection set.
-        item.setSelected(True)
+        if not item.isSelected():
+            self._deselect_box()
+            item.setSelected(True)
+        self._note_selection_order(item)
+        self._primary_box = item
+        # D-09: arm the GROUP move — RESEARCH Common Operation 6.
+        self._group_move = {
+            it: QRectF(it.rect()) for it in self._box_items if it.isSelected()
+        }
         self._moving_box = item
-        r = item.rect()
-        self._move_anchor_box_pos = QPointF(r.x(), r.y())
-        # WR-04 (plan 03-07): record the start rect so the move-commit branch
-        # can skip emitting boxes_modified when the box did not actually move
-        # (a plain click-to-select with no drag).
-        self._move_start_rect = QRectF(r)
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        self._sync_handles_visibility()
         # The viewport, not a graphics item, owns this drag.  This keeps the
         # canvas receiving move/release events even when the pointer leaves the
         # item (or its child handle) while dragging.

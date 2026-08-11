@@ -3794,3 +3794,192 @@ def test_esc_deselects_all(qtbot) -> None:
     canvas.keyPressEvent(esc)
     assert len(canvas._scene.selectedItems()) == 0
     assert a.isSelected() is False and b.isSelected() is False
+
+
+# ===========================================================================
+# Plan 07-02 (D-09) — grouped move + grouped delete (Task 2)
+# ===========================================================================
+# Dragging ANY member of a multi-selection moves the whole group by the same
+# delta with ONE arm-time boxes snapshot (one Ctrl+Z restores the group);
+# Delete removes ALL selected boxes silently with one pre-delete snapshot.
+# The group op names the undo flash ("Moved {n} boxes" / "Deleted {n} boxes").
+# NOTE: these tests drive REAL Qt event delivery (QTest.mousePress/Move/
+# Release — the _drive_real_body_move pattern) because the synthetic
+# QMouseEvent helpers report button()=NoButton on release, which never enters
+# the move-COMMIT branch (the emit gate). The real path is the committed
+# production interaction (canvas.py mouseReleaseEvent).
+
+
+def _drive_real_body_drag(
+    canvas: EditorCanvas, from_scene: tuple[float, float], to_scene: tuple[float, float]
+) -> None:
+    """Drive a REAL Qt press/move/release body drag on the canvas viewport.
+
+    ``from_scene`` must land on a SELECTED box member (the group arm keeps the
+    selection; a plain press on a member of a multi-selection does NOT clear
+    it). Mirrors ``_drive_real_body_move`` but stays canvas-only (no qtbot).
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    vp = canvas.viewport()
+    vp_from = canvas.mapFromScene(QPointF(*from_scene))
+    vp_to = canvas.mapFromScene(QPointF(*to_scene))
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_from.x(), vp_from.y()))
+    QApplication.processEvents()
+    QTest.mouseMove(vp, QPoint(vp_to.x(), vp_to.y()))
+    QApplication.processEvents()
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(vp_to.x(), vp_to.y()))
+    QApplication.processEvents()
+
+
+@pytest.mark.gui
+def test_group_move_one_undo(qtbot, tmp_path) -> None:
+    """Drag one selected member -> ALL selected rects shift by the SAME delta;
+    the history holds exactly ONE boxes entry; one undo() restores every
+    pre-move rect (D-09; RESEARCH Common Operation 6; T-07-06)."""
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    items = _seed_boxes_window(
+        window,
+        [Box(10, 10, 60, 60), Box(100, 100, 160, 160), Box(200, 200, 260, 260)],
+    )
+    a, b, c = items
+    canvas.select_all_boxes()
+    assert len(canvas._scene.selectedItems()) == 3
+    pre = [QRectF(it.rect()) for it in items]
+
+    # Drag the FIRST member (35,35) -> (75,65) through REAL event delivery.
+    _drive_real_body_drag(canvas, (35.0, 35.0), (75.0, 65.0))
+
+    # EVERY selected box moved by the SAME delivered delta (QTest truncates
+    # sub-pixels at the fractional fit scale, so assert the group property,
+    # not the nominal delta).
+    dx = a.rect().x() - pre[0].x()
+    dy = a.rect().y() - pre[0].y()
+    assert (dx, dy) != (0, 0), "the drag must actually move the group"
+    for i, it in enumerate(items):
+        assert it.rect().x() == pre[i].x() + dx
+        assert it.rect().y() == pre[i].y() + dy
+    # The boxes stack holds exactly ONE entry for the whole group op.
+    assert len(window.history._boxes_undo) == 1
+    # The op-name flash fired.
+    assert window.status_bar_left.text() == "Moved 3 boxes \u2014 press Ctrl+Z to undo."
+
+    # ONE undo restores every pre-move rect. The restore REBUILDS the layer
+    # (set_boxes), so re-fetch the items — the pre-drag references are stale.
+    window.on_undo()
+    QApplication.processEvents()
+    restored_items = list(canvas._box_items)
+    assert len(restored_items) == 3
+    for i, it in enumerate(restored_items):
+        assert it.rect() == pre[i], (
+            "one Ctrl+Z must restore the WHOLE group (single BOXES snapshot)"
+        )
+    # The undo flash carries the recorded op name (06-WR-01 pattern).
+    assert window.status_bar_left.text() == "Undo: Moved 3 boxes"
+
+
+@pytest.mark.gui
+def test_group_delete_one_undo(qtbot, tmp_path) -> None:
+    """Delete with a multi-selection removes ALL selected boxes SILENTLY (no
+    dialog) with ONE pre-delete snapshot; one undo restores the full set
+    (D-09/D-12; T-07-06)."""
+    from PySide6.QtGui import QKeyEvent
+
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    items = _seed_boxes_window(
+        window,
+        [Box(10, 10, 60, 60), Box(100, 100, 160, 160), Box(200, 200, 260, 260)],
+    )
+    pre_boxes = [it.current_box() for it in items]
+    canvas.select_all_boxes()
+    assert len(canvas._scene.selectedItems()) == 3
+
+    # Drive Delete through the real key handler.
+    del_key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
+    canvas.keyPressEvent(del_key)
+
+    assert canvas.box_count() == 0
+    assert len(window.history._boxes_undo) == 1
+    assert window.status_bar_left.text() == (
+        "Deleted 3 boxes \u2014 press Ctrl+Z to restore."
+    )
+
+    # One undo restores the full set (same boxes).
+    window.on_undo()
+    QApplication.processEvents()
+    assert canvas.box_count() == 3
+    restored = [it.current_box() for it in canvas._box_items]
+    assert {(b.x1, b.y1, b.x2, b.y2) for b in restored} == {
+        (b.x1, b.y1, b.x2, b.y2) for b in pre_boxes
+    }
+
+
+@pytest.mark.gui
+def test_group_move_no_relayout(qtbot, tmp_path, monkeypatch) -> None:
+    """A group drag never re-layouts text: the reposition path is setPos-only
+    (RC-1) — zero renderer layout invocations during the drag (the
+    layout-cache-hit regression lock, plan-07 must_haves)."""
+    import manga_ai_studio.gui.box_item as box_item_mod
+
+    calls: list = []
+    real_layout = box_item_mod.renderer_layout
+
+    def counting_layout(*args, **kwargs):
+        calls.append(1)
+        return real_layout(*args, **kwargs)
+
+    monkeypatch.setattr(box_item_mod, "renderer_layout", counting_layout)
+
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    items = _seed_boxes_window(
+        window,
+        [Box(10, 10, 60, 60), Box(100, 100, 160, 160), Box(200, 200, 260, 260)],
+    )
+    # Give the boxes text so the overlay WOULD render if a re-layout happened.
+    for it in items:
+        it.pagebox.set_recognized_text("hello")
+        it.refresh_text_overlay()
+    assert len(calls) >= 1  # the initial overlay renders DID layout
+    calls.clear()
+
+    canvas.select_all_boxes()
+    _drive_real_body_drag(canvas, (35.0, 35.0), (75.0, 65.0))
+
+    assert calls == [], (
+        "group drag must be reposition-only (setRect + _sync_handles) - "
+        "zero renderer layout invocations (RC-1)"
+    )
+
+
+@pytest.mark.gui
+def test_group_move_no_drag_no_op(qtbot, tmp_path) -> None:
+    """A click WITHOUT a drag on a multi-selection member emits NO
+    boxes_modified (WR-04 no-drag gate extends to the group form) - no spurious
+    BOXES entry."""
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    _seed_boxes_window(
+        window,
+        [Box(10, 10, 60, 60), Box(100, 100, 160, 160), Box(200, 200, 260, 260)],
+    )
+    canvas.select_all_boxes()
+
+    emitted: list = []
+    canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    vp = canvas.viewport()
+    press_at = canvas.mapFromScene(QPointF(35, 35))
+    QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(press_at.x(), press_at.y()))
+    QApplication.processEvents()
+    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(press_at.x(), press_at.y()))
+    QApplication.processEvents()
+
+    assert emitted == [], "a click-without-drag must not emit boxes_modified"
+    assert len(window.history._boxes_undo) == 0
