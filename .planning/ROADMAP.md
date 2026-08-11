@@ -309,13 +309,13 @@ Plans:
 
 **Requirements**: TRAN-02 (currently deferred v2 line in REQUIREMENTS.md)
 **Depends on:** Phase 4, Phase 5
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 Plans:
 
 **Wave 1**
 
-- [ ] 07-01-PLAN.md — Tracer slice: TextStyle model + shared renderer (horizontal) + opaque canvas overlay + Export Typeset… bake (D-01/D-02/D-03/D-04/D-06/D-15)
+- [x] 07-01-PLAN.md — Tracer slice: TextStyle model + shared renderer (horizontal) + opaque canvas overlay + Export Typeset… bake (D-01/D-02/D-03/D-04/D-06/D-15)
 
 **Wave 2** *(blocked on 07-01; parallel — no file overlap)*
 
