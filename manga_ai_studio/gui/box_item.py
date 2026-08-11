@@ -402,7 +402,10 @@ class BoxItem(QGraphicsRectItem):
     the D-15 seam). Renders an origin-coloured border (green detected / amber
     user, D-09) with a selection affordance: 2px unselected / 3px selected +
     a hue tint fill when selected (UI-SPEC §12c). The four corner resize
-    handles (§12b) are visible ONLY on the selected box (D-08 single-select).
+    handles (§12b) are visible ONLY on the selected box (D-08 single-select);
+    plan 07-02 (D-09) extends that to the PRIMARY box only when the canvas
+    installs its is-primary provider (multi-select — handles on the group
+    anchor, UI-SPEC §32).
 
     ``ItemIsSelectable`` provides native selection.  Movement is deliberately
     owned by :class:`EditorCanvas`: it updates ``rect()`` during a drag, which
@@ -490,6 +493,15 @@ class BoxItem(QGraphicsRectItem):
         # construction so set_edit_mode(False) restores exactly what Qt gave
         # the handles by default).
         self._handle_rest_buttons = self.handles["TL"].acceptedMouseButtons()
+        # Plan 07-02 (D-09): WEAKREF to the owning canvas, installed by
+        # ``set_primary_owner``. ``_sync_handles_for_state`` asks it whether
+        # THIS item is the selection PRIMARY (the last-clicked box): corner
+        # handles render on the primary only — a selected non-primary member
+        # keeps its handles hidden (UI-SPEC §32). A weakref (not a lambda or a
+        # strong canvas reference) keeps the item free of a reference cycle —
+        # a cycle stalls Python GC of the canvas and breaks Qt teardown
+        # ordering (crash probe).
+        self._primary_owner = None
         self._apply_origin_pen()
         self._sync_handles()
         # Render the display-object children from the current payload/bubble_no
@@ -516,6 +528,16 @@ class BoxItem(QGraphicsRectItem):
             self.setBrush(QBrush(tint))
         else:
             self.setBrush(Qt.BrushStyle.NoBrush)
+
+    def set_primary_owner(self, owner) -> None:
+        """Install the owning canvas WEAKREF (D-09, plan 07-02).
+
+        ``_sync_handles_for_state`` (which has no canvas context) consults the
+        owner to show corner handles on the PRIMARY box only. ``owner`` is a
+        ``weakref.ref`` to the canvas — the item never holds the canvas
+        strongly (reference-cycle discipline).
+        """
+        self._primary_owner = owner
 
     def _sync_handles(self, primary: bool | None = None) -> None:
         """Show + reposition handles on the selected box (D-08/D-09).
@@ -588,10 +610,25 @@ class BoxItem(QGraphicsRectItem):
         overlay inset (``pen_w/2``), so the inset stays exact on selection
         change. ``itemChange`` calls ``_apply_look_for`` BEFORE this, so the
         pen already reflects the new state here.
+
+        Plan 07-02 (D-09): when the canvas installed its primary-owner
+        weakref (``set_primary_owner``), handles render on the PRIMARY box
+        only — a selected non-primary member keeps its handles hidden (the
+        multi-select affordance, UI-SPEC §32). An owner answer of None means
+        the canvas tracks no primary yet (direct ``setSelected`` paths —
+        tests, create-commit, double-click edit), so the Phase 3 selected-
+        based behavior applies.
         """
         rect = self.rect()
+        show = selected
+        if selected and self._primary_owner is not None:
+            canvas = self._primary_owner()
+            if canvas is not None:
+                primary = canvas._is_primary_provider(self)
+                if primary is not None:
+                    show = bool(primary)
         for handle in self.handles.values():
-            handle.setVisible(selected)
+            handle.setVisible(show)
             handle.reposition(rect)
         self._reposition_text_overlay()
 

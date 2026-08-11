@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from weakref import ref as _weakref
 
 import numpy as np
 
@@ -1042,7 +1043,8 @@ class EditorCanvas(QGraphicsView):
             # priority while ignoring visual-only overlays.
             item = self._box_item_at(scene_pos)
             if isinstance(item, CornerHandle):
-                self._begin_resize(item, scene_pos)
+                if len(self._scene.selectedItems()) == 1:
+                    self._begin_resize(item, scene_pos)
                 event.accept()
                 return
             if isinstance(item, BoxItem):
@@ -1655,6 +1657,9 @@ class EditorCanvas(QGraphicsView):
 
         for pb in list(user_pageboxes) + list(detected_pageboxes):
             item = BoxItem(pb)
+            # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline —
+            # a strong canvas capture stalls GC + breaks Qt teardown ordering).
+            item.set_primary_owner(_weakref(self))
             self._scene.addItem(item)
             # Parent-less items inherit their own visibility; sync to the layer
             # state so a toggle BEFORE any boxes were added still hides them.
@@ -1817,7 +1822,7 @@ class EditorCanvas(QGraphicsView):
         invisible.
         """
         for item in self._box_items:
-            item._sync_handles()
+            item._sync_handles(primary=(item is self._primary_box))
             item.apply_overlay_zoom(zoom)
 
     # --------------------------------------------------- box interaction helpers
@@ -2102,6 +2107,10 @@ class EditorCanvas(QGraphicsView):
         self._box_items.append(item)
         self._deselect_box()
         item.setSelected(True)
+        # Plan 07-02: the fresh box is the sole selection — make it the primary.
+        self._selection_order = [it for it in self._box_items if it.isSelected()]
+        self._primary_box = item
+        self._sync_handles_visibility()
         self._refresh_empty_box_hint()
         # D-01 auto-OCR seam: the box arrives with recognized text. The
         # signal lets MainWindow dispatch the OCR Worker off the GUI thread
@@ -2126,4 +2135,8 @@ class EditorCanvas(QGraphicsView):
         self._scene.removeItem(item)
         self._box_items.remove(item)
         self._refresh_empty_box_hint()
+        # Plan 07-02: a removed box can no longer be the primary — promote the
+        # last-selected remaining item (UI-SPEC §32) + re-assert handle
+        # visibility (D-09).
+        self._refresh_primary_box()
         self.boxes_modified.emit(before)

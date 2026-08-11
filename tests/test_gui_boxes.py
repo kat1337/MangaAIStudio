@@ -3983,3 +3983,116 @@ def test_group_move_no_drag_no_op(qtbot, tmp_path) -> None:
 
     assert emitted == [], "a click-without-drag must not emit boxes_modified"
     assert len(window.history._boxes_undo) == 0
+
+
+# ===========================================================================
+# Plan 07-02 (D-09) — N-selected affordance + primary-only handles + resize gate
+# (Task 3)
+# ===========================================================================
+# Every selected box shows the 3px selected border + hue tint; corner handles
+# render on the PRIMARY (last-clicked) box only; a CornerHandle press inside a
+# multi-selection is a no-op (resize stays single-box); removing the primary
+# promotes the last-selected remaining member (UI-SPEC surface 32).
+
+
+def _visible_handle_count(item: BoxItem) -> int:
+    return sum(1 for h in item.handles.values() if h.isVisible())
+
+
+@pytest.mark.gui
+def test_multi_select_affordance_primary_handles(qtbot) -> None:
+    """N>1: EVERY selected box shows the 3px selected border; exactly ONE box
+    (the primary) shows corner handles (UI-SPEC surface 32 affordance table)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+            PageBox(box=Box(200, 200, 260, 260), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b, c = canvas._box_items
+
+    canvas.mousePressEvent(_press_at(canvas, 35, 35))  # primary = A
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))  # primary = B
+    canvas.mousePressEvent(_shift_press_at(canvas, 230, 230))  # primary = C
+
+    # Selected border on ALL three members (3px pen).
+    for it in (a, b, c):
+        assert it.isSelected() is True
+        assert int(it.pen().width()) == 3
+
+    # Corner handles on the PRIMARY box only.
+    assert canvas._primary_box is c
+    assert _visible_handle_count(c) == 4
+    assert _visible_handle_count(a) == 0
+    assert _visible_handle_count(b) == 0
+
+
+@pytest.mark.gui
+def test_resize_single_box_only(qtbot) -> None:
+    """A CornerHandle press while N>1 boxes are selected is a NO-OP (no group
+    resize — RESEARCH Open Q6); with exactly one selected the Phase 3 resize
+    still works."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b = canvas._box_items
+    pre_a = QRectF(a.rect())
+    pre_b = QRectF(b.rect())
+
+    # Multi-selection: press A's SE corner-handle OFFSET zone (the +-5px hit
+    # shape OUTSIDE the box body, per test_corner_handle_hit_target) + drag ->
+    # nothing resizes (the single-box gate makes the arm a no-op).
+    canvas.mousePressEvent(_shift_press_at(canvas, 35, 35))
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 2
+    canvas.mousePressEvent(_press_at(canvas, 64, 64))  # A's BR handle offset zone
+    canvas.mouseMoveEvent(_move_at(canvas, 80, 80))
+    canvas.mouseReleaseEvent(_release_at(canvas, 80, 80))
+    assert a.rect() == pre_a and b.rect() == pre_b, (
+        "corner-handle drag with a multi-selection must be a no-op (single-box resize)"
+    )
+
+    # Exactly one selected: the Phase 3 resize path still works.
+    canvas.mousePressEvent(_press_at(canvas, 130, 130))  # plain click -> B only
+    assert len(canvas._scene.selectedItems()) == 1
+    canvas.mousePressEvent(_press_at(canvas, 164, 164))  # B's BR handle offset zone
+    canvas.mouseMoveEvent(_move_at(canvas, 180, 180))
+    canvas.mouseReleaseEvent(_release_at(canvas, 180, 180))
+    assert b.rect().width() > pre_b.width() and b.rect().height() > pre_b.height()
+    assert a.rect() == pre_a  # untouched
+
+
+@pytest.mark.gui
+def test_primary_removal_promotes(qtbot) -> None:
+    """Shift+clicking the PRIMARY off promotes the last-selected remaining
+    member to primary — its handles show (UI-SPEC surface 32)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+            PageBox(box=Box(200, 200, 260, 260), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b, c = canvas._box_items
+
+    canvas.mousePressEvent(_press_at(canvas, 35, 35))  # primary = A
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))  # primary = B
+    canvas.mousePressEvent(_shift_press_at(canvas, 230, 230))  # primary = C
+    assert canvas._primary_box is c
+
+    # Toggle the primary (C) off -> B (the last selected) is promoted.
+    canvas.mousePressEvent(_shift_press_at(canvas, 230, 230))
+    assert c.isSelected() is False
+    assert canvas._primary_box is b
+    assert _visible_handle_count(b) == 4
+    assert _visible_handle_count(a) == 0
