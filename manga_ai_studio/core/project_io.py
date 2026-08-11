@@ -194,6 +194,7 @@ def pagebox_to_json(pb) -> dict:
         "edited": pb.edited,
         "bubble_no": pb.bubble_no,
         "manual_override": pb.manual_override,
+        "style": pb.style.to_dict() if pb.style is not None else None,  # D-07
         "payload": None if payload is None else {
             "xyxy": list(payload.xyxy),
             "lines": payload.lines,  # list of 4-point quads
@@ -216,6 +217,7 @@ def json_to_pagebox(d: dict):
     ``None`` (D-15 seam).
     """
     from manga_ai_studio.core.box_model import PageBox
+    from manga_ai_studio.core.text_style import TextStyle
     from panelcleaner.comic_text_detector.utils.textblock import TextBlock
     from panelcleaner.structures import Box
 
@@ -230,6 +232,12 @@ def json_to_pagebox(d: dict):
         payload_raw = d["payload"]
     except KeyError as exc:
         raise ProjectFormatError(f"pagebox missing required key: {exc}") from exc
+
+    # D-07: "style" is an OPTIONAL load key (Pitfall 8 — legacy .mas files
+    # predate the style field). Absent/None -> TextStyle() defaults (a null
+    # round-trips to the default style, never None); a crafted dict clamps
+    # through TextStyle.from_dict (the V5 boundary), never raw.
+    style = TextStyle.from_dict(d.get("style"))
 
     if len(box_vals) != 4:
         raise ProjectFormatError("box must have exactly 4 coordinates")
@@ -268,6 +276,7 @@ def json_to_pagebox(d: dict):
         edited=bool(edited),
         bubble_no=None if bubble_no is None else _coerce_int(bubble_no, "bubble_no"),
         manual_override=bool(manual_override),
+        style=style,  # D-07 — always a TextStyle (defaults when absent/None)
     )
 
 
