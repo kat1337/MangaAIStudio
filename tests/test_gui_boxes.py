@@ -1023,20 +1023,25 @@ def test_moved_box_via_real_events_persists_round_trip(qtbot, tmp_path) -> None:
 # ===========================================================================
 #
 # Phase 4 "boxes become display objects" (D-09): each BoxItem gains a persistent
-# translucent outlined text overlay (QGraphicsTextItem child, z=120) showing the
-# current-focus text (translation when present, else recognized — D-10) and a
-# bubble-number badge (QGraphicsRectItem + digit, z=140, ItemIgnoresTransformations,
-# constant viewport-px). The overlay is PLAIN text (ASVS V5 — no setHtml on OCR
-# output) styled via QTextCharFormat.setTextOutline (RESEARCH Pattern 3, single
-# API). set_text_overlay_visible(False) is the independent visibility layer the
-# Toggle Text Overlay action (T, D-12) drives — independent of the box-layer
-# toggle (Shift+M) and the mask toggle (M).
+# outlined text overlay child (z=120) showing the current-focus text (translation
+# when present, else recognized — D-10) and a bubble-number badge (z=140,
+# ItemIgnoresTransformations, constant viewport-px). Phase 7 (D-01, plan 07-01
+# Task 2) REPLACES the translucent QGraphicsTextItem overlay (UI-SPEC surface
+# 34 supersedes surface 16) with the renderer-driven OPAQUE TypesetOverlayItem:
+# the same gui/text_renderer layout+paint functions the bake uses (canvas ≡
+# bake), the flat per-box TextStyle (defaults when the box has none), and the
+# [10,28]-clamped box-adaptive Auto-fit base at SCENE px (D-15). The T toggle
+# (D-12), box-visibility inheritance, and the setPos-only reposition (RC-1)
+# contracts are unchanged. set_text_overlay_visible(False) is the independent
+# visibility layer the Toggle Text Overlay action (T, D-12) drives — independent
+# of the box-layer toggle (Shift+M) and the mask toggle (M).
 
 # Module constants the implementation must add (UI-SPEC §Z-order). Importing
-# them by name proves they exist; the import fails before Task 1 GREEN.
+# them by name proves they exist; the import fails before Task 2 GREEN.
 from manga_ai_studio.gui.box_item import (  # noqa: E402
     _BADGE_Z,
     _TEXT_OVERLAY_Z,
+    TypesetOverlayItem,
 )
 
 
@@ -1069,15 +1074,13 @@ def test_badge_z_constant_is_140() -> None:
 
 @pytest.mark.gui
 def test_text_overlay_child_exists_and_hidden_by_default(qtbot) -> None:
-    """A BoxItem carries a _text_overlay QGraphicsTextItem child (z=120), hidden by default."""
-    from PySide6.QtWidgets import QGraphicsTextItem
-
+    """A BoxItem carries a renderer-driven TypesetOverlayItem child (z=120)."""
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     # refresh_text_overlay is what shows it; a fresh box with text should show it.
     item.refresh_text_overlay()
     assert hasattr(item, "_text_overlay")
-    assert isinstance(item._text_overlay, QGraphicsTextItem)
+    assert isinstance(item._text_overlay, TypesetOverlayItem)
     assert item._text_overlay.zValue() == 120
 
 
@@ -1088,7 +1091,7 @@ def test_text_overlay_shows_recognized_when_no_translation(qtbot) -> None:
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
     assert item._text_overlay.isVisible() is True
-    assert item._text_overlay.toPlainText() == "hello"
+    assert item._text_overlay.text() == "hello"
 
 
 @pytest.mark.gui
@@ -1097,7 +1100,7 @@ def test_text_overlay_current_focus_rule_translation_wins(qtbot) -> None:
     pb = _pagebox_with_text(recognized="hello", translation="hola")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    assert item._text_overlay.toPlainText() == "hola"
+    assert item._text_overlay.text() == "hola"
 
 
 @pytest.mark.gui
@@ -1110,31 +1113,34 @@ def test_text_overlay_hidden_when_no_recognized_text(qtbot) -> None:
 
 
 @pytest.mark.gui
-def test_text_overlay_document_is_plain_not_rich(qtbot) -> None:
-    """The overlay document is PLAIN text (ASVS V5 — never setHtml on OCR output, T-4-07)."""
+def test_text_overlay_renders_literal_plain_text(qtbot) -> None:
+    """The overlay carries the LITERAL string — plain-text rendering only
+    (ASVS V5 — the shared renderer never rich-texts OCR/translation content)."""
     pb = _pagebox_with_text(recognized="<script>alert(1)</script>")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    # Plain text: toPlainText echoes the literal string; no rich-text flag set.
-    assert item._text_overlay.toPlainText() == "<script>alert(1)</script>"
-    # QTextDocument.isModified not relevant; the contract is the API used.
-    # setPlainText does NOT enable rich text. The document's default is plain.
-    assert item._text_overlay.document().isEmpty() is False
+    # The rendered current-focus text echoes the literal string (no HTML parse).
+    assert item._text_overlay.text() == "<script>alert(1)</script>"
+    assert item._text_overlay.isVisible() is True
 
 
 @pytest.mark.gui
-def test_text_overlay_uses_outlined_text_format(qtbot) -> None:
-    """The overlay glyphs carry a setTextOutline pen (RESEARCH Pattern 3 single API)."""
+def test_text_overlay_renders_through_shared_renderer(qtbot) -> None:
+    """The overlay renders through the SHARED renderer (layout + pixmap cache)
+    with the flat per-box TextStyle (default outline 2px scene px — D-01/D-14)."""
+    from manga_ai_studio.core.text_style import TextStyle
+
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    cursor = item._text_overlay.textCursor()
-    cursor.select(__import__("PySide6").QtGui.QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    # The outline pen is set (2px dark matte per UI-SPEC §Color text-overlay outline).
-    pen = fmt.textOutline()
-    assert pen.style() != Qt.PenStyle.NoPen
-    assert pen.widthF() >= 1.0
+    # The renderer ran: a layout result + a cached pixmap exist.
+    assert item._text_overlay.layout_result is not None
+    assert item._text_overlay.layout_result.text == "hello"
+    assert item._text_overlay.pixmap() is not None
+    # The flat style default: 2px scene-px outline (the 2/zoom viewport
+    # outline is superseded — the width is the style's scene-px width).
+    assert TextStyle().outline["width_px"] == 2.0
+    assert TextStyle().outline["enabled"] is True
 
 
 # -- UAT test 1 gap closure (plan 04-08): overlay geometry tracking (RC-1) --
@@ -1142,49 +1148,45 @@ def test_text_overlay_uses_outlined_text_format(qtbot) -> None:
 # canvas moves/resizes boxes via setRect + _sync_handles (canvas.py:1022-1023,
 # 1597-1598, 1618-1619) on every drag-move and corner-resize, so the RC-1 fix
 # splits a setPos-ONLY _reposition_text_overlay() out of refresh_text_overlay()
-# and calls it from _sync_handles. Pre-fix the overlay stayed at its pre-move
-# scene position (debug session 04-01 measured intersection 0.0 after a move).
+# and calls it from _sync_handles. The plan 07-01 overlay keeps this discipline
+# (refresh_position is setPos-only; the cached pixmap/layout never re-renders
+# during a drag).
 
 
 @pytest.mark.gui
 def test_text_overlay_tracks_box_after_setrect_move(qtbot) -> None:
     """After setRect(move) + _sync_handles the overlay sits INSIDE the moved box (RC-1).
 
-    Matches the debug probe exactly: pre-fix the overlay sceneBoundingRect stays
-    at the pre-move (23,23,217,30) while the box moves to (149,149,202,102) —
-    a 0.0 intersection. Post-fix the overlay topLeft tracks the box's new
-    topLeft (pen width 2/2 + 2px inset = 3px).
+    The overlay top-left tracks the box's new top-left by the SAME delta
+    (renderer inset 2 + the cached ink offset — scene-px, zoom-independent).
     """
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    # Precondition: overlay inset at (23,23) inside box (20,20,220,120).
     tl0 = item._text_overlay.sceneBoundingRect().topLeft()
-    assert tl0.x() == pytest.approx(23.0, abs=0.01)
-    assert tl0.y() == pytest.approx(23.0, abs=0.01)
     item.setRect(QRectF(150, 150, 200, 100))
     item._sync_handles()
     tl = item._text_overlay.sceneBoundingRect().topLeft()
-    assert tl.x() == pytest.approx(153.0, abs=0.01)
-    assert tl.y() == pytest.approx(153.0, abs=0.01)
+    assert tl.x() - tl0.x() == pytest.approx(130.0, abs=0.01)
+    assert tl.y() - tl0.y() == pytest.approx(130.0, abs=0.01)
 
 
 @pytest.mark.gui
 def test_text_overlay_tracks_box_after_tl_edge_resize(qtbot) -> None:
     """After a TL-edge setRect resize + _sync_handles the overlay is INSIDE the box (RC-1).
 
-    A TL/BL/TR-edge resize moves the box's top-left corner, which pre-fix left
-    the overlay detached at the old position (the debug's containment proxy:
-    sceneBoundingRect intersection must be non-empty).
+    A TL/BL/TR-edge resize moves the box's top-left corner; the overlay follows
+    by the same delta and stays inside the box (containment proxy).
     """
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
+    tl0 = item._text_overlay.sceneBoundingRect().topLeft()
     item.setRect(QRectF(60, 40, 180, 90))
     item._sync_handles()
     tl = item._text_overlay.sceneBoundingRect().topLeft()
-    assert tl.x() == pytest.approx(63.0, abs=0.01)
-    assert tl.y() == pytest.approx(43.0, abs=0.01)
+    assert tl.x() - tl0.x() == pytest.approx(40.0, abs=0.01)
+    assert tl.y() - tl0.y() == pytest.approx(20.0, abs=0.01)
     assert (
         item._text_overlay.sceneBoundingRect().intersects(item.sceneBoundingRect())
         is True
@@ -1193,143 +1195,96 @@ def test_text_overlay_tracks_box_after_tl_edge_resize(qtbot) -> None:
 
 @pytest.mark.gui
 def test_text_overlay_reposition_does_not_rebuild_document(qtbot) -> None:
-    """_sync_handles repositions the overlay WITHOUT rebuilding its document (RC-1).
+    """_sync_handles repositions the overlay WITHOUT re-layouting (RC-1).
 
-    The canvas calls _sync_handles on EVERY mouseMoveEvent during a drag, so the
-    reposition must be setPos-only — a full refresh_text_overlay (setPlainText +
-    document rebuild) per mousemove would be wasteful. The rendered text must
-    survive the move unchanged.
+    The canvas calls _sync_handles on EVERY mouseMoveEvent during a drag, so
+    the reposition must be setPos-only — the cached layout result must be the
+    SAME object (a full refresh_text_overlay per mousemove is prohibited).
+    The rendered text survives the move unchanged.
     """
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
+    cached = item._text_overlay.layout_result
+    assert cached is not None
     item.setRect(QRectF(150, 150, 200, 100))
     item._sync_handles()
-    assert item._text_overlay.toPlainText() == "hello"
+    assert item._text_overlay.layout_result is cached, (
+        "a reposition must never re-layout (the cached layout survives)"
+    )
+    assert item._text_overlay.text() == "hello"
 
 
-# -- UAT test 1 gap closure (plan 04-08): zoom clamp + outline (RC-2/RC-3) --
-# UI-SPEC §16 mandates a [10,28] viewport-px font clamp + a legibility outline.
-# Pre-fix the font was flat 14 scene px (4-7 device px at the default
-# fit-to-window zoom ~0.3-0.5) and the 2px outline was scene-px (sub-pixel AA'd
-# away below 100%: 2710 -> 260 -> 0 dark pixels at 1.0/0.5/0.25 zoom — debug
-# session 04-01). Fix: scene font = clamp(14*zoom, 10, 28)/zoom, outline =
-# 2/zoom scene px (constant 2 viewport px), re-applied from the stored
-# _overlay_zoom via apply_overlay_zoom() on every zoom_changed emission.
+# -- UAT test 1 gap closure (plan 04-08): zoom + outline (RC-2/RC-3) --
+# UI-SPEC §16 mandated a [10,28] viewport-px font clamp + a legibility outline.
+# Phase 7 SUPERSEDES the viewport-px contract for OPAQUE text (RESEARCH Pattern
+# 1 note, D-01): the style's font size is SCENE px and the outline width is the
+# style's SCENE-px width — the overlay renders at the style size and scales
+# with the canvas zoom like the artwork itself (WYSIWYG canvas ≡ bake). A zoom
+# change therefore does NOT re-derive the style (the [10,28] clamp + 2/zoom
+# outline are gone; the clamp survives only inside the renderer's Auto-fit
+# base computation at scene px).
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize(
-    "zoom,expected_point",
-    [
-        (0.5, 20.0),
-        (1.0, 14.0),
-        (4.0, 7.0),
-    ],
-)
-def test_text_overlay_font_clamp_scales_with_zoom(qtbot, zoom, expected_point) -> None:
-    """apply_overlay_zoom re-derives the font so the RENDERED px stays in [10,28] (RC-2).
-
-    UI-SPEC §16: the scene font is clamp(14*zoom, 10, 28)/zoom, so the rendered
-    viewport-px size clamp(14*zoom, 10, 28) stays within [10, 28] at every zoom.
-    Pre-fix the font stayed 14 scene px at every zoom (no clamp implemented).
-    The former zoom-0.25/40.0 case moved to the 04-09 section: at 0.25 zoom the
-    clamped 40pt font wraps "hello" to two lines (265-280px > inner width 194),
-    so the 04-09 fit loop (below the clamp, to the 5 vp floor) replaces that
-    clamp-only outcome — see test_text_overlay_fit_loop_reduces_below_clamp_floor_at_low_zoom.
-    """
+@pytest.mark.parametrize("zoom", [0.5, 1.0, 4.0])
+def test_text_overlay_size_is_zoom_independent_scene_px(qtbot, zoom) -> None:
+    """apply_overlay_zoom does NOT re-derive the style: the rendered size stays
+    the scene-px Auto-fit base (14 for the reference box) at every zoom."""
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
     item.apply_overlay_zoom(zoom)
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() == pytest.approx(expected_point, abs=0.1)
-    assert 10.0 <= fmt.font().pointSizeF() * zoom <= 28.0
+    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
+        14.0, abs=0.1
+    )
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize(
-    "zoom,expected_width",
-    [
-        (0.25, 8.0),
-        (0.5, 4.0),
-        (1.0, 2.0),
-        (4.0, 0.5),
-    ],
-)
-def test_text_overlay_outline_width_scales_with_zoom(qtbot, zoom, expected_width) -> None:
-    """apply_overlay_zoom keeps the outline a constant 2 VIEWPORT px (RC-3).
-
-    The outline pen is 2/zoom scene px so it renders 2 device px at any zoom.
-    The scene-px reading (fixed 2 scene px) goes sub-pixel below 100% — the
-    debug session measured 0 dark outline pixels at 0.25 zoom ("just looks
-    white"). Pre-fix the outline stayed 2 scene px at every zoom.
-    """
+def test_text_overlay_outline_width_is_scene_px(qtbot) -> None:
+    """The outline width is the style's SCENE-px width (2px default) — the
+    constant-2-viewport-px 2/zoom outline is superseded (D-01)."""
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    item.apply_overlay_zoom(zoom)
-    from PySide6.QtGui import QTextCursor
+    item.apply_overlay_zoom(0.5)
+    outline = item.pagebox.style.outline if item.pagebox.style is not None else None
+    if outline is None:
+        from manga_ai_studio.core.text_style import TextStyle
 
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    pen = fmt.textOutline()
-    assert pen.widthF() == pytest.approx(expected_width, abs=0.01)
-    assert pen.widthF() * zoom == pytest.approx(2.0, abs=0.01)
+        outline = TextStyle().outline
+    assert outline["width_px"] == 2.0  # scene px — zoom-independent
 
 
 @pytest.mark.gui
-def test_text_overlay_zoom_style_survives_content_refresh(qtbot) -> None:
-    """A content refresh (no zoom arg) reuses the STORED zoom style (RC-2/RC-3).
-
-    Inspector/OCR/inline-edit commits call refresh_text_overlay() without a
-    zoom argument; the style must come from the stored _overlay_zoom so a
-    content refresh never resets the font clamp/outline back to the zoom-1
-    style.
-    """
+def test_text_overlay_content_refresh_keeps_scene_px_style(qtbot) -> None:
+    """A content refresh (no zoom arg) keeps the scene-px style — a content
+    refresh never resets the size (the viewport-px clamp is gone)."""
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
     item.apply_overlay_zoom(0.5)
     pb.set_translation("hola")  # content change -> current focus flips
     item.refresh_text_overlay()
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() == pytest.approx(20.0, abs=0.1)
-    assert fmt.textOutline().widthF() == pytest.approx(4.0, abs=0.01)
+    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
+        14.0, abs=0.1
+    )
+    assert item._text_overlay.text() == "hola"
 
 
 @pytest.mark.gui
 def test_zoom_changed_reapplies_overlay_style_canvas(qtbot) -> None:
-    """The canvas zoom_changed slot forwards its zoom to the overlay style (RC-2/RC-3).
-
-    _on_zoom_changed_reposition_handles previously DISCARDED its zoom argument
-    (a leading-underscore parameter) and only repositioned handles — the
-    overlay style never re-derived from the new zoom. fit_to_window /
-    zoom_reset / wheel zoom all emit zoom_changed (canvas.py:820/827/851), so
-    this single slot covers every zoom path incl. the default fit-to-window.
-    """
+    """The canvas zoom_changed slot forwards its zoom to the overlay; the
+    scene-px overlay stays inside the box rect (D-01 WYSIWYG)."""
     canvas = _canvas_with_image_and_boxes(qtbot)
     pb = _pagebox_with_text(recognized="hello")
     canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[pb])
     item = canvas._box_items[0]
-    assert item._text_overlay.toPlainText() == "hello"
+    assert item._text_overlay.text() == "hello"
     canvas._on_zoom_changed_reposition_handles(0.5)
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() == pytest.approx(20.0, abs=0.1)
-    assert fmt.textOutline().widthF() == pytest.approx(4.0, abs=0.01)
+    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
+        14.0, abs=0.1
+    )
     # The overlay must stay inside the box rect after the zoom re-apply.
     assert (
         item._text_overlay.sceneBoundingRect().intersects(item.sceneBoundingRect())
@@ -1338,41 +1293,32 @@ def test_zoom_changed_reapplies_overlay_style_canvas(qtbot) -> None:
 
 
 # -- UAT test 1 gap closure round 2 (plan 04-09): overlay fit-in-box --
-# The UAT test-1 truth "text overlay adapts to box size: overlay text wraps/fits
-# INSIDE the box rect (no horizontal overshoot), sized legibly relative to the
-# box" — the user's report "it's still a bit small and it overshoots the box,
-# renders horizontally — it should try to fit in the box and kind of adapt the
-# text to the size of the text box". Root causes: refresh_text_overlay never
-# called setTextWidth (single unwrapped horizontal line) and the font was a
-# fixed 14 viewport-px base regardless of box size. Fix contract: wrap at the
-# box inner width + box-adaptive base (14 x min(box_w, box_h)/100 viewport px,
-# clamped [10,28] — the clamp bounds the BASE) + a bounded shrink-to-fit loop
-# (max 12 steps of 0.9, hard floor 5 vp checked at loop top) so the text
-# "tries to fit" the box height; a resize COMMIT re-wraps/re-fits once per drag.
+# The 04-09 machinery (box-adaptive base, [10,28] clamp, bounded shrink to the
+# 5 vp floor) is preserved as the AUTO-FIT mode (D-15) inside the shared
+# renderer at SCENE px; the overlay renders whatever the renderer lays out.
+# A resize COMMIT re-wraps/re-fits once per drag (the per-mousemove path stays
+# setPos-only).
 
 
 @pytest.mark.gui
 def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
     """Long overlay text WRAPS at the box inner width — no horizontal overshoot.
 
-    The reference box (20,20,220,120) has a 200-wide rect; unselected pen 2 ->
-    inset 3 -> inner width 194. Pre-fix no setTextWidth meant the document laid
-    out on ONE line (~5700 px wide on the exec platform, >25x the box width).
-    The text is 60 words ("word " x 59 + "word") so no trailing space is lost
-    to Qt's document trailing-whitespace trimming.
+    The reference box (20,20,220,120) has a 200-wide rect; the renderer's
+    inner width is 200 - 2x2 = 196. The text is 60 words ("word " x 59 +
+    "word") so no trailing space is lost to trailing-whitespace trimming.
     """
     pb = _pagebox_with_text(recognized="word " * 59 + "word")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    assert item._text_overlay.textWidth() == pytest.approx(194.0, abs=0.01)
-    assert item._text_overlay.document().size().width() == pytest.approx(
-        194.0, abs=0.01
-    )
+    result = item._text_overlay.layout_result
+    assert result is not None
+    assert len(result.line_rects) >= 2, "long text must wrap into multiple lines"
     assert (
         item._text_overlay.sceneBoundingRect().right()
         <= item.sceneBoundingRect().right() + 1.5
     )
-    assert item._text_overlay.toPlainText() == "word " * 59 + "word"
+    assert item._text_overlay.text() == "word " * 59 + "word"
 
 
 @pytest.mark.gui
@@ -1380,7 +1326,7 @@ def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
     "box,expected_font",
     [
         # Box is (x1, y1, x2, y2): (20,20,220,120) -> 200x100 rect, min dim 100
-        # -> base 14 (the §16 reference box).
+        # -> base 14 (the UI-SPEC reference box).
         (Box(20, 20, 220, 120), 14.0),
         # (20,20,220,170) -> 200x150 rect, min dim 150 -> base 21.0.
         (Box(20, 20, 220, 170), 21.0),
@@ -1389,34 +1335,25 @@ def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
     ],
 )
 def test_text_overlay_font_adapts_to_box_size(qtbot, box, expected_font) -> None:
-    """The overlay font is BOX-ADAPTIVE: 14 x min(box_w, box_h)/100, clamped [10,28].
-
-    "hello" fits on one line at every size here (no shrink interference:
-    ~95px at 14pt, ~145px at 21pt, ~200px at 28pt — all < the 194/294 inner
-    widths). Pre-fix the font was 14.0 for every box regardless of size.
-    """
+    """The Auto-fit font is BOX-ADAPTIVE: 14 x min(box_w, box_h)/100, clamped [10,28]
+    at SCENE px (the 04-09 machinery preserved inside the shared renderer)."""
     pb = PageBox(box=box, origin=DETECTED)
     pb.set_recognized_text("hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() == pytest.approx(expected_font, abs=0.1)
-    # At zoom 1.0 the rendered size is the box-adaptive base within [10, 28].
-    assert 10.0 <= fmt.font().pointSizeF() * 1.0 <= 28.0
+    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
+        expected_font, abs=0.1
+    )
 
 
 @pytest.mark.gui
 def test_text_overlay_shrinks_to_fit_box_height(qtbot) -> None:
     """Wrapped text that exceeds the box height shrinks (bounded) to fit inside.
 
-    "word " x 40 wraps at 194 and the base 14 vp font needs ~8 lines — exceeds
-    the inner height 94, so the fit loop reduces the RENDERED font (below the
-    [10,28] clamp if needed, never below the 5 vp floor). The overlay rect must
-    stay CONTAINED in the box rect and the wrap width must survive the loop.
+    "word " x 40 wraps at the inner width and the base 14 font needs ~8 lines —
+    exceeds the inner height 94, so the Auto-fit loop reduces the RENDERED
+    font (below the [10,28] clamp if needed, never below the 5 px floor). The
+    overlay rect must stay CONTAINED in the box rect.
     """
     pb = _pagebox_with_text(recognized="word " * 40)
     _scene, item = _scene_with_box(pb)
@@ -1425,24 +1362,18 @@ def test_text_overlay_shrinks_to_fit_box_height(qtbot) -> None:
     box_rect = item.sceneBoundingRect()
     assert overlay_rect.right() <= box_rect.right() + 1.5
     assert overlay_rect.bottom() <= box_rect.bottom() + 1.5
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() < 14.0  # the shrink loop engaged
-    assert item._text_overlay.document().size().width() == pytest.approx(
-        194.0, abs=0.01
-    )  # wrap preserved through the loop
+    assert item._text_overlay.layout_result.used_font_size_px < 14.0, (
+        "the shrink loop must have engaged"
+    )
 
 
 @pytest.mark.gui
 def test_resize_commit_rewraps_overlay_text_canvas(qtbot) -> None:
     """A resize COMMIT re-wraps/re-fits the overlay to the final rect (once per drag).
 
-    _commit_resize must refresh the overlay after _sync_handles. Pre-fix the
-    overlay kept the stale reference-box layout (194-wide doc at font 14) after
-    a resize to (20,20,320,200): textWidth 194 != 314 and font 14 != 28.
+    _commit_resize must refresh the overlay after _sync_handles: after a
+    resize to (20,20,320,200) the Auto-fit base is 28 (min dim 200) — the
+    stale reference-box layout (14) must be gone.
     """
     canvas = _canvas_with_image_and_boxes(qtbot)
     pb = _pagebox_with_text(recognized="hello")
@@ -1453,41 +1384,31 @@ def test_resize_commit_rewraps_overlay_text_canvas(qtbot) -> None:
     canvas._boxes_interaction_start_snapshot = []
     item.setRect(QRectF(20, 20, 320, 200))
     canvas._commit_resize()
-    # 320 - 2x inset 3 -> inner width 314; min dim 200 -> base 28 (no shrink:
-    # "hello" is one line at 28pt within inner height 194).
-    assert item._text_overlay.textWidth() == pytest.approx(314.0, abs=0.01)
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() == pytest.approx(28.0, abs=0.1)
+    # min dim 200 -> base 28 (no shrink: "hello" is one line at 28px within
+    # the inner height 194).
+    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
+        28.0, abs=0.1
+    )
 
 
 @pytest.mark.gui
-def test_text_overlay_fit_loop_reduces_below_clamp_floor_at_low_zoom(qtbot) -> None:
-    """At low zoom the fit loop operates BELOW the [10,28] clamp, never below 5 vp.
+def test_text_overlay_fit_loop_reduces_below_clamp_floor_at_scene_px(qtbot) -> None:
+    """The Auto-fit loop operates BELOW the [10,28] clamp, never below the 5 px
+    floor, at SCENE px (the viewport-px zoom dependence is gone — D-01).
 
-    At zoom 0.25 the clamped font is 40pt; "hello world" lays out wider than
-    the inner width 194 -> wraps -> the wrapped height exceeds the inner
-    height 94, so the clamp-only outcome is unreachable and the fit outcome
-    replaces it: the loop shrinks the RENDERED font below the clamp down toward
-    the 5 vp floor and the overlay stays CONTAINED in the box. Measured on the
-    exec platform: ~26.24pt -> 6.56 vp (assertions stay range-based per the
-    plan — the exact landing depends on the font metrics of the platform).
-    This is the case REMOVED from the 04-08 clamp test (plan 04-09).
+    A very long text in a narrow box needs more than the 10px clamp provides;
+    the loop shrinks the rendered font below 10 down toward the 5 px floor and
+    the overlay stays CONTAINED in the box (the 04-09 outcome, zoom-independent
+    at scene px).
     """
-    pb = _pagebox_with_text(recognized="hello world")
+    pb = PageBox(box=Box(20, 20, 120, 220), origin=DETECTED)
+    pb.set_recognized_text("word " * 100)
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    item.apply_overlay_zoom(0.25)
-    from PySide6.QtGui import QTextCursor
-
-    cursor = item._text_overlay.textCursor()
-    cursor.select(QTextCursor.SelectionType.Document)
-    fmt = cursor.charFormat()
-    assert fmt.font().pointSizeF() < 40.0  # shrink engaged
-    assert 5.0 <= fmt.font().pointSizeF() * 0.25 < 10.0  # below clamp, above floor
+    item.apply_overlay_zoom(0.25)  # zoom must NOT affect the scene-px size
+    used = item._text_overlay.layout_result.used_font_size_px
+    assert used < 10.0  # shrink engaged, below the base clamp
+    assert used >= 5.0  # never below the floor
     overlay_rect = item._text_overlay.sceneBoundingRect()
     box_rect = item.sceneBoundingRect()
     assert overlay_rect.right() <= box_rect.right() + 1.5
@@ -1532,11 +1453,11 @@ def test_refresh_text_overlay_rerenders_after_text_change(qtbot) -> None:
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    assert item._text_overlay.toPlainText() == "hello"
+    assert item._text_overlay.text() == "hello"
     # Now set a translation — current focus flips to translation.
     pb.set_translation("hola")
     item.refresh_text_overlay()
-    assert item._text_overlay.toPlainText() == "hola"
+    assert item._text_overlay.text() == "hola"
 
 
 # --- bubble badge (z=140, ItemIgnoresTransformations, TL-outside) ---
@@ -2515,7 +2436,7 @@ def test_inline_editor_commit_refreshes_text_overlay(qtbot) -> None:
     editor.enter(item)
     editor._text_edit.setPlainText("after")
     editor.commit()
-    assert item._text_overlay.toPlainText() == "after"
+    assert item._text_overlay.text() == "after"
 
 
 @pytest.mark.gui

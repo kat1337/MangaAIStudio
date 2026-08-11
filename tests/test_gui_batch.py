@@ -949,9 +949,10 @@ def test_recent_and_batch_menus_are_file_submenus_not_top_level(qtbot, tmp_path)
 
 @pytest.mark.gui
 def test_file_menu_internal_order(qtbot, tmp_path) -> None:
-    """The File menu order (UI-SPEC surface 21, plan 05-05): Open Image, Open
-    Folder, sep, Open Project, Recent Projects, Recent Files, sep, Save
-    Project, Save Project As, sep, Export, Batch, sep, Quit."""
+    """The File menu order (UI-SPEC surface 21, plan 05-05 + plan 07-01): Open
+    Image, Open Folder, sep, Open Project, Recent Projects, Recent Files, sep,
+    Save Project, Save Project As, sep, Export Page, Export Typeset, Batch,
+    sep, Quit."""
     window = _make_window(qtbot, tmp_path)
     actions = window.menuBar().actions()
     file_menu = next(a for a in actions if a.text() == "&File").menu()
@@ -965,10 +966,11 @@ def test_file_menu_internal_order(qtbot, tmp_path) -> None:
         "Save Project\u2026",
         "Save Project As\u2026",
         "Export Page\u2026",
+        "Export Typeset\u2026",
         "Batch",
         "Quit",
     ]
-    assert [i for i, a in enumerate(file_actions) if a.isSeparator()] == [2, 6, 9, 12]
+    assert [i for i, a in enumerate(file_actions) if a.isSeparator()] == [2, 6, 9, 13]
 
 
 # ---------------------------------------------------------------------------

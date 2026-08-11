@@ -43,17 +43,19 @@ Design decisions honored:
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QImage,
+    QPainter,
     QPen,
     QPainterPath,
-    QTextCharFormat,
-    QTextCursor,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -62,6 +64,14 @@ from PySide6.QtWidgets import (
 )
 
 from manga_ai_studio.core.box_model import DETECTED, USER
+from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.gui.text_renderer import (
+    LayoutResult,
+    _OVERLAY_INSET,
+    current_focus_text,
+    layout as renderer_layout,
+    paint as renderer_paint,
+)
 
 if TYPE_CHECKING:
     from manga_ai_studio.core.box_model import PageBox
@@ -95,31 +105,23 @@ _HANDLE_Z = 150
 # stay below the handles (z=150) so a corner drag is never visually blocked.
 _TEXT_OVERLAY_Z = 120
 _BADGE_Z = 140
-# Text-overlay style (UI-SPEC §Color text-overlay): fill rgba(232,232,234,0.85)
-# translucent Text primary + outline rgba(11,11,14,0.92) 2px dark matte behind
-# the glyphs (D-11 legibility halo against artwork). 14 scene px base size,
-# Liberation Sans (the Phase 1 canvas-overlay font — image_viewer.py:306).
-_OVERLAY_FILL = QColor.fromRgbF(232 / 255, 232 / 255, 234 / 255, 0.85)
-_OVERLAY_OUTLINE = QPen(QColor.fromRgbF(11 / 255, 11 / 255, 14 / 255, 0.92), 2)
-_OVERLAY_FONT = QFont("Liberation Sans", 14)  # 14 scene px (UI-SPEC §16)
-# The §16 clamp base: the 14 scene px at 100% zoom. apply_overlay_zoom scales
-# this by the zoom to keep the RENDERED viewport-px size within [10, 28]
-# (UI-SPEC §16, plan 04-08 RC-2).
+# Text-overlay style (UI-SPEC §Color text-overlay): the hardcoded Phase 4
+# translucent look (fill rgba(232,232,234,0.85) + fixed 2px outline +
+# Liberation Sans 14) is SUPERSEDED by the per-box ``TextStyle`` defaults
+# (D-01 — surface 34 replaces surface 16; the values now live in
+# core/text_style.py). The remaining constants are the plan 04-09 Auto-fit
+# machinery (D-15), kept here as the contract record: the executable bounded
+# loop moved to gui/text_renderer.py (plan 07-01 Task 1), whose copies MUST
+# match these (D-01 single visual truth).
 _OVERLAY_FONT_BASE = 14.0
-# Plan 04-09 fit-in-box constants (UI-SPEC §16 amendment): the box min
-# dimension (scene px) that maps to the §16 14-viewport-px base — the
-# 04-08 reference box is exactly 100 min, so for it the box-adaptive base
-# reduces exactly to the 04-08 clamp formula. The bounded shrink-to-fit loop
-# constants bound the iteration count, the per-step reduction factor, and the
-# hard rendered-size floor (checked at loop TOP so no iteration ever renders
-# below it).
 _OVERLAY_BOX_REF_DIM = 100.0
 _OVERLAY_FIT_MAX_ITERS = 12
 _OVERLAY_FIT_STEP = 0.9
 _OVERLAY_FIT_FLOOR_VP = 5.0
-# Inner margin: text inset by the border width + 2px so it never touches the
-# box edge (UI-SPEC §16).
-_OVERLAY_INSET = 2.0
+# Inner margin: text inset by the renderer's constant (imported from
+# text_renderer — the single home) so the canvas overlay sits exactly where
+# the bake paints (D-01).
+_OVERLAY_INSET = _OVERLAY_INSET
 # Bubble-badge style + geometry (UI-SPEC §17). The badge is DIGIT-SIZED (plan
 # 04-10, gap closure round 3): refresh_badge measures the digit glyph line box
 # after setPlainText (document margin 0; probed 16x19 px per digit at the 12pt
@@ -289,6 +291,110 @@ class CornerHandle(QGraphicsRectItem):
 
 
 
+class TypesetOverlayItem(QGraphicsItem):
+    """The renderer-driven OPAQUE typeset overlay child (D-01, plan 07-01 Task 2).
+
+    Replaces the Phase 4 translucent ``QGraphicsTextItem`` overlay (UI-SPEC
+    surface 34 supersedes surface 16). The render output is a cached
+    ``QPixmap`` produced by ``gui/text_renderer.layout`` + ``paint`` — the
+    SAME functions the bake compositor uses, so the canvas ≡ bake (D-01
+    single visual truth; the equivalence pixel test is the Pitfall 2 guard).
+
+    The cache is re-rendered on text/style/box-size changes (via
+    :meth:`set_content` from ``BoxItem.refresh_text_overlay``); a reposition
+    is setPos-ONLY (:meth:`refresh_position` — the RC-1 discipline: the
+    canvas calls ``_sync_handles`` on EVERY mousemove during a drag, so a
+    full re-layout per mousemove is prohibited).
+
+    The pixmap covers the layout's ink rect padded by the outline half-width
+    (so the outermost stroke is never clipped on canvas); the item's position
+    is the box top-left + the renderer inset + that padded ink offset.
+    """
+
+    def __init__(self, parent: "BoxItem") -> None:
+        super().__init__(parent)
+        self.setZValue(_TEXT_OVERLAY_Z)
+        self._pixmap: QPixmap | None = None
+        self.layout_result: LayoutResult | None = None
+        # The padded ink top-left in inner-rect coordinates (used by the
+        # setPos-only refresh_position).
+        self._ink_offset = QPointF(0.0, 0.0)
+
+    # ------------------------------------------------------------ geometry
+    def boundingRect(self) -> QRectF:  # noqa: D401 (Qt API casing)
+        """The cached pixmap rect (a 1x1 placeholder before the first render)."""
+        if self._pixmap is None:
+            return QRectF(0.0, 0.0, 1.0, 1.0)
+        return QRectF(QPointF(0.0, 0.0), QSizeF(self._pixmap.size()))
+
+    def paint(self, painter, option, widget=None) -> None:  # noqa: D401
+        """Blit the cached pixmap (opaque glyphs composite over the page)."""
+        if self._pixmap is not None:
+            painter.drawPixmap(QPointF(0.0, 0.0), self._pixmap)
+
+    # ------------------------------------------------------------ content
+    def text(self) -> str:
+        """The currently rendered current-focus text (``""`` when hidden).
+
+        API-compatible probe for the old ``QGraphicsTextItem.toPlainText()``
+        so the D-04 content-rule tests keep their shape.
+        """
+        if self.layout_result is None:
+            return ""
+        return self.layout_result.text
+
+    def pixmap(self) -> QPixmap | None:
+        """The cached render pixmap (``None`` when nothing is rendered)."""
+        return self._pixmap
+
+    def set_content(
+        self, text: str, style: TextStyle, box_rect: QRectF, vertical: bool = False
+    ) -> None:
+        """(Re)render the cached pixmap through the shared renderer.
+
+        ``box_rect`` is the FULL box rect — the renderer applies its own
+        inner inset, identical for the canvas and the bake (D-01). Empty
+        text clears the cache (nothing renders).
+        """
+        if not text:
+            self._pixmap = None
+            self.layout_result = None
+            self._ink_offset = QPointF(0.0, 0.0)
+            self.update()
+            return
+        result = renderer_layout(text, style, box_rect, vertical=vertical)
+        self.layout_result = result
+        outline = style.outline if isinstance(style.outline, dict) else {}
+        pad = 0.0
+        if outline.get("enabled", True):
+            pad = max(1.0, float(outline.get("width_px", 0.0) or 0.0) / 2.0)
+        ink = result.ink
+        w = max(1, math.ceil(ink.width() + 2.0 * pad))
+        h = max(1, math.ceil(ink.height() + 2.0 * pad))
+        qimg = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+        qimg.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.translate(-ink.left() + pad, -ink.top() + pad)
+        renderer_paint(painter, result, style)
+        painter.end()
+        self._pixmap = QPixmap.fromImage(qimg)
+        self._ink_offset = QPointF(ink.left() - pad, ink.top() - pad)
+        self.update()
+
+    def refresh_position(self, box_rect: QRectF, inset: float) -> None:
+        """Reposition the overlay inside ``box_rect`` — setPos ONLY (RC-1).
+
+        Uses the geometry cached by the last :meth:`set_content`; never
+        re-layouts. Called from ``BoxItem._reposition_text_overlay`` on
+        every move/resize/zoom/selection change (per-mousemove).
+        """
+        self.setPos(
+            box_rect.x() + inset + self._ink_offset.x(),
+            box_rect.y() + inset + self._ink_offset.y(),
+        )
+
+
 class BoxItem(QGraphicsRectItem):
     """A text box on the canvas — origin-coloured ``QGraphicsRectItem`` (D-05).
 
@@ -333,19 +439,19 @@ class BoxItem(QGraphicsRectItem):
         # bubble-number badge (z=140) — both children of this BoxItem so they
         # inherit its visibility (the box-layer toggle Shift+M hides the whole
         # box incl. text + badges; the text-overlay toggle T hides ONLY the
-        # text children, D-12). The overlay is PLAIN text (ASVS V5 — never
-        # setHtml on OCR output); the badge ignores transformations so it stays
-        # constant viewport px at any zoom (digit-sized since plan 04-10, like
-        # the handles).
-        self._text_overlay = QGraphicsTextItem(self)
-        self._text_overlay.setZValue(_TEXT_OVERLAY_Z)
-        self._text_overlay.setFont(_OVERLAY_FONT)
-        self._text_overlay.setVisible(False)  # shown by refresh_text_overlay
+        # text children, D-12). The overlay is the renderer-driven OPAQUE
+        # typeset item (D-01, plan 07-01 — surface 34 supersedes the Phase 4
+        # translucent QGraphicsTextItem); the badge ignores transformations
+        # so it stays constant viewport px at any zoom (digit-sized since
+        # plan 04-10, like the handles).
+        self._text_overlay = TypesetOverlayItem(self)
         self._text_overlay_visible = True  # T toggle state (D-12)
-        # Stored zoom for the §16 font clamp + viewport-px outline (plan 04-08,
-        # RC-2/RC-3). Set BEFORE the first refresh_text_overlay() so a fresh box
-        # renders the zoom-1 style (identical to the pre-plan output); updated
-        # by apply_overlay_zoom() on every canvas zoom_changed emission.
+        # Stored zoom (plan 04-08 RC-2/RC-3 heritage). The scene-px sizing
+        # contract (Pattern 1 note) supersedes the §16 viewport-px clamp for
+        # opaque text: the overlay renders at the style's scene-px size and
+        # scales with the canvas zoom like the artwork itself, so a zoom
+        # change does NOT re-layout. Set BEFORE the first
+        # refresh_text_overlay() so a fresh box renders the zoom-1 style.
         self._overlay_zoom = 1.0
         # The badge = a background rect + a digit text child, both ignoring
         # transformations (constant viewport px). Digit is a child of the rect
@@ -485,83 +591,31 @@ class BoxItem(QGraphicsRectItem):
 
     # --------------------------------------------- Phase 4 display-object children
     def refresh_text_overlay(self) -> None:
-        """Re-render the text overlay from the current payload (D-09/D-10/D-11).
+        """Re-render the text overlay from the current payload + style (D-01).
 
-        The overlay shows the **current-focus** text per the D-10 rule:
-        translation when present, else recognized text. A box with no
-        recognized text renders nothing (the overlay is hidden). The document
-        is PLAIN text (ASVS V5 — never ``setHtml`` on OCR output, T-4-07) styled
-        via ``QTextCharFormat.setTextOutline`` (RESEARCH Pattern 3 — the single
-        clean API for outlined glyphs; no multi-pass QPainter).
+        The overlay shows the **current-focus** text per the D-10 rule
+        (translation when present, else recognized text — delegated to
+        ``gui/text_renderer.current_focus_text``, the ONE rule the bake
+        shares, D-04). A box with no recognized text renders nothing (the
+        overlay is hidden).
+
+        The render goes through the shared renderer (``layout`` + ``paint``
+        into the overlay's cached pixmap) at the box's flat per-box
+        ``TextStyle`` (defaults when the box has none — D-06 flat). The text
+        stays PLAIN throughout (the renderer uses plain documents — ASVS V5).
 
         Honours :attr:`_text_overlay_visible` (the T toggle, D-12): if the text
         layer is off the overlay is hidden even when the box carries text.
         """
         text = self._current_focus_text()
-        if not text:
-            self._text_overlay.setVisible(False)
-            return
-        # Build the outlined run via QTextCharFormat on the document. setPlainText
-        # first (PLAIN text — no rich-text injection), then merge the outline +
-        # fill format onto the whole document (RESEARCH Pattern 3 — set the
-        # outline + foreground on ONE format, then mergeCharFormat over the
-        # document so every run carries both).
-        self._text_overlay.setPlainText(text)
-        doc = self._text_overlay.document()
-        # §16 fit-in-box wrap (plan 04-09 Gap 1): lay the document out at the
-        # box INNER width (rect width - 2x inset) so long recognized/translation
-        # text WRAPS inside the box instead of rendering on one unbounded
-        # horizontal line that overshoots the rect (the pre-fix defect the UAT
-        # test-1 user reported). The max() floor keeps a degenerate/negative
-        # width rect from producing an invalid text width (T-4-13g).
-        zoom = self._overlay_zoom
-        inset = self._overlay_inset()
-        inner_w = max(1.0, self.rect().width() - 2.0 * inset)
-        inner_h = max(1.0, self.rect().height() - 2.0 * inset)
-        self._text_overlay.setTextWidth(inner_w)
-        # §16 font clamp + constant-viewport-px outline from the STORED zoom
-        # (RC-2/RC-3, plan 04-08), amended by the 04-09 fit contract: the [10,28]
-        # clamp bounds the box-ADAPTIVE BASE (14 x min(box_w, box_h)/100
-        # viewport px — 14 for a 100 scene-px box, the §16 reference) and the
-        # bounded shrink-to-fit loop below may reduce the RENDERED size below
-        # 10 vp down to the 5 vp floor when the wrapped text still exceeds the
-        # inner height; the outline stays a constant 2 viewport px (2/zoom scene
-        # px — the RC-3 documented deviation).
-        base_vp = (
-            _OVERLAY_FONT_BASE
-            * min(self.rect().width(), self.rect().height())
-            / _OVERLAY_BOX_REF_DIM
+        style = self.pagebox.style if self.pagebox.style is not None else TextStyle()
+        # Pass the FULL box rect — the renderer applies its own inner inset
+        # (identical for canvas and bake, D-01).
+        self._text_overlay.set_content(
+            text, style, self.rect(), vertical=bool(style.vertical)
         )
-        target_vp = min(28.0, max(10.0, base_vp * zoom))
-        # Fit loop (04-09): re-merge the char format at the current target and
-        # shrink by the step factor until the wrapped document fits the inner
-        # height — or the hard floor stops the loop at its TOP, so no iteration
-        # ever renders below the floor. A box that cannot hold the text even at
-        # the floor keeps the §16 clipped-overflow fallback (the box is the
-        # text's container). The loop is bounded, so it always terminates; the
-        # division by zoom is safe because apply_overlay_zoom guards zoom <= 0
-        # (T-4-12g). The text stays PLAIN throughout (setPlainText only,
-        # re-merged QTextCharFormat — never setHtml, T-4-07).
-        for _ in range(_OVERLAY_FIT_MAX_ITERS):
-            if target_vp <= _OVERLAY_FIT_FLOOR_VP:
-                break
-            font = QFont(_OVERLAY_FONT)
-            font.setPointSizeF(target_vp / zoom)
-            fmt = QTextCharFormat()
-            fmt.setFont(font)
-            fmt.setTextOutline(QPen(_OVERLAY_OUTLINE.color(), 2.0 / zoom))
-            fmt.setForeground(QBrush(_OVERLAY_FILL))
-            cursor = QTextCursor(doc)
-            cursor.select(QTextCursor.SelectionType.Document)
-            cursor.mergeCharFormat(fmt)
-            if doc.size().height() <= inner_h:
-                break
-            target_vp *= _OVERLAY_FIT_STEP
-        # Geometry sync is delegated to the setPos-only _reposition_text_overlay
-        # (RC-1, plan 04-08) so _sync_handles can reuse it per-mousemove without
-        # rebuilding the document. The visible-state line stays here.
         self._reposition_text_overlay()
-        self._text_overlay.setVisible(self._text_overlay_visible)
+        self._text_overlay.setVisible(bool(text) and self._text_overlay_visible)
 
     def _reposition_text_overlay(self) -> None:
         """Reposition the text overlay inside the box rect — setPos ONLY (RC-1).
@@ -570,42 +624,38 @@ class BoxItem(QGraphicsRectItem):
         :meth:`_sync_handles` / :meth:`_sync_handles_for_state` on every
         move/resize/zoom/selection change (the canvas calls ``_sync_handles``
         on EVERY ``mouseMoveEvent`` during a drag — canvas.py:1022-1023 — so a
-        full document rebuild per mousemove would be wasteful). Positions the
-        overlay inset by the border width + 2px so the text never touches the
-        border (UI-SPEC §16).
+        full re-layout per mousemove would be wasteful). The inset is the
+        renderer's constant (the same inner geometry the bake paints).
         """
-        self._text_overlay.setPos(
-            self.rect().x() + self._overlay_inset(),
-            self.rect().y() + self._overlay_inset(),
-        )
+        self._text_overlay.refresh_position(self.rect(), _OVERLAY_INSET)
 
     def _overlay_inset(self) -> float:
-        """The overlay inset: border half-width + 2px margin (UI-SPEC §16).
+        """The legacy overlay inset formula (border half-width + 2px margin).
 
-        One formula shared by the overlay POSITION (:meth:`_reposition_text_overlay`)
-        and the fit-in-box wrap width (:meth:`refresh_text_overlay`) so the
-        position and the wrap width always agree.
+        Kept for API compatibility — the renderer-driven overlay positions
+        with the renderer's own ``_OVERLAY_INSET`` (the D-01 single visual
+        truth: the canvas must sit exactly where the bake paints). The
+        border-width term belongs to the box chrome, which the bake never
+        draws.
         """
         return self.pen().widthF() / 2.0 + _OVERLAY_INSET
 
     def apply_overlay_zoom(self, zoom: float) -> None:
-        """Re-apply the §16 font clamp + constant-viewport-px outline for ``zoom``.
+        """Store the canvas zoom (plan 04-08 heritage) without re-layouting.
 
-        Stores the zoom on :attr:`_overlay_zoom` and refreshes the overlay so
-        the style re-derives from the new zoom (RC-2/RC-3, plan 04-08). Called
-        from the canvas ``zoom_changed`` slot (and transitively by
-        fit-to-window / zoom_reset / wheel zoom, which all emit ``zoom_changed``
-        — canvas.py:820/827/851).
+        The scene-px sizing contract (Pattern 1 note) supersedes the §16
+        viewport-px font clamp + ``2/zoom`` outline for OPAQUE text: the
+        overlay renders at the style's scene-px size and scales with the
+        canvas zoom like the artwork itself — a zoom change must NOT re-derive
+        the style (WYSIWYG, D-01). The stored zoom remains for API
+        compatibility with the canvas ``zoom_changed`` slot (canvas.py:1790).
 
-        Defensive guard: a non-positive zoom falls back to 1.0 so the
-        ``clamp/zoom`` and ``2/zoom`` divisions can never divide by zero (the
-        canvas ``zoom_factor`` is always positive — setTransform scale /
-        fitInView m11).
+        Defensive guard: a non-positive zoom falls back to 1.0 (the old
+        division safety — kept for the stored value's invariants).
         """
         if zoom <= 0:
             zoom = 1.0
         self._overlay_zoom = zoom
-        self.refresh_text_overlay()
 
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
@@ -721,29 +771,10 @@ class BoxItem(QGraphicsRectItem):
         """Return the D-10 current-focus text: translation when present, else recognized.
 
         Empty string when the box carries neither (the overlay stays hidden).
-        Translation wins when it is a non-empty string; recognized text is read
-        directly off ``payload.text`` (str/list aware — joined + stripped for a
-        list). The returned text is a plain ``str`` (no list shape leaks to the
-        overlay document).
-
-        Defensive against a payload that is not a real ``TextBlock``: a bare
-        marker object (e.g. the ``payload="p"`` duck-typed fake some tests /
-        callers pass) has no ``.text`` / ``.translation`` attributes, so both
-        branches yield empty and the overlay stays hidden. Production always
-        carries either ``None`` or a real ``TextBlock``.
+        Delegates to ``gui/text_renderer.current_focus_text`` — the ONE rule
+        shared with the bake compositor (D-04 WYSIWYG contract).
         """
-        payload = self.pagebox.payload
-        if payload is None:
-            return ""
-        translation = getattr(payload, "translation", "") or ""
-        if translation:
-            return translation
-        t = getattr(payload, "text", None)
-        if t is None:
-            return ""
-        if isinstance(t, list):
-            return "".join(str(s) for s in t).strip()
-        return str(t).strip()
+        return current_focus_text(self.pagebox)
 
     # --------------------------------------------------- snapshot materialization
     def current_box(self) -> "Box":

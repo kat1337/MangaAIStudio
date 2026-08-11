@@ -262,6 +262,143 @@ def test_export_action_gating(qtbot, tmp_path) -> None:
 
 
 # ===========================================================================
+# Plan 07-01 Task 2 — Export Typeset… (Ctrl+Shift+B): the D-01/D-02 bake
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_typeset_export_action(qtbot, tmp_path, monkeypatch) -> None:
+    """File -> Export Typeset… writes the D-03 sidecar with the styled text.
+
+    The seeded box carries a translation ("Hi") styled at a fixed 10 px with
+    the outline OFF (so the OPAQUE fill pixels are observable): the baked PNG
+    decodes with fill-colored pixels inside the box rect (D-01) while the
+    page outside the box keeps the source pixels (no chrome, no drift). The
+    dialog's default is the D-03 pristine target ({stem}_typeset.png beside
+    the source).
+    """
+    import numpy as np
+
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=1)
+    # A box sized so the text FITS inside (no unclipped overflow reaching the
+    # outside-unchanged assertion region).
+    payload = TextBlock(
+        [2, 2, 62, 22],
+        lines=[[[2, 2], [62, 2], [62, 22], [2, 22]]],
+        text="Hi",
+        vertical=False,
+        translation="Hi",
+    )
+    style = TextStyle(
+        font_size_px=10.0,
+        auto_fit=False,
+        align_h="left",
+        align_v="top",
+        outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+    )
+    pagebox = PageBox(box=Box(2, 2, 62, 22), origin=DETECTED, payload=payload, style=style)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([pagebox], [])
+    finally:
+        window._suppress_boxes_push = False
+
+    default_arg: list = []
+    target = folder / "page_01_typeset.png"
+    _stub_save_dialog(monkeypatch, return_path=str(target), captured=default_arg)
+
+    window._on_export_typeset()
+    QApplication.processEvents()
+
+    # The dialog defaulted to the D-03 pristine sidecar next to the source.
+    assert default_arg == [str(folder / "page_01_typeset.png")]
+    assert target.is_file(), "the D-03 sidecar must exist next to the source"
+
+    with PILImage.open(target) as im:
+        baked = np.array(im)
+    # The page is a 16x16 solid (40, 80, 120); the box is (2,2,62,22).
+    fill = np.array([232, 232, 234])  # the default opaque fill (UI-SPEC A1)
+    box_region = baked[2:22, 2:62]
+    assert ((box_region == fill).all(axis=2)).any(), (
+        "opaque fill-colored glyph pixels must exist inside the box rect"
+    )
+    # Outside the box the page keeps the source pixels (no chrome, no drift).
+    assert (baked[:2] == np.array([40, 80, 120])).all()
+    assert (baked[22:] == np.array([40, 80, 120])).all()
+    assert (baked[2:22, :2] == np.array([40, 80, 120])).all()
+    assert (baked[2:22, 62:] == np.array([40, 80, 120])).all()
+
+    # Success flash (UI-SPEC copy: "Typeset exported -> {filename}").
+    assert f"Typeset exported \u2192 {target.name}" in window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_typeset_export_failure_dialog_leaves_canvas_untouched(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """An unwritable bake target shows the save-failure critical dialog and
+    the canvas image object is unchanged (np.array_equal before/after)."""
+    import numpy as np
+
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=1)
+    _seed_box_on_canvas(window)
+    before = window.canvas.get_image_numpy().copy()
+
+    # Block the cleaned/ target with a FILE named "cleaned": the D-03 mkdir
+    # (inside save_image_optimized) raises FileExistsError — an OSError.
+    blocker = folder / "cleaned"
+    blocker.write_text("i am a file, not a directory", encoding="utf-8")
+    _stub_save_dialog(
+        monkeypatch,
+        return_path=str(folder / "cleaned" / "page_01_typeset.png"),
+        captured=[],
+    )
+    dialogs: list = []
+
+    def _record_critical(parent, title, text):  # noqa: ARG001
+        dialogs.append((title, text))
+
+    monkeypatch.setattr(QMessageBox, "critical", _record_critical)
+
+    window._on_export_typeset()  # must NOT raise
+    QApplication.processEvents()
+
+    assert len(dialogs) == 1, "the write failure must surface ONE critical dialog"
+    title, text = dialogs[0]
+    assert "Couldn't save 'page_01_typeset.png'." in title
+    assert "writable" in text
+    # The canvas image object is unchanged (the bake works on a detached copy).
+    assert np.array_equal(window.canvas.get_image_numpy(), before)
+    # No success flash — the write did not happen.
+    assert "Typeset exported" not in window.status_bar_left.text()
+
+
+@pytest.mark.gui
+def test_typeset_export_action_gating(qtbot, tmp_path) -> None:
+    """Export Typeset… is disabled with no page open and while _op_running."""
+    window = _make_window(qtbot, tmp_path)
+    assert window.action_export_typeset.isEnabled() is False, (
+        "no page open -> action must be disabled"
+    )
+
+    folder = tmp_path / "chapter"
+    _write_pages(folder, n_pages=1)
+    window._load_folder(folder)
+    QApplication.processEvents()
+    assert window.action_export_typeset.isEnabled() is True, (
+        "page open -> action must be enabled"
+    )
+
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_export_typeset.isEnabled() is False, (
+        "async op running -> action must be disabled"
+    )
+
+
+# ===========================================================================
 # Task 2 — Batch Export OCR JSON: Worker dispatch + progress + Cancel +
 # mixed-result copy (runs the REAL batch_export_ocr on a QThreadPool worker)
 # ===========================================================================

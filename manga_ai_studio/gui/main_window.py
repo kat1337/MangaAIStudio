@@ -384,6 +384,21 @@ class MainWindow(QMainWindow):
         self.action_export_page.triggered.connect(self.export_page)
         self.action_export_page.setEnabled(False)
 
+        # Export Typeset… (Ctrl+Shift+B) — plan 07-01 (D-01/D-02): bakes the
+        # typeset text (per-box current-focus content + flat TextStyle through
+        # the SHARED renderer) into a copy of the current page image, written
+        # via the PROJ-02 writer (save_image_optimized) to the D-03 sidecar.
+        # The File-menu Export section sibling of Export Page (Export OCR JSON
+        # lives in the Text menu); shortcut audit: Ctrl+E / Ctrl+Shift+E are
+        # taken, Ctrl+Shift+B is free (UI-SPEC surface 35, Pitfall 4).
+        self.action_export_typeset = QAction("Export Typeset\u2026", self)
+        self.action_export_typeset.setShortcut(QKeySequence("Ctrl+Shift+B"))
+        self.action_export_typeset.setStatusTip(
+            "Bake the typeset text into a copy of the page image (Ctrl+Shift+B)."
+        )
+        self.action_export_typeset.triggered.connect(self._on_export_typeset)
+        self.action_export_typeset.setEnabled(False)
+
         # Batch submenu (FLOW-03 / D-01): the three batch actions operate on the
         # currently-open folder (D-06). All three dispatch the Plan 03 entry
         # points on a single Worker(QRunnable). Disabled until a folder is open
@@ -439,6 +454,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_save_project_as)
         file_menu.addSeparator()
         file_menu.addAction(self.action_export_page)
+        file_menu.addAction(self.action_export_typeset)
         file_menu.addMenu(self.batch_menu)
         file_menu.addSeparator()
         file_menu.addAction(self.action_quit)
@@ -1038,6 +1054,7 @@ class MainWindow(QMainWindow):
         # (D-09); it is meaningless otherwise.
         folder_open = bool(self.image_files)
         self.action_export_page.setEnabled(page_open and not self._op_running)
+        self.action_export_typeset.setEnabled(page_open and not self._op_running)
         self.action_batch_detect.setEnabled(folder_open and not self._op_running)
         self.action_batch_clean.setEnabled(folder_open and not self._op_running)
         self.action_batch_detect_and_clean.setEnabled(
@@ -4644,6 +4661,71 @@ class MainWindow(QMainWindow):
             )
             return
         self._show_transient_status(f"Exported OCR JSON for page {idx + 1}.")
+
+    def _on_export_typeset(self) -> None:
+        """File menu -> Export Typeset… (Ctrl+Shift+B): bake the typeset text
+        into a copy of the CURRENT page image (D-01/D-02, plan 07-01 Task 2).
+
+        Mirrors the OCR-JSON export's seam order: ``_op_running`` gate first,
+        then the ``_snapshot_current_page()`` flush (Pitfall 7 — the bake
+        must describe the live canvas, boxes included), then the page image
+        read via ``canvas.get_image_numpy()`` (detached — Pitfall 2), then
+        the Save As dialog defaulting to the D-03 sidecar path (pristine ->
+        ``{stem}_typeset.png`` beside the source; geometry-altered ->
+        ``cleaned/`` — the D-22 mirror).
+
+        The compositor (``bake_typeset_page``) renders every box's current-
+        focus text (D-04: translation else recognized; neither -> nothing)
+        through the SAME renderer functions the canvas overlay uses — canvas
+        ≡ bake (D-01); it works on a detached copy so the canvas is never
+        mutated, and it draws text only (no chrome). The write goes through
+        ``save_image_optimized`` (the PROJ-02 contract: PNG compress 9 /
+        JPG quality 95, DPI preserved); failures surface the save-failure
+        critical dialog (T-05-12 copy) and success flashes the UI-SPEC copy.
+        """
+        if self._op_running:
+            return
+        idx = self._last_page_index
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        # Pitfall 7: flush BEFORE reading — the bake must reflect the live
+        # canvas (boxes drawn/edited since the last navigation).
+        self._snapshot_current_page()
+        imf = self.image_files[idx]
+        page_path = imf.path
+        image_np = self.canvas.get_image_numpy()
+        if image_np is None:
+            return
+        boxes = imf.boxes if imf.boxes is not None else []
+
+        from manga_ai_studio.core.image_io import save_image_optimized
+        from manga_ai_studio.core.ocr_export import default_typeset_path
+        from manga_ai_studio.gui.text_renderer import bake_typeset_page
+
+        default_target = default_typeset_path(page_path, imf.geometry_altered)
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Typeset",
+            str(default_target),
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg)",
+        )
+        if not chosen:
+            return
+        chosen_path = Path(chosen)
+        # Detached composite (Pitfall 2) — never the live canvas image.
+        baked = bake_typeset_page(image_np, boxes)
+        try:
+            save_image_optimized(baked, chosen_path, original=page_path)
+        except OSError as exc:
+            # T-05-12: the save-failure copy; the traceback goes to loguru.
+            logger.error(f"Export Typeset failed: {exc}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{chosen_path.name}'.",
+                "Check that the folder is writable and see the log for details.",
+            )
+            return
+        self._show_transient_status(f"Typeset exported → {chosen_path.name}")
 
     def _dispatch_batch_ocr_export(self) -> None:
         """Batch menu -> Batch Export OCR JSON: dispatch ``batch_export_ocr``
