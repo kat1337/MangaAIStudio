@@ -329,6 +329,50 @@ def test_pop_boxes_undo_restores_text_edit_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 7 (plan 07-01 Task 3 Test 4) — style undo restores the PRE-edit style
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_pop_boxes_undo_restores_pre_edit_style() -> None:
+    """Undo of a style edit restores the PRE-edit style (style A), and the
+    restored style object is NOT aliased to the live one (RESEARCH Pitfall 1/8
+    applied to ``TextStyle`` — mirrors ``test_payload_aliasing.py``).
+
+    A PageBox carrying a ``TextStyle`` is pushed; the live style is then
+    replaced with a FRESH instance (never mutated in place — the Phase 7
+    discipline); undo must return the snapshot-time style and a detached
+    object. This only works because ``PageBox.copy()`` detaches the style.
+    """
+    from dataclasses import replace
+
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from manga_ai_studio.core.text_style import TextStyle
+    from panelcleaner.structures import Box
+
+    history = HistoryManager(limit=20)
+    live = PageBox(
+        box=Box(10, 20, 110, 220),
+        origin=DETECTED,
+        style=TextStyle(color="#e8e8ea"),
+    )
+    history.push_boxes_state([live])
+
+    # Simulate a style commit: assign a FRESH instance (Pitfall 1 discipline).
+    live.style = replace(live.style, color="#ff0000")
+
+    restored = history.pop_boxes_undo(current_boxes=[live])
+    assert restored is not None
+    assert len(restored) == 1
+    restored_pb = restored[0]
+    # Undo restores the snapshot-time (PRE-edit) style A...
+    assert restored_pb.style is not None
+    assert restored_pb.style.color == "#e8e8ea"
+    # ...and the restored style object is not the live one (no aliasing).
+    assert restored_pb.style is not live.style
+
+
+# ---------------------------------------------------------------------------
 # clear() — all six lists (Pitfall 4 + D-10)
 # ---------------------------------------------------------------------------
 

@@ -20,7 +20,14 @@ from manga_ai_studio.core.box_model import DETECTED, PageBox  # noqa: E402
 from manga_ai_studio.core.image_io import save_image_optimized  # noqa: E402
 from manga_ai_studio.core.ocr_export import default_typeset_path  # noqa: E402
 from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
-from manga_ai_studio.gui.text_renderer import bake_typeset_page  # noqa: E402
+from manga_ai_studio.gui.text_renderer import (  # noqa: E402
+    bake_typeset_page,
+    current_focus_text,
+    layout,
+    numpy_to_qimage,
+    paint,
+    qimage_to_numpy,
+)
 from panelcleaner.structures import Box  # noqa: E402
 
 # The default fill (UI-SPEC A1) as an RGB tuple — opaque (D-01).
@@ -120,6 +127,74 @@ def test_bake_result_does_not_share_memory_with_input(qapp) -> None:
     # Mutating the result must not touch the input page.
     baked[:] = 0
     assert not np.array_equal(page, baked)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 Test 1 — canvas ≡ bake equivalence (the D-01 Pitfall 2 guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_canvas_style_paint_equals_bake_pixels(qapp) -> None:
+    """For the same (text, style, rect), pixels painted via renderer.paint
+    into a QImage at scale 1.0 are byte-identical to the corresponding bake
+    region — the D-01 contract pinned by test (canvas ≡ bake; a bake-only
+    inset or scale difference would trip it)."""
+    from PySide6.QtGui import QPainter
+    from PySide6.QtCore import QRectF
+
+    page = _page(24)
+    pb = _box_with_text(recognized="Hi")
+    baked = bake_typeset_page(page, [pb])
+
+    # The canvas-style path: the same numpy->QImage conversion, then the SAME
+    # layout() + paint() functions at scale 1.0.
+    qimg = numpy_to_qimage(page).copy()
+    painter = QPainter(qimg)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    text = current_focus_text(pb)
+    x, y, w, h = pb.box.as_tuple_xywh
+    result = layout(text, pb.style, QRectF(x, y, w, h), vertical=False)
+    paint(painter, result, pb.style)
+    painter.end()
+    canvas_arr = qimage_to_numpy(qimg)
+
+    assert np.array_equal(canvas_arr, baked), (
+        "the canvas paint path and the bake must produce identical pixels"
+        " (D-01 — the Pitfall 2 divergence guard)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 Test 2 — overflow renders UNCLIPPED (UI-SPEC A6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_overflow_paints_unclipped_below_rect(qapp) -> None:
+    """A fixed-size text taller than the box inner rect yields overflow True
+    and the painted glyphs extend BELOW the rect unclipped (no painter clip
+    on the canvas path — UI-SPEC A6)."""
+    from PySide6.QtGui import QPainter
+    from PySide6.QtCore import QRectF
+
+    bg = np.full((60, 100, 3), (30, 40, 50), dtype=np.uint8)
+    style = TextStyle(font_size_px=40.0, auto_fit=False)
+    rect = QRectF(0, 0, 100, 30)
+    result = layout("Big", style, rect, vertical=False)
+    assert result.overflow is True, "40px text in a 30px-tall box must overflow"
+
+    qimg = numpy_to_qimage(bg).copy()
+    painter = QPainter(qimg)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    paint(painter, result, style)
+    painter.end()
+    painted = qimage_to_numpy(qimg)
+
+    below = painted[31:45, :]
+    assert (below != bg[31:45, :]).any(), (
+        "glyph pixels must exist BELOW the rect bottom — overflow is unclipped"
+    )
 
 
 # ---------------------------------------------------------------------------

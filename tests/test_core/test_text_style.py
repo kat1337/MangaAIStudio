@@ -199,6 +199,35 @@ def test_align_values_validated() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task 3 Test 5 — V5 edge absorption (never raises, always a valid TextStyle)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_v5_edges_absorb_garbage_without_raising() -> None:
+    """from_dict absorbs a style dict with a non-dict outline, a list-valued
+    color, a string font_size_px, a non-dict glow, and offset garbage —
+    always yielding a valid TextStyle with clamps applied, never raising."""
+    s = TextStyle.from_dict(
+        {
+            "outline": "garbage",
+            "color": ["#ff0000"],
+            "font_size_px": "big",
+            "glow": 42,
+            "shadow": {"dx": "left", "dy": None, "opacity": 99},
+        }
+    )
+    assert isinstance(s, TextStyle)
+    assert s.color == "#e8e8ea"  # list color -> default
+    assert s.font_size_px is None  # "big" -> default (None = Auto)
+    assert s.outline == TextStyle().outline  # non-dict -> whole default
+    assert s.glow == TextStyle().glow  # non-dict -> whole default
+    assert s.shadow["dx"] == 2.0  # non-numeric offset -> default
+    assert s.shadow["dy"] == 2.0
+    assert s.shadow["opacity"] == 1.0  # 99 -> clamped
+
+
+# ---------------------------------------------------------------------------
 # Test 4 — PageBox.copy() detaches the style (Pitfall 8/1)
 # ---------------------------------------------------------------------------
 

@@ -136,3 +136,37 @@ def test_auto_fit_shrinks_wrapped_text_to_fit(qapp) -> None:
     # ...and the block now fits inside the inner height (or the floor held).
     _, inner_h = _inner(200, 100)
     assert result.overflow is False or result.used_font_size_px <= 5.5
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — Test 3: the Auto-fit floor (D-15 / UI-SPEC long-text row)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_auto_fit_floor_terminates_for_huge_text(qapp) -> None:
+    """A 2000-char translation in a small box: the bounded loop TERMINATES
+    (12 iters max) and never renders below the 5 px scene floor; the text
+    floors (overflow reported) when it cannot fit even at the floor."""
+    rect = QRectF(0, 0, 200, 60)
+    result = layout("x" * 2000, TextStyle(), rect, vertical=False)
+    assert result.used_font_size_px >= 5.0 - 1e-6, (
+        "the loop must never render below the 5 px floor"
+    )
+    assert result.overflow is True, (
+        "2000 chars in a 200x60 box cannot fit — the floor holds and overflow"
+        " is reported (the ink rect may exceed the inner rect at the floor)"
+    )
+    assert result.ink.height() > 0.0
+
+
+@pytest.mark.unit
+def test_auto_fit_fits_long_text_within_loop_budget(qapp) -> None:
+    """A long translation in a wide box fits at a size at-or-above the floor
+    (the loop terminates by FIT, the ink stays inside the inner rect)."""
+    rect = QRectF(0, 0, 400, 200)
+    result = layout("x" * 600, TextStyle(), rect, vertical=False)
+    assert result.used_font_size_px >= 5.0 - 1e-6
+    assert result.overflow is False, "the text must fit in the wide box"
+    _, inner_h = _inner(400, 200)
+    assert result.ink.height() <= inner_h + 1e-6
