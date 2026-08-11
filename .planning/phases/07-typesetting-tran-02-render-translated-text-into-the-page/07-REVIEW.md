@@ -29,7 +29,7 @@ findings:
   warning: 3
   info: 3
   total: 7
-status: issues_found
+status: clean
 ---
 
 # Phase 7 (TRAN-02): Code Review Report
