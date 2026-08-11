@@ -309,11 +309,23 @@ Plans:
 
 **Requirements**: TRAN-02 (currently deferred v2 line in REQUIREMENTS.md)
 **Depends on:** Phase 4, Phase 5
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 7 to break down)
+**Wave 1**
+
+- [ ] 07-01-PLAN.md — Tracer slice: TextStyle model + shared renderer (horizontal) + opaque canvas overlay + Export Typeset… bake (D-01/D-02/D-03/D-04/D-06/D-15)
+
+**Wave 2** *(blocked on 07-01; parallel — no file overlap)*
+
+- [ ] 07-02-PLAN.md — Multi-select: Shift+click/Ctrl+A, grouped move/delete, one snapshot per group op, primary handles, single-box resize (D-08/D-09)
+- [ ] 07-03-PLAN.md — Renderer depth: tategaki vertical layout + glow/shadow effects, pixel tests (D-11/D-14)
+- [ ] 07-04-PLAN.md — Persistence: .mas style field + _ocr.json style block + version checkpoint (D-07, one-way decision)
+
+**Wave 3** *(blocked on 07-02 + 07-03)*
+
+- [ ] 07-05-PLAN.md — Inspector Style section + Mixed common-value + live vertical checkbox + Size +/- actions (D-05/D-10/D-13/D-16)
 
 ---
 *Roadmap created: 2026-07-11*
