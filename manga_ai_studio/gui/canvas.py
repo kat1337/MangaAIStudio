@@ -1922,6 +1922,16 @@ class EditorCanvas(QGraphicsView):
         name = self._pending_boxes_op_name
         self._pending_boxes_op_name = None
         return name
+
+    def set_pending_boxes_op_name(self, op_name: str) -> None:
+        """Record the op name for the NEXT ``boxes_modified`` emission (D-10/D-16).
+
+        The 06-WR-01 pattern extended to style commits: the MainWindow records
+        "style change" / "font size" at push time so ``_on_boxes_modified``
+        consumes it via :meth:`take_pending_boxes_op_name` and the Ctrl+Z
+        flash names the style op instead of the generic "box edit".
+        """
+        self._pending_boxes_op_name = op_name
     def _box_item_at(self, scene_pos: QPointF) -> CornerHandle | BoxItem | None:
         """Return the topmost visible box handle or box at ``scene_pos``.
 

@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
     QCheckBox,
     QComboBox,
     QFontComboBox,
@@ -284,4 +285,218 @@ def test_empty_state_disables_styling(qtbot) -> None:
     assert panel.font_combo.isEnabled() is True
     assert panel.color_swatch.isEnabled() is True
     assert panel.size_spin.isEnabled() is False  # auto-fit coupling
-    assert panel.empty_label.isVisible() is False
+    assert panel.empty_label.isHidden() is True
+
+
+# ===========================================================================
+# Task 2 — the D-10 common-value/Mixed layer + apply-to-all routing
+# ===========================================================================
+
+
+def _window_with_page(qtbot, tmp_path, size: int = 120) -> "MainWindow":
+    """Build a shown MainWindow with one real PNG page loaded (mirrors
+    test_gui_boxes.py's helper)."""
+    from PIL import Image as PILImage
+
+    from manga_ai_studio.config.profile_manager import ProfileManager
+    from manga_ai_studio.gui.main_window import MainWindow
+
+    page = tmp_path / "page.png"
+    PILImage.new("RGB", (size, size), color=(200, 200, 200)).save(page)
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    window._load_folder(tmp_path)
+    window.show()
+    QApplication.processEvents()
+    return window
+
+
+def _seed_boxes_window(window, boxes: list) -> list:
+    """Seed N user boxes in ONE set_boxes call (no history push)."""
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes(
+            [PageBox(box=b, origin="user") for b in boxes], []
+        )
+    finally:
+        window._suppress_boxes_push = False
+    return list(window.canvas._box_items)
+
+
+@pytest.mark.gui
+def test_mixed_state_presented(qtbot) -> None:
+    """D-10: differing values across the selection show the Mixed sentinel
+    (split swatch / Mixed entries / "Mixed" spin special text / tri-state
+    checkboxes); a uniform selection shows real values, never Mixed."""
+    from PySide6.QtCore import Qt
+
+    panel = _make_inspector(qtbot)
+    pb1 = _pagebox_with_style(
+        font_family="Liberation Sans", color="#ff0000", auto_fit=True
+    )
+    pb2 = _pagebox_with_style(
+        font_family="Arial", italic=True, color="#0000ff",
+        font_size_px=20.0, auto_fit=False,
+    )
+    panel.load_multi_selection([pb1, pb2])
+
+    # Font/style combos: differing -> the "Mixed" entry.
+    assert panel._loaded_style_font == "Mixed"
+    assert panel.font_combo.currentText() == "Mixed"
+    assert panel._loaded_style_font_style == "Mixed"
+    assert panel.style_combo.currentText() == "Mixed"
+
+    # Size: differing -> the sentinel 0 with "Mixed" special text.
+    assert panel._style_size_mixed is True
+    assert panel.size_spin.text() == "Mixed"
+
+    # Color: differing -> the split swatch (color None).
+    assert panel._loaded_style_color is None
+    assert panel.color_swatch.color is None
+
+    # Auto-fit: differing -> tri-state indeterminate.
+    assert panel.auto_fit_check.checkState() == Qt.CheckState.PartiallyChecked
+
+    # A uniform selection shows real values, never Mixed (UI-SPEC populated row).
+    pb3 = _pagebox_with_style(color="#ff0000", font_size_px=14.0, auto_fit=False)
+    pb4 = _pagebox_with_style(color="#ff0000", font_size_px=14.0, auto_fit=False)
+    panel.load_multi_selection([pb3, pb4])
+    assert panel._loaded_style_font != "Mixed"
+    assert panel._loaded_style_color == "#ff0000"
+    assert panel.color_swatch.color == "#ff0000"
+    assert panel._style_size_mixed is False
+    assert panel.size_spin.value() == 14
+    assert panel.auto_fit_check.checkState() == Qt.CheckState.Unchecked
+
+
+@pytest.mark.gui
+def test_style_commit_applies_to_all(qtbot, tmp_path) -> None:
+    """D-10 end-to-end: ONE override on a Mixed selection applies to BOTH
+    boxes; exactly ONE BOXES emission; ONE Ctrl+Z restores both PRE-edit
+    styles (detached — Pitfall 1)."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    items[0].pagebox.style = TextStyle(color="#ff0000")
+    items[1].pagebox.style = TextStyle(color="#0000ff")
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    # The panel shows the Mixed state for the differing colors.
+    assert window.inspector_panel._loaded_style_color is None
+
+    # ONE color override -> BOTH boxes update; exactly ONE BOXES emission.
+    window.inspector_panel._commit_style_color("#00ff00")
+    QApplication.processEvents()
+    assert items[0].pagebox.style.color == "#00ff00"
+    assert items[1].pagebox.style.color == "#00ff00"
+    assert len(emitted) == 1, "a style commit must emit boxes_modified exactly once"
+    before = emitted[0]
+    assert before[0].style.color == "#ff0000"
+    assert before[1].style.color == "#0000ff"
+
+    # ONE Ctrl+Z restores BOTH previous styles (Pitfall 1 — the restored
+    # styles are detached from the live ones).
+    window.on_undo()
+    QApplication.processEvents()
+    restored = [it.pagebox for it in window.canvas._box_items]
+    assert restored[0].style.color == "#ff0000"
+    assert restored[1].style.color == "#0000ff"
+
+
+@pytest.mark.gui
+def test_mixed_sentinel_never_persists(qtbot, tmp_path) -> None:
+    """Pitfall 7: after commits on a Mixed selection, no TextStyle anywhere
+    carries the "Mixed" sentinel — commits always emit real values."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    items[0].pagebox.style = TextStyle(
+        color="#ff0000", font_size_px=14.0, auto_fit=False
+    )
+    items[1].pagebox.style = TextStyle(
+        color="#0000ff", font_size_px=20.0, auto_fit=False
+    )
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    # Overrides on the Mixed selection: color via the swatch hook, size via
+    # the spin, then a font-style commit.
+    window.inspector_panel._commit_style_color("#123456")
+    window.inspector_panel.size_spin.setValue(18)
+    window.inspector_panel.size_spin.editingFinished.emit()
+    QApplication.processEvents()
+
+    for pb in window.canvas.boxes_snapshot():
+        d = pb.style.to_dict()
+        assert "Mixed" not in str(d), f"sentinel leaked into a TextStyle: {d}"
+        assert pb.style.color == "#123456"
+        assert pb.style.font_size_px == 18.0
+        assert pb.style.auto_fit is False
+
+
+@pytest.mark.gui
+def test_multi_text_fields_disabled(qtbot) -> None:
+    """D-10: at N>1 the per-box text fields disable while the styling section
+    stays enabled; at N==1 the text fields re-enable."""
+    panel = _make_inspector(qtbot)
+    pb1 = _pagebox_with_style()
+    pb2 = _pagebox_with_style()
+    panel.load_multi_selection([pb1, pb2])
+
+    # Per-box content fields disable (Bubble #, Origin, Recognized, Translation,
+    # Language).
+    for w in (
+        panel.bubble_spin,
+        panel.origin_label,
+        panel.recognized_edit,
+        panel.translation_edit,
+        panel.language_label,
+    ):
+        assert w.isEnabled() is False, f"{w} must disable at N>1 (D-10)"
+
+    # The styling section + vertical checkbox stay ENABLED (edits ALL).
+    for w in (
+        panel.font_combo,
+        panel.style_combo,
+        panel.auto_fit_check,
+        panel.color_swatch,
+        panel.align_combo,
+        panel.align_v_combo,
+        panel.vertical_check,
+    ):
+        assert w.isEnabled() is True, f"{w} must stay enabled at N>1 (D-10)"
+
+    # Single select re-enables the per-box fields.
+    panel.load_box(pb1)
+    for w in (
+        panel.bubble_spin,
+        panel.recognized_edit,
+        panel.translation_edit,
+        panel.language_label,
+    ):
+        assert w.isEnabled() is True, f"{w} must re-enable at N==1"
+
+
+@pytest.mark.gui
+def test_hint_label_count(qtbot) -> None:
+    """D-10: the muted hint shows the EXACT selection count; single select
+    hides it."""
+    panel = _make_inspector(qtbot)
+    panel.load_multi_selection([_pagebox_with_style() for _ in range(3)])
+    assert panel.multi_hint_label.isHidden() is False
+    assert panel.multi_hint_label.text() == "Style edits apply to all 3 selected boxes."
+
+    panel.load_multi_selection([_pagebox_with_style(), _pagebox_with_style()])
+    assert panel.multi_hint_label.text() == "Style edits apply to all 2 selected boxes."
+
+    # Single select hides the hint (the Phase 4 follower behavior).
+    panel.load_box(_pagebox_with_style())
+    assert panel.multi_hint_label.isHidden() is True

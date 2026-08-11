@@ -555,7 +555,10 @@ class InspectorPanel(QWidget):
         self._load_style_section(style, rendered_size_px)
         self.multi_hint_label.setVisible(False)
 
-        # Enable all fields + hide the empty-state copy.
+        # Enable all fields + hide the empty-state copy. Both gates: the
+        # per-box fields (incl. the read-only Origin/Language labels — D-10
+        # multi-select disables them) and the whole-panel empty gate.
+        self._set_text_fields_enabled(True)
         self._set_fields_enabled(True)
         self._apply_auto_fit_spin_state()
         for key in self._effect_checks:

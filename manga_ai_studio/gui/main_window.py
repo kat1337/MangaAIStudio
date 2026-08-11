@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import math
+from dataclasses import replace as dreplace
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -71,11 +72,16 @@ from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
 )
+from manga_ai_studio.core.text_style import TextStyle
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+from manga_ai_studio.gui.text_renderer import (
+    current_focus_text,
+    layout as renderer_layout,
+)
 from manga_ai_studio.gui.tools_panel import ToolsPanel
 from manga_ai_studio.gui.worker_thread import Worker
 
@@ -84,6 +90,14 @@ MAX_RECENT_FILES = 8
 # Maximum number of entries kept in the Recent Projects submenu (D-07, plan
 # 05-05 — mirrors Recent Files, UI-SPEC surface 21).
 MAX_RECENT_PROJECTS = 8
+# (bold, italic) flags per QFontDatabase style-name display string (D-05 —
+# the Inspector Style-combo commits map the display name to the model flags).
+_FONT_STYLE_FLAGS = {
+    "Regular": (False, False),
+    "Italic": (False, True),
+    "Bold": (True, False),
+    "Bold Italic": (True, True),
+}
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
@@ -2701,6 +2715,15 @@ class MainWindow(QMainWindow):
             on_translation=self._on_inspector_translation_committed,
             on_bubble=self._on_inspector_bubble_committed,
             on_vertical=self._on_inspector_vertical_committed,
+            # Plan 07-05 (D-05/D-10): the Style-section commits route through
+            # the ONE apply-to-all snapshot machinery (D-10).
+            on_style_font=self._on_inspector_style_font_committed,
+            on_style_font_style=self._on_inspector_style_font_style_committed,
+            on_style_size=self._on_inspector_style_size_committed,
+            on_style_auto_fit=self._on_inspector_style_auto_fit_committed,
+            on_style_color=self._on_inspector_style_color_committed,
+            on_style_align=self._on_inspector_style_align_committed,
+            on_style_effect=self._on_inspector_style_effect_committed,
         )
 
         # Edit-menu actions -> the two unified handlers.
@@ -2838,26 +2861,48 @@ class MainWindow(QMainWindow):
         # always-present view (D-08) goes stale while the box stays selected.
         # Re-populate from the still-selected box (also covers canvas box
         # create/move/resize commits). load_box blocks signals during
-        # population, so no commit loop is possible.
-        item = self.canvas._selected_box()
-        if item is not None:
-            self.inspector_panel.load_box(item.pagebox)
+        # population, so no commit loop is possible. Multi-aware since plan
+        # 07-05 (D-10): a group move/style commit reloads the Mixed state.
+        self._on_canvas_selection_changed()
 
     # ----------------------------------------------------- plan 04-04 Inspector
     def _on_canvas_selection_changed(self) -> None:
-        """Inspector selection-follower (D-08): load the selected box, or clear.
+        """Inspector selection-follower (D-08/D-10): load the selection.
 
-        Subscribed to the scene's ``selectionChanged``. When a box is selected,
-        the Inspector populates from its pagebox; when the selection is cleared
-        (Esc / delete / page-switch) it shows the empty-state copy. The
-        Inspector never drives canvas selection — it is a property-editor
+        Subscribed to the scene's ``selectionChanged``. A single selected box
+        populates the panel from its pagebox (the Phase 4 behavior — the
+        styling section shows the box's own flat style, D-06); a MULTI-
+        selection (D-10) populates the common-value/Mixed state via
+        ``load_multi_selection`` (per-box text fields disable; the styling
+        section edits ALL selected); no selection shows the empty-state copy.
+        The Inspector never drives canvas selection — it is a property-editor
         follower (UI-SPEC §18).
         """
-        item = self.canvas._selected_box()
-        if item is None:
+        selected = self._selected_box_items()
+        if not selected:
             self.inspector_panel.clear()
+        elif len(selected) == 1:
+            item = selected[0]
+            self.inspector_panel.load_box(
+                item.pagebox,
+                rendered_size_px=self._overlay_rendered_size(item),
+            )
         else:
-            self.inspector_panel.load_box(item.pagebox)
+            self.inspector_panel.load_multi_selection(
+                [it.pagebox for it in selected]
+            )
+
+    def _overlay_rendered_size(self, item) -> float | None:
+        """The item's cached renderer auto-fit size (the Auto-fit uncheck hint).
+
+        ``used_font_size_px`` is the shared renderer's resolved size (the
+        manual size or the auto-fit loop's final target) — the exact "current
+        rendered size" D-15 wants as the manual-start value.
+        """
+        lr = item._text_overlay.layout_result
+        if lr is not None and lr.used_font_size_px > 0:
+            return float(lr.used_font_size_px)
+        return None
 
     def _inspector_commit_pre(self) -> "BoxItem | None":
         """Capture the PRE-edit snapshot + the selected item for an Inspector commit.
@@ -2900,6 +2945,144 @@ class MainWindow(QMainWindow):
         # boxes_modified -> _on_boxes_modified pushes the BEFORE snapshot.
         self.canvas.boxes_modified.emit(self._boxes_interaction_start_snapshot)
         self.inspector_panel.load_box(item.pagebox)
+
+    # ------------------------------------------- plan 07-05 style commits (D-10)
+    # The D-05 styling signals route through ONE apply-to-all commit:
+    # `_inspector_style_commit` captures ONE before-snapshot (the full
+    # boxes_snapshot() — which forwards `style` into the fresh PageBoxes),
+    # applies the change to EVERY selected PageBox via `dataclasses.replace`
+    # (a FRESH TextStyle — never in-place mutation, Pitfall 1), records the
+    # op name "style change" (06-WR-01), refreshes every selected overlay +
+    # badge, emits `boxes_modified` ONCE, and re-loads the multi-aware panel.
+    # One Ctrl+Z reverses the whole commit (D-10 / surface 13).
+
+    def _selected_box_items(self) -> list:
+        """Every selected BoxItem in canvas order (the D-10 target set)."""
+        return [it for it in self.canvas._box_items if it.isSelected()]
+
+    def _inspector_style_commit(self, apply_fn) -> None:
+        """ONE style commit applied to EVERY selected box (D-10).
+
+        ``apply_fn(item)`` mutates ``item.pagebox`` (via the style helpers
+        below — always assigning a fresh ``TextStyle``). Captures ONE
+        before-snapshot with DETACHED payloads (Pitfall 8 push-side), records
+        the "style change" op name, refreshes each selected overlay exactly
+        once, emits ``boxes_modified`` ONCE, and re-loads the panel
+        (multi-aware — a Mixed selection reloads as the now-uniform values).
+        """
+        selected = self._selected_box_items()
+        if not selected:
+            return
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        self._boxes_interaction_start_snapshot = before
+        for item in selected:
+            apply_fn(item)
+        self.canvas.set_pending_boxes_op_name("style change")
+        for item in selected:
+            item.refresh_text_overlay()
+            item.refresh_badge()
+        self.canvas.boxes_modified.emit(before)
+        self._on_canvas_selection_changed()
+
+    def _replace_style(self, pb, **changes) -> None:
+        """Assign a FRESH ``TextStyle`` via ``dataclasses.replace`` (Pitfall 1)."""
+        style = pb.style if pb.style is not None else TextStyle()
+        pb.style = dreplace(style, **changes)
+
+    def _replace_effect(self, pb, key: str, changes: dict) -> None:
+        """Assign a fresh ``TextStyle`` with ONE effect dict replaced (Pitfall 1)."""
+        style = pb.style if pb.style is not None else TextStyle()
+        effect = dict(getattr(style, key))
+        effect["enabled"] = bool(changes["enabled"])
+        effect["color"] = str(changes["color"])
+        value = float(changes["value"])
+        if key == "outline":
+            effect["width_px"] = value
+        elif key == "glow":
+            effect["radius_px"] = value
+        else:  # shadow — the UI offset spin maps to radius + dx + dy
+            effect["radius_px"] = value
+            effect["dx"] = value
+            effect["dy"] = value
+        pb.style = dreplace(style, **{key: effect})
+
+    def _style_rendered_size(self, item) -> float:
+        """The box's CURRENT rendered font size (A11 — renderer.layout's
+        auto-fit result; the box's own manual size when it has one)."""
+        pb = item.pagebox
+        style = pb.style if pb.style is not None else TextStyle()
+        if style.font_size_px is not None and not style.auto_fit:
+            return float(style.font_size_px)
+        text = current_focus_text(pb)
+        if not text:
+            return 14.0  # the auto-fit base (nothing renders — the size is moot)
+        vertical = bool(
+            style.vertical or (pb.payload.vertical if pb.payload else False)
+        )
+        result = renderer_layout(text, style, item.rect(), vertical=vertical)
+        return float(result.used_font_size_px)
+
+    def _on_inspector_style_font_committed(self, family: str) -> None:
+        self._inspector_style_commit(
+            lambda item: self._replace_style(item.pagebox, font_family=family)
+        )
+
+    def _on_inspector_style_font_style_committed(self, style_name: str) -> None:
+        bold, italic = _FONT_STYLE_FLAGS.get(style_name, (False, False))
+        self._inspector_style_commit(
+            lambda item: self._replace_style(item.pagebox, bold=bold, italic=italic)
+        )
+
+    def _on_inspector_style_size_committed(self, size: int) -> None:
+        if size <= 0:
+            # 0 = the "Auto" sentinel (D-15): back to the fit-in-box mode.
+            self._inspector_style_commit(
+                lambda item: self._replace_style(
+                    item.pagebox, auto_fit=True, font_size_px=None
+                )
+            )
+        else:
+            self._inspector_style_commit(
+                lambda item: self._replace_style(
+                    item.pagebox, auto_fit=False, font_size_px=float(size)
+                )
+            )
+
+    def _on_inspector_style_auto_fit_committed(self, checked: bool) -> None:
+        if checked:
+            self._inspector_style_commit(
+                lambda item: self._replace_style(
+                    item.pagebox, auto_fit=True, font_size_px=None
+                )
+            )
+        else:
+            # The uncheck converts to MANUAL at the current rendered size
+            # (A11 — the renderer's auto-fit result; D-15).
+            self._inspector_style_commit(
+                lambda item: self._replace_style(
+                    item.pagebox,
+                    auto_fit=False,
+                    font_size_px=self._style_rendered_size(item),
+                )
+            )
+
+    def _on_inspector_style_color_committed(self, color_hex: str) -> None:
+        self._inspector_style_commit(
+            lambda item: self._replace_style(item.pagebox, color=color_hex)
+        )
+
+    def _on_inspector_style_align_committed(self, h: str, v: str) -> None:
+        self._inspector_style_commit(
+            lambda item: self._replace_style(item.pagebox, align_h=h, align_v=v)
+        )
+
+    def _on_inspector_style_effect_committed(self, key: str, changes: dict) -> None:
+        self._inspector_style_commit(
+            lambda item: self._replace_effect(item.pagebox, key, changes)
+        )
 
     def _on_inspector_recognized_committed(self, text: str) -> None:
         """Recognized-field commit -> set_recognized_text_edited (D-04, Plan 01 setter).
@@ -2946,18 +3129,34 @@ class MainWindow(QMainWindow):
         self._inspector_commit_post(item)
 
     def _on_inspector_vertical_committed(self, vertical: bool) -> None:
-        """Vertical checkbox -> write payload.vertical (export metadata, D-06).
+        """Vertical checkbox -> write ``payload.vertical`` on EVERY selected box
+        (D-13/D-10 — one commit, ONE snapshot) + re-render the overlays.
 
-        The editor-mode flip itself is a v1 no-op (RESEARCH Pitfall 5); the
-        checkbox preserves the vertical flag for export and is the seam for the
-        future typesetting phase.
+        The overlay + bake read the OR of ``style.vertical`` and
+        ``payload.vertical`` (``box_item.refresh_text_overlay`` /
+        ``text_renderer.bake_typeset_page`` — the SAME expression, atomic
+        canvas ≡ bake flip), so this commit switches the canvas + bake to the
+        renderer's tategaki path immediately (Pitfall 9 — a toggle must
+        re-render, not just write metadata). Records the "style change" op
+        name (every style commit incl. the vertical toggle, D-10/surface 13).
         """
-        item = self._inspector_commit_pre()
-        if item is None:
+        selected = self._selected_box_items()
+        if not selected:
             return
-        if item.pagebox.payload is not None:
-            item.pagebox.payload.vertical = vertical
-        self._inspector_commit_post(item)
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        self._boxes_interaction_start_snapshot = before
+        for item in selected:
+            if item.pagebox.payload is not None:
+                item.pagebox.payload.vertical = vertical
+        self.canvas.set_pending_boxes_op_name("style change")
+        for item in selected:
+            item.refresh_text_overlay()
+            item.refresh_badge()
+        self.canvas.boxes_modified.emit(before)
+        self._on_canvas_selection_changed()
 
     # ----------------------------------------------------- unified undo/redo
     # Surface 13 (plan 03-05): the unified Ctrl+Z / Ctrl+Shift+Z pop the
@@ -2985,6 +3184,10 @@ class MainWindow(QMainWindow):
         (surface 13 extended op set).
         """
         if kind_or_op.startswith(("Moved ", "Deleted ")):
+            return kind_or_op
+        if kind_or_op in ("style change", "font size"):
+            # Plan 07-05 (D-10/D-16): the recorded style-op names ARE the
+            # labels (surface 13 extended op set — "Undo: style change").
             return kind_or_op
         if kind_or_op in ("rotate", "crop", "curves", "resize"):
             return kind_or_op
