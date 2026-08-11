@@ -309,7 +309,7 @@ Plans:
 
 **Requirements**: TRAN-02 (currently deferred v2 line in REQUIREMENTS.md)
 **Depends on:** Phase 4, Phase 5
-**Plans:** 1/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 
@@ -319,9 +319,9 @@ Plans:
 
 **Wave 2** *(blocked on 07-01; parallel — no file overlap)*
 
-- [ ] 07-02-PLAN.md — Multi-select: Shift+click/Ctrl+A, grouped move/delete, one snapshot per group op, primary handles, single-box resize (D-08/D-09)
-- [ ] 07-03-PLAN.md — Renderer depth: tategaki vertical layout + glow/shadow effects, pixel tests (D-11/D-14)
-- [ ] 07-04-PLAN.md — Persistence: .mas style field + _ocr.json style block + version checkpoint (D-07, one-way decision)
+- [x] 07-02-PLAN.md — Multi-select: Shift+click/Ctrl+A, grouped move/delete, one snapshot per group op, primary handles, single-box resize (D-08/D-09)
+- [x] 07-03-PLAN.md — Renderer depth: tategaki vertical layout + glow/shadow effects, pixel tests (D-11/D-14)
+- [x] 07-04-PLAN.md — Persistence: .mas style field + _ocr.json style block + version checkpoint (D-07, one-way decision)
 
 **Wave 3** *(blocked on 07-02 + 07-03)*
 
