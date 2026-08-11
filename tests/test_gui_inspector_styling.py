@@ -443,6 +443,48 @@ def test_mixed_sentinel_never_persists(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
+def test_mixed_effect_value_commit_preserves_per_box_enabled(qtbot, tmp_path) -> None:
+    """WR-02: a VALUE-only commit on a MIXED effect row must NOT silently
+    switch the effect on for every box — each box keeps its OWN enabled state
+    (the tri-state checkbox cannot express 'leave enabled alone', so the
+    commit carries the untouched sentinel and the consumer preserves it)."""
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    # Box A: glow ON. Box B: glow OFF — differing enabled -> Mixed row.
+    items[0].pagebox.style = TextStyle(glow={"enabled": True, "radius_px": 3.0})
+    items[1].pagebox.style = TextStyle(glow={"enabled": False, "radius_px": 3.0})
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    # The glow row is Mixed (differing enabled across the selection).
+    assert panel._loaded_effects["glow"]["enabled"] is None
+
+    # A VALUE-only commit (radius 3 -> 7) through the real window handler.
+    panel._effect_spins["glow"].setValue(7)
+    panel._commit_effect_value("glow", panel._cb_style_effect)
+    QApplication.processEvents()
+
+    # Each box keeps its OWN enabled state; the radius applies to both.
+    assert items[0].pagebox.style.glow["enabled"] is True, (
+        "box A had glow ON — a value-only commit must not turn it off (WR-02)"
+    )
+    assert items[1].pagebox.style.glow["enabled"] is False, (
+        "box B had glow OFF — a value-only commit must not turn it ON (WR-02)"
+    )
+    assert items[0].pagebox.style.glow["radius_px"] == 7.0
+    assert items[1].pagebox.style.glow["radius_px"] == 7.0
+    # Pitfall 7: no sentinel persisted into any style.
+    for it in items:
+        assert "None" not in str(it.pagebox.style.glow)
+
+
+@pytest.mark.gui
 def test_multi_text_fields_disabled(qtbot) -> None:
     """D-10: at N>1 the per-box text fields disable while the styling section
     stays enabled; at N==1 the text fields re-enable."""

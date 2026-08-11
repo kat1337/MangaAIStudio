@@ -3031,10 +3031,19 @@ class MainWindow(QMainWindow):
         pb.style = dreplace(style, **changes)
 
     def _replace_effect(self, pb, key: str, changes: dict) -> None:
-        """Assign a fresh ``TextStyle`` with ONE effect dict replaced (Pitfall 1)."""
+        """Assign a fresh ``TextStyle`` with ONE effect dict replaced (Pitfall 1).
+
+        WR-02 (07-REVIEW): ``changes["enabled"]`` may be ``None`` — the
+        "leave enabled alone" sentinel a value/color-only commit on a MIXED
+        effect row carries (the tri-state checkbox cannot express it). When
+        None, each box's OWN enabled state is preserved instead of forcing
+        every box to the same flag; the sentinel never lands in a ``TextStyle``
+        (Pitfall 7).
+        """
         style = pb.style if pb.style is not None else TextStyle()
         effect = dict(getattr(style, key))
-        effect["enabled"] = bool(changes["enabled"])
+        if changes.get("enabled") is not None:
+            effect["enabled"] = bool(changes["enabled"])
         effect["color"] = str(changes["color"])
         value = float(changes["value"])
         if key == "outline":

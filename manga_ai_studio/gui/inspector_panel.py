@@ -1213,13 +1213,22 @@ class InspectorPanel(QWidget):
         carries real values — Pitfall 7); uniform rows use the widgets
         verbatim. The MainWindow maps ``value`` per key (outline width / glow
         radius / shadow offset).
+
+        WR-02 (07-REVIEW): the ENABLED field is special-cased — a MIXED row's
+        tri-state checkbox cannot express "leave enabled alone", so a
+        value/color-only commit carries ``"enabled": None`` (the untouched
+        sentinel) instead of the hardcoded ``True``. The commit consumer
+        (``MainWindow._replace_effect``) then preserves each box's OWN enabled
+        state instead of silently switching the effect on for every box. The
+        sentinel never reaches a ``TextStyle`` (Pitfall 7 holds — see the
+        consumer's None guard); explicit enabled commits always carry a bool.
         """
         loaded = self._loaded_effects[key]
         mixed = loaded["enabled"] is None  # any None field marks the row mixed
         return {
             "enabled": bool(enabled)
             if enabled is not None
-            else (loaded["enabled"] if not mixed else True),
+            else (loaded["enabled"] if not mixed else None),
             "color": color
             if color is not None
             else (loaded["color"] if not mixed else _EFFECT_DEFAULT_COLORS[key]),
