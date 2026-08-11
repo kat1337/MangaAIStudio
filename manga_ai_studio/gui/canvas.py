@@ -250,11 +250,11 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = QPointF()
         self._resize_start_rect = QRectF()
         self._moving_box: BoxItem | None = None
-        self._move_anchor_box_pos = QPointF()
-        # WR-04 (plan 03-07): the box rect at move-ARM time, so the move-commit
-        # branch can delta-check (a plain click-to-select with no drag must NOT
-        # emit boxes_modified / seed a spurious no-op BOXES entry).
-        self._move_start_rect = QRectF()
+        # Phase 7 (plan 07-02, D-08/D-09): multi-select state.
+        self._group_move: dict[BoxItem, QRectF] = {}
+        self._primary_box: BoxItem | None = None
+        self._selection_order: list[BoxItem] = []
+        self._pending_boxes_op_name: str | None = None
         self._creating_box = False
         self._create_anchor = QPointF()
         # CR-01 fix: the PRE-mutation snapshot captured at the START of a
@@ -1046,17 +1046,20 @@ class EditorCanvas(QGraphicsView):
                 event.accept()
                 return
             if isinstance(item, BoxItem):
-                self._select_and_begin_move(item, scene_pos)
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self._toggle_box_selection(item)
+                else:
+                    self._select_and_begin_move(item, scene_pos)
                 event.accept()
                 return
             if event.modifiers() & Qt.KeyboardModifier.AltModifier:
                 self._begin_create_box(scene_pos)
                 event.accept()
                 return
-            # Empty canvas, no Alt: deselect and FALL THROUGH (do not return)
-            # so the mask-tool branch below still runs and a mask-tool left-
-            # click paints (UI-SPEC §12d step 2 last bullet — critical).
-            self._deselect_box()
+            # Empty canvas, no Alt: clear the WHOLE selection and FALL THROUGH
+            # (do not return) so the mask-tool branch below still runs (UI-SPEC
+            # §12d + surface 32 — clicking empty canvas clears the selection).
+            self._clear_selection()
 
         # --- Crop-tool branch (plan 05-07, UI-SPEC surface 24a). The box
         # hit-test above already returned for presses on boxes/handles — the
@@ -1487,8 +1490,8 @@ class EditorCanvas(QGraphicsView):
                 self._cancel_armed_crop()
                 event.accept()
                 return
-            if self._selected_box() is not None:
-                self._deselect_box()
+            if len(self._scene.selectedItems()) > 0:
+                self._clear_selection()
                 event.accept()
                 return
         if event.key() == Qt.Key.Key_F2:
@@ -1627,6 +1630,10 @@ class EditorCanvas(QGraphicsView):
         for item in self._box_items:
             self._scene.removeItem(item)
         self._box_items = []
+        # Plan 07-02 (D-08): the layer rebuild resets the multi-select state.
+        self._selection_order = []
+        self._primary_box = None
+        self._group_move = {}
 
         for pb in list(user_pageboxes) + list(detected_pageboxes):
             item = BoxItem(pb)
@@ -1813,12 +1820,79 @@ class EditorCanvas(QGraphicsView):
             if item.isSelected():
                 item.setSelected(False)
 
+    def _clear_selection(self) -> None:
+        """Deselect EVERY box + reset the primary/order tracking (D-08, plan 07-02)."""
+        self._scene.clearSelection()
+        self._selection_order = []
+        self._primary_box = None
+        self._sync_handles_visibility()
+
+    def _note_selection_order(self, item: BoxItem) -> None:
+        self._selection_order = [
+            it for it in self._selection_order if it.isSelected()
+        ]
+        if item in self._selection_order:
+            self._selection_order.remove(item)
+        self._selection_order.append(item)
+
+    def _refresh_primary_box(self) -> None:
+        self._selection_order = [
+            it for it in self._selection_order if it.isSelected()
+        ]
+        if self._primary_box is not None and not self._primary_box.isSelected():
+            self._primary_box = None
+        if self._primary_box is None and self._selection_order:
+            self._primary_box = self._selection_order[-1]
+        if self._primary_box is None:
+            selected = [it for it in self._box_items if it.isSelected()]
+            if selected:
+                self._primary_box = selected[-1]
+        self._sync_handles_visibility()
+
+    def _sync_handles_visibility(self) -> None:
+        for item in self._box_items:
+            item._sync_handles(primary=(item is self._primary_box))
+
+    def _toggle_box_selection(self, item: BoxItem) -> None:
+        if item.isSelected():
+            item.setSelected(False)
+            if item in self._selection_order:
+                self._selection_order.remove(item)
+            self._refresh_primary_box()
+        else:
+            item.setSelected(True)
+            self._note_selection_order(item)
+            self._primary_box = item
+            self._sync_handles_visibility()
+
+    def _is_primary_provider(self, item: BoxItem) -> bool | None:
+        if self._primary_box is None:
+            return None
+        return item is self._primary_box
+
     def _selected_box(self) -> BoxItem | None:
         """Return the single selected BoxItem, or None (D-08 single-select)."""
         for item in self._box_items:
             if item.isSelected():
                 return item
         return None
+
+    def select_all_boxes(self) -> None:
+        """Select EVERY box on the page (Ctrl+A, D-08 plan 07-02).
+
+        Iterates ``_box_items`` (the layer rebuild's population order), marks
+        each item selected, tracks the LAST item as the primary (the group
+        anchor — UI-SPEC §32), and drives the selection-change propagation so
+        ``itemChange`` fires per item (pens/handles update) and the Inspector
+        reload hook sees the new selection.
+        """
+        if not self._box_items:
+            return
+        for item in self._box_items:
+            item.setSelected(True)
+        self._selection_order = [it for it in self._box_items if it.isSelected()]
+        self._primary_box = self._selection_order[-1] if self._selection_order else None
+        self._sync_handles_visibility()
 
     def _box_item_at(self, scene_pos: QPointF) -> CornerHandle | BoxItem | None:
         """Return the topmost visible box handle or box at ``scene_pos``.

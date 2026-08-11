@@ -3627,3 +3627,170 @@ def test_text_menu_has_auto_number_submenu(qtbot, tmp_path) -> None:
     sub = [a.text() for a in auto_menu.actions()]
     assert "RTL (Manga)" in sub
     assert "LTR (Manhwa)" in sub
+
+
+# ===========================================================================
+# Plan 07-02 (D-08/D-09) — multi-select: selection mechanics (Task 1)
+# ===========================================================================
+# Shift+click toggles membership without clearing others; a plain click keeps
+# the Phase 3 single-select; clicking empty canvas clears ALL then falls
+# through to the mask-tool dispatch; Esc deselects all; Ctrl+A (Edit ->
+# Select All Boxes) selects every box. These tests drive the REAL canvas
+# dispatch (mousePressEvent / keyPressEvent), not direct setSelected calls.
+
+
+def _shift_press_at(canvas: EditorCanvas, sx: float, sy: float) -> QMouseEvent:
+    """Build a left-button SHIFT+press (the multi-select toggle) at (sx, sy)."""
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    )
+
+
+@pytest.mark.gui
+def test_multi_select_shift_toggle(qtbot) -> None:
+    """Shift+click ADDS a box without clearing others; a second Shift+click on
+    the same box removes ONLY it (D-08, plan 07-02; UI-SPEC surface 32)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b = canvas._box_items
+
+    # Plain click selects A (Phase 3 single-select).
+    canvas.mousePressEvent(_press_at(canvas, 35, 35))
+    assert a.isSelected() is True
+    assert b.isSelected() is False
+
+    # Shift+click B -> B joins; A survives (len(selectedItems()) grows).
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 2
+    assert a.isSelected() is True
+    assert b.isSelected() is True
+
+    # Shift+click B again -> only B removed.
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 1
+    assert a.isSelected() is True
+    assert b.isSelected() is False
+
+
+@pytest.mark.gui
+def test_multi_select_plain_click_clears_others(qtbot) -> None:
+    """A PLAIN click on an UNSELECTED box clears the rest and selects only
+    that box — the multi-select model's N=1 case stays Phase 3-identical
+    (D-08). A plain click on an already-selected member keeps the group (the
+    D-09 group-arm path), so this test clicks an unselected box."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+            PageBox(box=Box(200, 200, 260, 260), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b, c = canvas._box_items
+
+    canvas.mousePressEvent(_shift_press_at(canvas, 35, 35))
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 2
+
+    # Plain click on UNSELECTED box C -> only C (the multi-selection
+    # collapses to N=1).
+    canvas.mousePressEvent(_press_at(canvas, 230, 230))
+    assert len(canvas._scene.selectedItems()) == 1
+    assert c.isSelected() is True
+    assert a.isSelected() is False
+    assert b.isSelected() is False
+
+
+@pytest.mark.gui
+def test_empty_click_clears_all(qtbot) -> None:
+    """Clicking EMPTY canvas (no Alt) clears the WHOLE selection AND still
+    falls through to the mask-tool dispatch (UI-SPEC surface 32 + §12d)."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b = canvas._box_items
+    canvas.mousePressEvent(_shift_press_at(canvas, 35, 35))
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 2
+
+    # Brush tool + empty-canvas click: selection clears AND the mask paints.
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(12)
+    canvas.mousePressEvent(_press_at(canvas, 300, 300))  # empty area
+    assert len(canvas._scene.selectedItems()) == 0
+    assert a.isSelected() is False and b.isSelected() is False
+    assert canvas.get_mask().pixelColor(300, 300).alpha() > 0, (
+        "empty-canvas click must still fall through to the mask-tool dispatch"
+    )
+
+
+@pytest.mark.gui
+def test_select_all_boxes(qtbot, tmp_path) -> None:
+    """Ctrl+A selects EVERY box; the action is disabled with zero boxes and
+    during a running async op (D-08, plan 07-02; T-07-05 single binding)."""
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    _seed_boxes_window(
+        window,
+        [Box(10, 10, 60, 60), Box(100, 100, 160, 160), Box(200, 200, 260, 260)],
+    )
+    window._refresh_action_states()
+    assert window.action_select_all_boxes.isEnabled() is True
+    assert window.action_select_all_boxes.shortcut().toString() == "Ctrl+A"
+
+    # Trigger through the ACTION (the menu/shortcut path), not a direct call.
+    window.action_select_all_boxes.trigger()
+    assert len(canvas._scene.selectedItems()) == 3
+
+    # Gate: zero boxes -> disabled.
+    canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[])
+    window._refresh_action_states()
+    assert window.action_select_all_boxes.isEnabled() is False
+
+    # Gate: async op running -> disabled even with boxes present.
+    _seed_boxes_window(window, [Box(10, 10, 60, 60)])
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_select_all_boxes.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_esc_deselects_all(qtbot) -> None:
+    """Esc clears the WHOLE multi-selection (no inline editor active) — the
+    single-select Esc behavior extends to N>1 (D-08, plan 07-02)."""
+    from PySide6.QtGui import QKeyEvent
+
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(10, 10, 60, 60), origin=USER),
+            PageBox(box=Box(100, 100, 160, 160), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    a, b = canvas._box_items
+    canvas.mousePressEvent(_shift_press_at(canvas, 35, 35))
+    canvas.mousePressEvent(_shift_press_at(canvas, 130, 130))
+    assert len(canvas._scene.selectedItems()) == 2
+
+    esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+    canvas.keyPressEvent(esc)
+    assert len(canvas._scene.selectedItems()) == 0
+    assert a.isSelected() is False and b.isSelected() is False

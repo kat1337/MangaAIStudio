@@ -477,6 +477,24 @@ class MainWindow(QMainWindow):
         self.action_redo = QAction("Redo", self)
         self.action_redo.setEnabled(False)
 
+        # Select All Boxes (D-08, plan 07-02): Ctrl+A selects every box on the
+        # page (the multi-select foundation the Inspector bulk-styling section
+        # consumes, plan 07-05). Shortcut verified free in the Phase 1-6 map
+        # (UI-SPEC conflict audit, T-07-05); single binding per sequence (the
+        # CR-14 discipline). Enabled iff a page is open AND >= 1 box exists AND
+        # no async op is running (mirrors action_ocr_all's gate shape) -
+        # refreshed in _refresh_action_states.
+        self.action_select_all_boxes = QAction("Select All Boxes", self)
+        self.action_select_all_boxes.setShortcut(QKeySequence("Ctrl+A"))
+        # G-05-1 (plan 05-10): the zero-arg lambda - QAction.triggered ALWAYS
+        # emits the action's checked state as its first arg, so partials with
+        # \checked\ would make the call signature mismatch when the action is
+        # unchecked.
+        self.action_select_all_boxes.triggered.connect(
+            lambda: self.canvas.select_all_boxes()
+        )
+        self.action_select_all_boxes.setEnabled(False)
+
         self.action_clear_mask = QAction("Clear Mask\u2026", self)
         self.action_clear_mask.setEnabled(False)  # plan 04
 
@@ -494,6 +512,8 @@ class MainWindow(QMainWindow):
         edit_menu = self.menuBar().addMenu("&Edit")
         edit_menu.addAction(self.action_undo)
         edit_menu.addAction(self.action_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_select_all_boxes)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_crop_dialog)
         edit_menu.addSeparator()
@@ -1085,6 +1105,12 @@ class MainWindow(QMainWindow):
             page_open and box_selected and not self._op_running
         )
         self.action_ocr_all.setEnabled(
+            page_open and self.canvas.box_count() > 0 and not self._op_running
+        )
+        # Select All Boxes (D-08, plan 07-02): enabled iff a page is open AND
+        # >= 1 box exists AND no async op is running (mirrors action_ocr_all's
+        # gate shape above).
+        self.action_select_all_boxes.setEnabled(
             page_open and self.canvas.box_count() > 0 and not self._op_running
         )
         # Plan 07: Load Translations needs only an open page + no running op

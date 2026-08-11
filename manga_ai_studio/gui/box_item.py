@@ -517,8 +517,8 @@ class BoxItem(QGraphicsRectItem):
         else:
             self.setBrush(Qt.BrushStyle.NoBrush)
 
-    def _sync_handles(self) -> None:
-        """Show + reposition handles only on the selected box (D-08).
+    def _sync_handles(self, primary: bool | None = None) -> None:
+        """Show + reposition handles on the selected box (D-08/D-09).
 
         Called on init, on selection change (via :meth:`itemChange`), and from
         the canvas when the box geometry changes (move/resize commit) or the
@@ -526,15 +526,21 @@ class BoxItem(QGraphicsRectItem):
         keeps each handle 8x8 viewport px regardless of zoom — only its position
         is recomputed.
 
+        ``primary`` (plan 07-02): the multi-select affordance — corner handles
+        render on the PRIMARY box only (UI-SPEC §32). None -> visible iff
+        selected (the Phase 3 single-select contract, byte-identical for N=1);
+        bool -> visible iff selected AND primary.
+
         Also refreshes the bubble badge and repositions the text overlay so
         both track the box through move/resize/zoom (the badge sits TL-outside
         the box rect; the overlay sits inside it — both must move whenever the
         rect does). Mirrors how handles reposition on zoom.
         """
         selected = self.isSelected()
+        show = selected if primary is None else (selected and primary)
         rect = self.rect()
         for handle in self.handles.values():
-            handle.setVisible(selected)
+            handle.setVisible(show)
             handle.reposition(rect)
         self.refresh_badge()
         self._reposition_text_overlay()
