@@ -176,6 +176,9 @@ def build_page_ocr_json(page_boxes: list, img_w: int, img_h: int) -> dict:
                 else "",
                 "bubble_no": pagebox.bubble_no,  # None -> JSON null (04-10 rule)
                 "origin": pagebox.origin,  # DETECTED / USER strings (box_model)
+                "style": pagebox.style.to_dict()
+                if pagebox.style is not None
+                else None,  # D-07: ONE spelling (TextStyle.to_dict, Pitfall 6)
                 "lines": lines,
             }
         )

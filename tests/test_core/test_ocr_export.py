@@ -88,7 +88,8 @@ def test_json_shape() -> None:
     # Block 1: the detected box
     blk = data["blocks"][0]
     assert set(blk.keys()) == {
-        "box", "vertical", "text", "translation", "bubble_no", "origin", "lines",
+        "box", "vertical", "text", "translation", "bubble_no", "origin",
+        "style", "lines",
     }
     assert blk["box"] == [120, 340, 480, 410]
     assert blk["vertical"] is False
@@ -111,7 +112,8 @@ def test_json_shape() -> None:
     # Block 2: the payload-None user box
     user = data["blocks"][1]
     assert set(user.keys()) == {
-        "box", "vertical", "text", "translation", "bubble_no", "origin", "lines",
+        "box", "vertical", "text", "translation", "bubble_no", "origin",
+        "style", "lines",
     }
     assert user["box"] == [10, 10, 60, 30]
     assert user["vertical"] is False
@@ -175,7 +177,8 @@ def test_d15_seam_never_exported() -> None:
     assert "mask" not in blk
     assert "std_dev" not in blk
     assert set(blk.keys()) == {
-        "box", "vertical", "text", "translation", "bubble_no", "origin", "lines",
+        "box", "vertical", "text", "translation", "bubble_no", "origin",
+        "style", "lines",
     }
 
 
