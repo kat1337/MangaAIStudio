@@ -108,3 +108,5 @@ None. (`layout(vertical=True)` falls back to the horizontal path until plan 07-0
 - [x] `tests/test_core/test_text_style.py`, `test_typeset_layout.py`, `test_typeset_bake.py` exist
 - [x] Commits b3dcefe, 3ae2a72, df36585, 445a88a exist (`git log --oneline -5`)
 - [x] Full suite green (634 passed)
+
+## Self-Check: PASSED
