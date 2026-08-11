@@ -1143,6 +1143,94 @@ def test_text_overlay_renders_through_shared_renderer(qtbot) -> None:
     assert TextStyle().outline["enabled"] is True
 
 
+@pytest.mark.gui
+def test_text_overlay_pixmap_matches_bake_at_scene_position(qtbot) -> None:
+    """CR-01 (D-01): the overlay pixmap rendered at its scene position shows
+    the SAME glyphs the bake paints for a box at a NON-ZERO position.
+
+    ``set_content`` must cancel ``renderer.paint``'s ``origin`` translate (net
+    zero), or the ink lands outside a pixmap sized to the ink rect — a fully
+    blank overlay (empirically: alpha max 0 for a box at (40,30)). This
+    asserts PIXMAP CONTENT, not bounding-rect deltas, so the regression
+    cannot recur silently.
+    """
+    import numpy as np
+
+    from PySide6.QtGui import QPainter
+
+    from manga_ai_studio.core.text_style import TextStyle
+    from manga_ai_studio.gui.text_renderer import (
+        bake_typeset_page,
+        numpy_to_qimage,
+        qimage_to_numpy,
+    )
+
+    # Deterministic fixed-size style (left/top, outline+effects off) so the
+    # fill pixels are observable — mirrors tests/test_core/test_typeset_bake.
+    style = TextStyle(
+        font_size_px=12.0,
+        auto_fit=False,
+        align_h="left",
+        align_v="top",
+        outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+    )
+    page = np.full((200, 300, 3), (30, 40, 50), dtype=np.uint8)
+    # A NON-ZERO box position — the CR-01 trigger (a (0,0) box only clipped a
+    # sliver and passed the old bounding-rect-delta tests).
+    pb = PageBox(box=Box(40, 30, 140, 90), origin=DETECTED, style=style)
+    pb.set_translation("Hello")
+
+    baked = bake_typeset_page(page, [pb])
+
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay = item._text_overlay
+    assert overlay.pixmap() is not None
+    # The pixmap itself must carry ink (the old double-counted origin left it
+    # fully transparent).
+    pm = overlay.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    alpha = np.frombuffer(bytes(pm.bits()), dtype=np.uint8).reshape(
+        pm.height(), pm.width(), 4
+    )[..., 3]
+    assert alpha.max() > 0, (
+        "the overlay pixmap must contain ink — the origin double-count "
+        "clipped it outside the pixmap (CR-01)"
+    )
+    # The ink must fill a substantial part of the pixmap (the pixmap is sized
+    # to the ink rect, so the glyphs are most of it — a displaced/clipped
+    # sliver would not).
+    assert (alpha > 0).mean() > 0.1, (
+        "the overlay pixmap must be mostly glyph ink, not a clipped sliver"
+    )
+
+    # Composite the pixmap at its scene position (the BoxItem sits at scene
+    # (0,0), so overlay.pos() IS the scene position) and compare against the
+    # bake — D-01 canvas ≡ bake. The comparison is EXACT on the OPAQUE glyph
+    # interior (no blending / antialias-phase differences there); the
+    # translucent edge pixels are excluded because the premultiplied pixmap
+    # cache and the direct page paint can rasterize coverage with a different
+    # sub-pixel phase by design.
+    qimg = numpy_to_qimage(page).copy()
+    painter = QPainter(qimg)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.drawPixmap(overlay.pos(), overlay.pixmap())
+    painter.end()
+    canvas_arr = qimage_to_numpy(qimg)
+
+    pos = overlay.pos()
+    pi, pj = int(round(pos.x())), int(round(pos.y()))
+    opaque = alpha == 255
+    assert opaque.any(), "the glyph interior must be opaque (D-01)"
+    oy, ox = np.nonzero(opaque)
+    assert np.array_equal(
+        canvas_arr[oy + pj, ox + pi], baked[oy + pj, ox + pi]
+    ), (
+        "opaque glyph pixels composited at the scene position must match the "
+        "bake exactly (D-01 — canvas ≡ bake; a re-broken origin offset "
+        "displaces the ink)"
+    )
+
+
 # -- UAT test 1 gap closure (plan 04-08): overlay geometry tracking (RC-1) --
 # The overlay child must track the box through the canvas geometry paths. The
 # canvas moves/resizes boxes via setRect + _sync_handles (canvas.py:1022-1023,

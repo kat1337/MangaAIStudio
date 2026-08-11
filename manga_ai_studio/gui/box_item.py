@@ -379,7 +379,16 @@ class TypesetOverlayItem(QGraphicsItem):
         qimg.fill(Qt.GlobalColor.transparent)
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.translate(-ink.left() + pad, -ink.top() + pad)
+        # CR-01 (07-REVIEW): ``renderer_paint`` translates by ``result.origin``
+        # (the box top-left + the inner inset) ITSELF, so the pixmap painter
+        # must CANCEL that translate (net zero) — otherwise the ink lands at
+        # pixmap-local ``(origin.x + pad, origin.y + pad)`` inside a pixmap
+        # sized to the ink rect: blank (or clipped) for any box at a non-zero
+        # position (D-01 canvas ≡ bake).
+        painter.translate(
+            -result.origin.x() - ink.left() + pad,
+            -result.origin.y() - ink.top() + pad,
+        )
         renderer_paint(painter, result, style)
         painter.end()
         self._pixmap = QPixmap.fromImage(qimg)
