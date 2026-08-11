@@ -971,7 +971,22 @@ def bake_typeset_page(page_np: np.ndarray, boxes: list) -> np.ndarray:
                 continue
             style = pb.style if pb.style is not None else TextStyle()
             x, y, w, h = pb.box.as_tuple_xywh
-            result = layout(text, style, QRectF(x, y, w, h), vertical=bool(style.vertical))
+            # D-13: the render vertical flag = style.vertical OR payload.vertical
+            # — the SAME expression box_item.refresh_text_overlay uses, so the
+            # canvas and the bake flip atomically (no divergence window).
+            # NOTE: the vendored TextBlock is FALSY (defines __len__), so the
+            # payload presence check MUST be `is not None` — a truthiness test
+            # would silently drop the flag (probed); getattr keeps a bare
+            # marker payload (a string) defensive.
+            vertical = bool(
+                style.vertical
+                or (
+                    bool(getattr(pb.payload, "vertical", False))
+                    if pb.payload is not None
+                    else False
+                )
+            )
+            result = layout(text, style, QRectF(x, y, w, h), vertical=vertical)
             paint(painter, result, style)
     finally:
         painter.end()

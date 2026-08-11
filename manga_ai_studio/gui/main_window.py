@@ -705,6 +705,31 @@ class MainWindow(QMainWindow):
         # _refresh_action_states).
         self.action_load_translations.setEnabled(False)
 
+        # Typesetting section (D-16, plan 07-05): Increase/Decrease Font Size
+        # (Ctrl+] / Ctrl+[ — the UI-SPEC-locked bracket pair; Ctrl+- is taken
+        # by zoom-out, Pitfall 4). Enabled iff >= 1 box selected AND no async
+        # op is running (refreshed in _refresh_action_states). Zero-arg-lambda
+        # triggered wiring (G-05-1).
+        self.action_increase_font_size = QAction("Increase Font Size", self)
+        self.action_increase_font_size.setShortcut(QKeySequence("Ctrl+]"))
+        self.action_increase_font_size.setToolTip(
+            "Increase the font size of the selected box(es) by 1 px (Ctrl+])."
+        )
+        self.action_increase_font_size.triggered.connect(
+            lambda: self._on_font_size_delta(1)
+        )
+        self.action_increase_font_size.setEnabled(False)
+
+        self.action_decrease_font_size = QAction("Decrease Font Size", self)
+        self.action_decrease_font_size.setShortcut(QKeySequence("Ctrl+["))
+        self.action_decrease_font_size.setToolTip(
+            "Decrease the font size of the selected box(es) by 1 px (Ctrl+[)."
+        )
+        self.action_decrease_font_size.triggered.connect(
+            lambda: self._on_font_size_delta(-1)
+        )
+        self.action_decrease_font_size.setEnabled(False)
+
         # Export OCR JSON (D-21, plan 05-08): PROJ-03 single-page export of
         # the CURRENT page's D-19 _ocr.json via a Save As dialog (UI-SPEC
         # surface 27). Shortcut: the Shift-modified E sequence — plain Ctrl+E
@@ -729,6 +754,11 @@ class MainWindow(QMainWindow):
         text_menu.addMenu(self.auto_number_menu)
         text_menu.addSeparator()
         text_menu.addAction(self.action_load_translations)
+        # Typesetting section (D-16) after Load Translations… (UI-SPEC §1).
+        text_menu.addSeparator()
+        text_menu.addAction(self.action_increase_font_size)
+        text_menu.addAction(self.action_decrease_font_size)
+        text_menu.addSeparator()
         text_menu.addAction(self.action_export_ocr_json)
 
     def _build_tools_menu(self) -> None:
@@ -1124,6 +1154,14 @@ class MainWindow(QMainWindow):
         # running (D-03).
         box_selected = self.canvas._selected_box() is not None
         self.action_run_ocr.setEnabled(
+            page_open and box_selected and not self._op_running
+        )
+        # Font-size actions (D-16, plan 07-05): page open + >= 1 box selected
+        # + no async op (UI-SPEC §1 gating — mirrors action_run_ocr's shape).
+        self.action_increase_font_size.setEnabled(
+            page_open and box_selected and not self._op_running
+        )
+        self.action_decrease_font_size.setEnabled(
             page_open and box_selected and not self._op_running
         )
         self.action_ocr_all.setEnabled(
@@ -3020,7 +3058,12 @@ class MainWindow(QMainWindow):
         if not text:
             return 14.0  # the auto-fit base (nothing renders — the size is moot)
         vertical = bool(
-            style.vertical or (pb.payload.vertical if pb.payload else False)
+            style.vertical
+            or (
+                bool(getattr(pb.payload, "vertical", False))
+                if pb.payload is not None
+                else False
+            )
         )
         result = renderer_layout(text, style, item.rect(), vertical=vertical)
         return float(result.used_font_size_px)
@@ -3083,6 +3126,50 @@ class MainWindow(QMainWindow):
         self._inspector_style_commit(
             lambda item: self._replace_effect(item.pagebox, key, changes)
         )
+
+    # ------------------------------------------------- font-size actions (D-16)
+    def _on_font_size_delta(self, delta: int) -> None:
+        """Increase/Decrease Font Size (Ctrl+] / Ctrl+[, ±1 px — D-16).
+
+        Applies the delta to EVERY selected box in ONE snapshot (op name
+        "font size", 06-WR-01): ONE before-snapshot, ONE overlay refresh,
+        ONE ``boxes_modified`` emission — one Ctrl+Z reverses the whole
+        commit. An Auto-fit box FIRST converts to MANUAL at its current
+        rendered size (A11 — ``renderer.layout``'s auto-fit result), then the
+        delta applies (floor at 1 px). Every change assigns a FRESH
+        ``TextStyle`` (Pitfall 1 — never in-place mutation).
+        """
+        if self._op_running or self._current_page_index() is None:
+            return
+        selected = self._selected_box_items()
+        if not selected:
+            return
+        before = self.canvas.boxes_snapshot()
+        for pb in before:
+            if pb.payload is not None:
+                pb.payload = copy.copy(pb.payload)
+        self._boxes_interaction_start_snapshot = before
+        for item in selected:
+            style = (
+                item.pagebox.style if item.pagebox.style is not None else TextStyle()
+            )
+            if style.auto_fit or style.font_size_px is None:
+                # A11: convert to MANUAL at the current rendered size first.
+                style = dreplace(
+                    style,
+                    auto_fit=False,
+                    font_size_px=self._style_rendered_size(item),
+                )
+            current = float(style.font_size_px or 1.0)
+            item.pagebox.style = dreplace(
+                style, font_size_px=max(1.0, current + delta)
+            )
+        self.canvas.set_pending_boxes_op_name("font size")
+        for item in selected:
+            item.refresh_text_overlay()
+            item.refresh_badge()
+        self.canvas.boxes_modified.emit(before)
+        self._on_canvas_selection_changed()
 
     def _on_inspector_recognized_committed(self, text: str) -> None:
         """Recognized-field commit -> set_recognized_text_edited (D-04, Plan 01 setter).

@@ -4096,3 +4096,173 @@ def test_primary_removal_promotes(qtbot) -> None:
     assert canvas._primary_box is b
     assert _visible_handle_count(b) == 4
     assert _visible_handle_count(a) == 0
+
+
+# ===========================================================================
+# Plan 07-05 Task 3 — live vertical checkbox (D-13) + font-size actions (D-16)
+# + the atomic vertical-flag OR (canvas overlay == bake)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
+    """D-13: toggling the Inspector Vertical checkbox flips the overlay's
+    layout mode (tategaki <-> horizontal) — a toggle must RE-RENDER, not just
+    write metadata (Pitfall 9); the bake renders the same vertical layout
+    (the shared OR expression); the 'Coming soon' tooltip is gone."""
+    from manga_ai_studio.gui import text_renderer as tr_module
+    from manga_ai_studio.gui.text_renderer import bake_typeset_page
+
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 80, 80)])[0]
+    item.pagebox.set_translation("こんにちは")
+    item.refresh_text_overlay()  # the overlay renders after the box gains text
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    # Horizontal by default (the overlay's cached layout has no vertical
+    # placements).
+    assert item._text_overlay.layout_result.vertical_placements == []
+
+    # Toggle ON via the live checkbox -> the overlay re-renders vertically.
+    window.inspector_panel.vertical_check.setChecked(True)
+    QApplication.processEvents()
+    assert item.pagebox.payload.vertical is True
+    assert item._text_overlay.layout_result.vertical_placements, (
+        "the overlay must re-render vertically after the toggle (Pitfall 9)"
+    )
+
+    # Toggle back -> horizontal again.
+    window.inspector_panel.vertical_check.setChecked(False)
+    QApplication.processEvents()
+    assert item.pagebox.payload.vertical is False
+    assert item._text_overlay.layout_result.vertical_placements == []
+
+    # The tooltip holds the D-13 copy (no 'Coming soon').
+    tip = window.inspector_panel.vertical_check.toolTip()
+    assert "Coming soon" not in tip
+    assert "tategaki" in tip
+
+    # The bake renders the box vertically too — the SAME OR expression
+    # (spy text_renderer.layout: bake_typeset_page calls it by module name,
+    # box_item's renderer_layout alias stays untouched).
+    window.inspector_panel.vertical_check.setChecked(True)
+    QApplication.processEvents()
+    captured: list[bool] = []
+    original_layout = tr_module.layout
+
+    def _spy_layout(text, style, rect, vertical=False):
+        captured.append(bool(vertical))
+        return original_layout(text, style, rect, vertical=vertical)
+
+    monkeypatch.setattr(tr_module, "layout", _spy_layout)
+    import numpy as np
+
+    page = np.full((120, 120, 3), 200, dtype=np.uint8)
+    bake_typeset_page(page, window.canvas.boxes_snapshot())
+    assert captured, "the bake must call the shared layout"
+    assert all(captured), "the bake must render a vertical box vertically (D-13)"
+
+
+@pytest.mark.gui
+def test_vertical_preflagged_box_renders_vertical(qtbot, tmp_path) -> None:
+    """D-13: a CTD pre-flagged box (payload.vertical=True) renders tategaki
+    with the DEFAULT style — the OR expression picks up payload.vertical."""
+    window = _window_with_page(qtbot, tmp_path)
+    pb = PageBox(box=Box(10, 20, 80, 80), origin=DETECTED)
+    pb.set_recognized_text("日本語テスト")
+    pb.payload.vertical = True
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([pb], [])
+    finally:
+        window._suppress_boxes_push = False
+    item = window.canvas._box_items[0]
+    assert item.pagebox.style is None  # default style
+    assert item._text_overlay.layout_result.vertical_placements, (
+        "a payload.vertical box must render through the vertical path (D-13)"
+    )
+
+
+@pytest.mark.gui
+def test_size_plus_minus_actions(qtbot, tmp_path) -> None:
+    """D-16: Ctrl+] / Ctrl+[ each bound exactly once (CR-14 single-binding);
+    the ±1 px delta applies to EVERY selected box with exactly ONE BOXES
+    entry per action (one Ctrl+Z reverses the whole commit)."""
+    from PySide6.QtGui import QAction
+
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    for it in items:
+        it.pagebox.style = TextStyle(auto_fit=False, font_size_px=10.0)
+
+    # Single-binding discipline (T-07-12): each sequence appears on exactly
+    # ONE action in the window's action map.
+    plus = [
+        a for a in window.findChildren(QAction)
+        if a.shortcut().toString() == "Ctrl+]"
+    ]
+    minus = [
+        a for a in window.findChildren(QAction)
+        if a.shortcut().toString() == "Ctrl+["
+    ]
+    assert len(plus) == 1, "Ctrl+] must be bound exactly once"
+    assert len(minus) == 1, "Ctrl+[ must be bound exactly once"
+
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    window._on_font_size_delta(1)
+    QApplication.processEvents()
+    assert items[0].pagebox.style.font_size_px == 11.0
+    assert items[1].pagebox.style.font_size_px == 11.0
+    assert len(emitted) == 1, "one font-size action = one BOXES entry"
+    before = emitted[0]
+    assert before[0].style.font_size_px == 10.0
+    assert before[1].style.font_size_px == 10.0
+
+    window._on_font_size_delta(-1)
+    QApplication.processEvents()
+    assert items[0].pagebox.style.font_size_px == 10.0
+    assert items[1].pagebox.style.font_size_px == 10.0
+    assert len(emitted) == 2
+
+
+@pytest.mark.gui
+def test_size_action_converts_auto_fit(qtbot, tmp_path) -> None:
+    """A11: a size +/- action on an Auto-fit box converts it to MANUAL at its
+    current rendered size first, then applies the ±1 px delta; the manual
+    floor is 1 px."""
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(10, 20, 80, 80)])[0]
+    item.pagebox.set_translation("Auto-fit text")
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    style = item.pagebox.style if item.pagebox.style is not None else TextStyle()
+    assert style.auto_fit is True
+    rendered = window._style_rendered_size(item)
+
+    window._on_font_size_delta(1)
+    QApplication.processEvents()
+    after = item.pagebox.style
+    assert after.auto_fit is False
+    assert after.font_size_px == rendered + 1.0, (
+        "the converted manual size must equal the rendered auto-fit size + 1 (A11)"
+    )
+
+    # The floor: decreasing a 1px manual box stays at 1.
+    item.pagebox.style = TextStyle(auto_fit=False, font_size_px=1.0)
+    window._on_font_size_delta(-1)
+    QApplication.processEvents()
+    assert item.pagebox.style.font_size_px == 1.0

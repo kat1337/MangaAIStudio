@@ -69,6 +69,7 @@ from manga_ai_studio.gui.text_renderer import (
     LayoutResult,
     _OVERLAY_INSET,
     current_focus_text,
+    effect_padding,
     layout as renderer_layout,
     paint as renderer_paint,
 )
@@ -355,6 +356,12 @@ class TypesetOverlayItem(QGraphicsItem):
         ``box_rect`` is the FULL box rect — the renderer applies its own
         inner inset, identical for the canvas and the bake (D-01). Empty
         text clears the cache (nothing renders).
+
+        Plan 07-05 (D-14): the pixmap pads the ink by the renderer's FULL
+        effect padding (``effect_padding`` — outline half-width + glow/
+        shadow radii + offsets) so enabled effect halos never clip on the
+        canvas (the 07-03 handoff: the bake never clips, the canvas now
+        matches it — D-01 canvas ≡ bake).
         """
         if not text:
             self._pixmap = None
@@ -364,10 +371,7 @@ class TypesetOverlayItem(QGraphicsItem):
             return
         result = renderer_layout(text, style, box_rect, vertical=vertical)
         self.layout_result = result
-        outline = style.outline if isinstance(style.outline, dict) else {}
-        pad = 0.0
-        if outline.get("enabled", True):
-            pad = max(1.0, float(outline.get("width_px", 0.0) or 0.0) / 2.0)
+        pad = effect_padding(style)
         ink = result.ink
         w = max(1, math.ceil(ink.width() + 2.0 * pad))
         h = max(1, math.ceil(ink.height() + 2.0 * pad))
@@ -652,10 +656,23 @@ class BoxItem(QGraphicsRectItem):
         """
         text = self._current_focus_text()
         style = self.pagebox.style if self.pagebox.style is not None else TextStyle()
+        # D-13: the render vertical flag = style.vertical OR payload.vertical —
+        # the SAME expression text_renderer.bake_typeset_page uses, so the
+        # canvas and the bake flip atomically (no divergence window). CTD
+        # pre-flagged boxes (payload.vertical=True) render tategaki with the
+        # default style; the Inspector checkbox writes payload.vertical.
+        vertical = bool(
+            style.vertical
+            or (
+                bool(getattr(self.pagebox.payload, "vertical", False))
+                if self.pagebox.payload is not None
+                else False
+            )
+        )
         # Pass the FULL box rect — the renderer applies its own inner inset
         # (identical for canvas and bake, D-01).
         self._text_overlay.set_content(
-            text, style, self.rect(), vertical=bool(style.vertical)
+            text, style, self.rect(), vertical=vertical
         )
         self._reposition_text_overlay()
         self._text_overlay.setVisible(bool(text) and self._text_overlay_visible)

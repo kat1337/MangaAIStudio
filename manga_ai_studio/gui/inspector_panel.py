@@ -23,8 +23,9 @@ for the currently-selected box:
 - **Language** — a read-only ``QLabel`` (from ``payload.language``).
 - **Vertical** — a ``QCheckBox`` writing ``payload.vertical``. LIVE since plan
   07-05 (D-13): toggling flips the canvas + bake to the renderer's tategaki
-  path (the "Coming soon" Phase 4 tooltip is replaced); in a multi-selection
-  it becomes tri-state (indeterminate = mixed vertical flags, D-10).
+  path (the Phase 4 placeholder tooltip is replaced with the D-13 copy); in a
+  multi-selection it becomes tri-state (indeterminate = mixed vertical flags,
+  D-10).
 - **Style section** (plan 07-05, D-05/D-06/D-10/D-14/D-15 — UI-SPEC surface
   33): the per-box styling controls BELOW the text fields — Font
   (``QFontComboBox``), Style (per-family ``QComboBox``), Size + Auto-fit
@@ -341,7 +342,7 @@ class InspectorPanel(QWidget):
         # Vertical — LIVE since plan 07-05 (D-13): toggling writes
         # payload.vertical AND the MainWindow re-renders the canvas + bake
         # through the renderer's tategaki path (Pitfall 9 — a toggle must
-        # re-render, not just write metadata). The Phase 4 "Coming soon"
+        # re-render, not just write metadata). The Phase 4 placeholder
         # tooltip is REPLACED (D-13 copy). In a multi-selection the checkbox
         # becomes tri-state (indeterminate = mixed vertical flags, D-10).
         self.vertical_check = QCheckBox("Vertical text")
