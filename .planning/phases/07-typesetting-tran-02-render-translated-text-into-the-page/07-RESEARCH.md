@@ -519,32 +519,38 @@ def bake_typeset_page(page_np: np.ndarray, boxes: list[PageBox], renderer) -> np
 | A6 | `TextStyle` defaults (Liberation Sans / `#e8e8ea` opaque fill / 2px `#0b0b0e` outline / glow+shadow off / `auto_fit=True`) preserve today's look per CONTEXT discretion wording. | Code Example 1 | LOW — the UI-SPEC pass may adjust colors; defaults are data, not architecture. |
 | A7 | The QFontComboBox/QColorDialog widget set satisfies the dark-QSS + D-05 Inspector contract without custom widgets. | Don't Hand-Roll | LOW — QFontComboBox popup styling under QSS is cosmetic; the panel's existing QSS pattern extends (inspector_panel.py:64-89). |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Tategaki mechanism — per-char/run painter vs custom document layout (D-11 discretion).**
    - What we know: render-only scope (D-12); BallonsTranslator uses a full `QAbstractTextDocumentLayout` because it edits vertically; Qt 6.11 API verified; per-char paint is smaller and headless-testable.
    - What's unclear: whether future phases will need vertical editing/hit-testing (the 04-RESEARCH Pitfall 5 flag stays for a future vertical-EDIT phase).
    - Recommendation: **per-char/run painter with pure-geometry layout functions** (A1). The planner should structure the layout functions so a future document-layout wrapper can consume them.
+   - — RESOLVED: per-char/run painter with pure-geometry layout — implemented in 07-03-PLAN.md Task 1 (the vertical layout task: `layout_vertical` + `char_rotates` + classification constants in `gui/text_renderer.py`), consumed by the 07-01 shared renderer.
 
 2. **Horizontal render mechanism inside the shared renderer — QTextLayout vs keeping the existing QGraphicsTextItem + setTextOutline.**
    - What we know: the existing document path is proven (box_item.py:487-565) but cannot do glow/shadow without silhouette passes, and the bake must reproduce it.
    - Recommendation: **unified custom renderer** for both orientations (Pattern 3); if the planner prefers minimal churn for horizontal, keep `QGraphicsTextItem` for horizontal + custom vertical, and implement glow/shadow as a silhouette pixmap drawn behind the text item — but then the bake needs the same two paths (Pitfall 2 risk). Pick ONE and pin it in the plan.
+   - — RESOLVED: unified custom renderer for both orientations — implemented in 07-01-PLAN.md Task 1 (the shared renderer task: `gui/text_renderer.py` `layout()`/`paint()`/`bake_typeset_page()` serving canvas AND bake); the vertical + effect passes land in 07-03.
 
 3. **Overflow policy for manual-size text that exceeds the box (D-15 planner discretion).**
    - What we know: manual size may overflow; auto-fit exists as opt-in.
    - Recommendation: **bake clips to the box rect** (painter clip — text stays inside its bubble); **canvas shows the overflow unclipped** (the user's visual cue to shrink/enable auto-fit). Document both in the plan; the UI-SPEC pass confirms the copy.
+   - — RESOLVED: UI-SPEC A6 locked "unclipped on BOTH canvas and bake (clipped only at the page edge)" — the bake-clips half of this recommendation is superseded; pinned as 07-01-PLAN.md truth 8 and 07-05-PLAN.md truth 8 (the D-01 WYSIWYG contract).
 
 4. **`_ocr.json` version + style-block placement (D-07).**
    - What we know: `OCR_JSON_VERSION = "1"` is pinned (ocr_export.py:69); D-19 is one-way; D-06 style is per-box flat.
    - Recommendation: block-level `"style": TextStyle.to_dict()` (matching the block's existing `box`/`vertical`/`text` shape); version policy = bump to `"2"` (A5) unless the planner decides additive-with-"1"; pin the exact JSON in the plan (Phase 5 precedent: plan 05-03 pinned the shape under test).
+   - — RESOLVED: block-level `"style": TextStyle.to_dict()` is pinned; the `OCR_JSON_VERSION` bump vs additive-with-"1" choice is decided by the human at 07-04-PLAN.md Task 2 checkpoint and locked by test.
 
 5. **Bake action shortcut + menu placement (D-02/D-03 discretion).**
    - What we know: Ctrl+E (export page), Ctrl+Shift+E (OCR JSON), Ctrl+O/S/Shift+S/Q/R, M/Shift+M/T/P/D/C, Ctrl+0/1/+/- all taken; Ctrl+A free (Select All Boxes).
    - Recommendation: File menu "Export Typeset Page…" next to "Export Page…" (main_window.py:382); shortcut `Ctrl+Alt+E` or none (Pitfall 4); suffix `_typeset` (D-03's `_typeset.png`-style); follow the `_op_running` gate + `_refresh_action_states`.
+   - — RESOLVED: File ▸ "Export Typeset…" with `Ctrl+Shift+B` (UI-SPEC A4 — B = bake; E/Shift+E taken) and the `_typeset` suffix — implemented in 07-01-PLAN.md Task 2 (`action_export_typeset` in `gui/main_window.py`, `_op_running`-gated).
 
 6. **Grouped resize interaction (D-09: "Resize stays single-box").**
    - What we know: handles render on every selected box (box_item.py:429-432 `_sync_handles`); `_begin_resize` arms on any handle hit (canvas.py:1869).
    - Recommendation: gate resize to exactly-one-selected (a handle press with multiple selected = no-op or single-box resize; planner picks). Simplest v1: resize only when exactly one box is selected.
+   - — RESOLVED: resize gates to exactly-one-selected (a CornerHandle press while a multi-selection is active is a no-op — no group resize) — implemented in 07-02-PLAN.md Task 3 (`_begin_resize` single-box gate in `gui/canvas.py`).
 
 ## Environment Availability
 
