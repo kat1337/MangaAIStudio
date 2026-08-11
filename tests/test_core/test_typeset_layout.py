@@ -17,7 +17,11 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QRectF  # noqa: E402
 
 from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
-from manga_ai_studio.gui.text_renderer import layout  # noqa: E402
+from manga_ai_studio.gui.text_renderer import (  # noqa: E402
+    char_rotates,
+    layout,
+    layout_vertical,
+)
 
 # The renderer's inner-rect inset (box rect shrunk on every side).
 _INNER_INSET = 2.0
@@ -170,3 +174,235 @@ def test_auto_fit_fits_long_text_within_loop_budget(qapp) -> None:
     assert result.overflow is False, "the text must fit in the wide box"
     _, inner_h = _inner(400, 200)
     assert result.ink.height() <= inner_h + 1e-6
+
+
+# ===========================================================================
+# Vertical (tategaki) geometry — plan 07-03 Task 1 (D-11)
+#
+# Contract under test (RESEARCH Pattern 2 / Common Operation 2, UI-SPEC
+# surface 34): placements are INNER-LOCAL coordinates (0..inner_w x
+# 0..inner_h, the box rect shrunk by the renderer inset on every side).
+# Columns stack top-to-bottom and flow right-to-left; column width = the
+# max char extent in the column (1 em basis); each char is centered within
+# its column; align_h shifts the column BLOCK left/center/right, align_v
+# shifts the run top/middle/bottom along the column axis (A3).
+# ===========================================================================
+
+
+def _assert_upright(p: dict) -> None:
+    assert p["rotate"] is False, f"upright char {p['char']!r} must not rotate"
+
+
+# ---------------------------------------------------------------------------
+# Test 1 — orientation classification (the D-11 correctness contract)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_classification(qapp) -> None:
+    """Halfwidth ASCII + brackets/dashes rotate 90 deg; CJK/kana and
+    vertical-form punctuation stay upright (W3C mixed orientation)."""
+    # Halfwidth ASCII 0x21..0x7E: letters, digits, ASCII punctuation.
+    ascii_rotate = [chr(i) for i in range(0x21, 0x7F)]
+    for ch in ascii_rotate:
+        assert char_rotates(ch) is True, f"{ch!r} (0x{ord(ch):02X}) must rotate"
+    # Bracket/dash/ellipsis set (fullwidth + halfwidth).
+    extra_rotate = "「」『』（）《》〈〉【】—…～-()"
+    for ch in extra_rotate:
+        assert char_rotates(ch) is True, f"{ch!r} must rotate"
+    # Upright: CJK, kana, and vertical-form punctuation.
+    upright = "あ漢字がアカん。．，、·：；！？"
+    for ch in upright:
+        assert char_rotates(ch) is False, f"{ch!r} must stay upright"
+    # The space (0x20) is NOT halfwidth ASCII (0x21..0x7E) — stays upright.
+    assert char_rotates(" ") is False
+    assert char_rotates("") is False
+
+
+# ---------------------------------------------------------------------------
+# Test 2 — RTL column flow (later chars at smaller x; first column at the
+# right inner edge)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_rtl_column_flow(qapp) -> None:
+    """Columns advance right-to-left: a later char of a wrapped line sits at
+    a STRICTLY smaller x; the first column starts at the box's right inner
+    edge (align_h right — the natural tategaki origin)."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False, align_h="right")
+    inner_w, inner_h = 96.0, 20.0  # one char per column -> every pair wraps
+    placements = layout_vertical("あいうえおかきくけこ", style, inner_w, inner_h)
+    assert len(placements) == 10
+    # First column at the right inner edge (inner-local coords).
+    assert placements[0]["x"] == pytest.approx(inner_w - placements[0]["w"], abs=1.5)
+    # RTL pinned by test, not prose: strictly decreasing x across wraps.
+    for i in range(1, len(placements)):
+        assert placements[i]["x"] < placements[i - 1]["x"], (
+            f"char {i} must sit LEFT of char {i - 1} (RTL column flow)"
+        )
+
+
+@pytest.mark.unit
+def test_vertical_layout_result_carries_placements(qapp) -> None:
+    """layout(vertical=True) returns the vertical placement form in
+    LayoutResult (origin = box top-left + inset; placements inner-local)."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False, align_h="right")
+    result = layout("あいうえお", style, QRectF(0, 0, 100, 24), vertical=True)
+    assert len(result.vertical_placements) == 5
+    assert result.origin.x() == pytest.approx(_INNER_INSET, abs=0.5)
+    assert result.origin.y() == pytest.approx(_INNER_INSET, abs=0.5)
+    assert result.ink.width() > 0.0 and result.ink.height() > 0.0
+    # RTL flow holds through the LayoutResult form too.
+    assert result.vertical_placements[1]["x"] < result.vertical_placements[0]["x"]
+
+
+# ---------------------------------------------------------------------------
+# Test 3 — wrap at the inner height
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_wrap_at_height(qapp) -> None:
+    """Characters beyond inner_h start a new column (at the top, left of the
+    previous column); nothing is placed beyond the left inner edge."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False)
+    inner_w, inner_h = 96.0, 36.0  # 2 chars per column -> 3 columns for 5 chars
+    placements = layout_vertical("あいうえお", style, inner_w, inner_h)
+    assert placements[0]["y"] == pytest.approx(0.0, abs=0.5)
+    # Same-column stacking: advance = the char box height.
+    assert placements[1]["y"] == pytest.approx(
+        placements[0]["y"] + placements[0]["h"], abs=0.5
+    )
+    # Beyond inner_h -> a NEW column at the top.
+    assert placements[2]["y"] == pytest.approx(placements[0]["y"], abs=0.5)
+    assert placements[2]["x"] < placements[0]["x"]
+    # Nothing placed beyond the left inner edge (x >= 0).
+    assert min(p["x"] for p in placements) >= -0.5
+    # Columns never exceed inner_h (each column's bottom stays inside).
+    assert placements[0]["y"] + placements[0]["h"] <= inner_h + 0.5
+    assert placements[1]["y"] + placements[1]["h"] <= inner_h + 0.5
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — rotated advance (Latin height not width; CJK width)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_rotated_advance(qapp) -> None:
+    """A Latin char's placed box is TALLER than wide (rotated); a CJK char's
+    box is square-ish (upright); the per-char vertical advance is measured
+    along the box HEIGHT — never the width."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False)
+    placements = layout_vertical("A1漢", style, 96.0, 96.0)
+    a, one, kan = placements[0], placements[1], placements[2]
+    assert a["rotate"] is True and one["rotate"] is True
+    assert a["h"] > a["w"], "Latin 'A' placed height must exceed its width"
+    assert one["h"] > one["w"], "Latin '1' placed height must exceed its width"
+    _assert_upright(kan)
+    assert kan["w"] >= kan["h"] - 1.5, "CJK char must be square-ish (width >= height)"
+    # The vertical step is the box HEIGHT (rotated advance along the height).
+    assert placements[1]["y"] == pytest.approx(
+        placements[0]["y"] + placements[0]["h"], abs=0.5
+    )
+    assert placements[1]["y"] > placements[0]["y"] + placements[0]["w"], (
+        "the advance is measured along the HEIGHT, not the width"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — per-char centering + align_h / align_v block shifts (A3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_centering_and_alignment(qapp) -> None:
+    """Each char is centered within its 1 em column; align_h shifts the
+    column BLOCK's x; align_v shifts the run along the column axis."""
+    inner_w, inner_h = 96.0, 96.0
+    # Centering: a mixed column ("あ" wide + "A" narrow) shares ONE center.
+    style = TextStyle(font_size_px=14.0, auto_fit=False, align_h="left", align_v="top")
+    placements = layout_vertical("あA", style, inner_w, inner_h)
+    c0 = placements[0]["x"] + placements[0]["w"] / 2.0
+    c1 = placements[1]["x"] + placements[1]["w"] / 2.0
+    assert c0 == pytest.approx(c1, abs=0.5), "both chars share the column center"
+    assert placements[0]["x"] == pytest.approx(0.0, abs=0.5)
+    # align_h: left hugs the left edge, right hugs the right edge, center in between.
+    left = layout_vertical(
+        "あ", TextStyle(font_size_px=14.0, auto_fit=False, align_h="left"), inner_w, inner_h
+    )
+    center = layout_vertical(
+        "あ", TextStyle(font_size_px=14.0, auto_fit=False, align_h="center"), inner_w, inner_h
+    )
+    right = layout_vertical(
+        "あ", TextStyle(font_size_px=14.0, auto_fit=False, align_h="right"), inner_w, inner_h
+    )
+    w = left[0]["w"]
+    assert left[0]["x"] == pytest.approx(0.0, abs=0.5)
+    assert right[0]["x"] == pytest.approx(inner_w - w, abs=1.5)
+    assert center[0]["x"] == pytest.approx((inner_w - w) / 2.0, abs=1.5)
+    assert left[0]["x"] < center[0]["x"] < right[0]["x"]
+    # align_v: top at 0, bottom at inner_h - block height, middle in between.
+    top = layout_vertical(
+        "あああ", TextStyle(font_size_px=14.0, auto_fit=False, align_v="top"), inner_w, inner_h
+    )
+    middle = layout_vertical(
+        "あああ", TextStyle(font_size_px=14.0, auto_fit=False, align_v="middle"), inner_w, inner_h
+    )
+    bottom = layout_vertical(
+        "あああ", TextStyle(font_size_px=14.0, auto_fit=False, align_v="bottom"), inner_w, inner_h
+    )
+    block_h = top[0]["h"] * 3.0
+    assert top[0]["y"] == pytest.approx(0.0, abs=0.5)
+    assert bottom[0]["y"] == pytest.approx(inner_h - block_h, abs=1.5)
+    assert middle[0]["y"] == pytest.approx((inner_h - block_h) / 2.0, abs=1.5)
+    assert top[0]["y"] < middle[0]["y"] < bottom[0]["y"]
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — vertical Auto-fit (column count + vertical extent, A8 floor)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_auto_fit(qapp) -> None:
+    """The vertical fit loop operates on the column count (floor(inner_w /
+    1 em)) and the run's vertical extent; a long text floors at 5 px like the
+    horizontal loop (A8)."""
+    # 5 CJK chars in a 200x100 box: 1 column at the 14 px base -> fits, no shrink.
+    result = layout("あ" * 5, TextStyle(), QRectF(0, 0, 200, 100), vertical=True)
+    assert result.used_font_size_px == pytest.approx(14.0, abs=0.1)
+    assert result.overflow is False
+    assert len(result.vertical_placements) == 5
+    # 2000 chars in a 200x60 box: the bounded loop terminates and never
+    # renders below the 5 px floor; the text floors (overflow reported).
+    result = layout("あ" * 2000, TextStyle(), QRectF(0, 0, 200, 60), vertical=True)
+    assert result.used_font_size_px >= 5.0 - 1e-6, (
+        "the vertical loop must never render below the 5 px floor"
+    )
+    assert result.overflow is True, (
+        "2000 chars cannot fit even at the floor — overflow must be reported"
+    )
+    assert len(result.vertical_placements) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — code-point indexing (flagged assumption: encoding)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_code_point_indexing(qapp) -> None:
+    """Text indexes by Python str code points — never bytes or UTF-16 units:
+    every character (incl. a surrogate-pair CJK char) yields exactly one
+    placement, in order, with no truncation."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False)
+    # "𠮷" is ONE code point (U+20BB7) = 2 UTF-16 units — must be 1 placement.
+    placements = layout_vertical("漢A𠮷字", style, 96.0, 96.0)
+    assert len(placements) == 4
+    assert [p["char"] for p in placements] == ["漢", "A", "𠮷", "字"]
+    # Mixed multi-byte + ASCII: the ASCII char is a single placement too.
+    placements = layout_vertical("日本語ABC", style, 96.0, 96.0)
+    assert len(placements) == 6
+    assert placements[3]["char"] == "A"
