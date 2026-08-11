@@ -31,6 +31,26 @@ Mechanism notes (verified by probe on the pinned Python 3.14.2 / PySide6
 - Overflow renders UNCLIPPED (UI-SPEC A6): ``paint()`` never installs a
   clip; the bake clips only at the page edge (the image's natural bound).
 
+Vertical (tategaki) mode (plan 07-03 Task 1 — D-11, the phase's highest-
+risk decision): ``layout(vertical=True)`` returns per-char placements
+(upright Han/Kana/vertical-form punctuation; halfwidth ASCII 0x21..0x7E
+plus the bracket/dash set rotate 90 deg clockwise — the W3C mixed
+orientation). Columns stack top-to-bottom, wrap at the inner height, and
+flow right-to-left (later chars at smaller x) from the box's right inner
+edge; each column is 1 em wide (the max char extent in the column), gap 0;
+every char is centered within its column. ``align_h`` shifts the column
+BLOCK left/center/right, ``align_v`` shifts the run top/middle/bottom
+along the column axis (A3). The vertical Auto-fit variant reuses the
+bounded loop (12 x 0.9, 5 px floor) on the column count
+(floor(inner_w / 1 em)) and the run's vertical extent. Placements are
+INNER-LOCAL coordinates (0..inner_w x 0..inner_h); paint() draws them
+after translating to ``result.origin``.
+
+Future polish (CONTEXT Deferred — render-only scope): kumimoji
+punctuation compression, tate-chu-yoko digit combining
+(text-combine-upright), font vertical alternates, and RTL-script runs
+bottom-to-top.
+
 Qt-imports only (QtCore/QtGui + numpy for the bake bridge — no widget or
 main-window dependencies) so the module is headless-testable under the
 pytest-qt ``qapp`` fixture.
@@ -38,15 +58,18 @@ pytest-qt ``qapp`` fixture.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+from loguru import logger
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QFontMetricsF,
     QImage,
     QPainter,
     QPen,
@@ -79,6 +102,49 @@ _ALIGN_H_TO_QT = {
     "right": Qt.AlignmentFlag.AlignRight,
 }
 
+# ---------------------------------------------------------------------------
+# Vertical (tategaki) classification constants (D-11 — RESEARCH Pattern 2,
+# Common Operation 2, verbatim). Orientation contract:
+#   - Upright:  Han/Kana + vertical-form punctuation (_ALIGN_CENTER).
+#   - Rotated 90 deg clockwise: halfwidth ASCII 0x21..0x7E + the
+#     bracket/dash set (W3C mixed orientation).
+# ---------------------------------------------------------------------------
+_ASCII_ROTATE = set(chr(i) for i in range(0x21, 0x7F))
+_ROTATE_EXTRA = {
+    "「",
+    "」",
+    "『",
+    "』",
+    "（",
+    "）",
+    "《",
+    "》",
+    "〈",
+    "〉",
+    "【",
+    "】",
+    "—",
+    "…",
+    "～",
+    "-",
+    "(",
+    ")",
+}
+_ALIGN_CENTER = {"。", "．", "，", "、", "·", "：", "；", "！", "？"}
+
+
+def char_rotates(ch: str) -> bool:
+    """True when ``ch`` must be rotated 90 deg clockwise in vertical text.
+
+    Halfwidth ASCII (letters/digits/ASCII punctuation, 0x21..0x7E) and the
+    bracket/dash/ellipsis set rotate; Han/Kana and vertical-form punctuation
+    (the ``_ALIGN_CENTER`` set) stay upright. A multi-char string (or the
+    space 0x20) is False.
+    """
+    if len(ch) != 1:
+        return False
+    return ch in _ASCII_ROTATE or ch in _ROTATE_EXTRA
+
 
 @dataclass
 class LayoutResult:
@@ -101,6 +167,10 @@ class LayoutResult:
             plus the inner inset plus the vertical-alignment offset.
         inner_size: The inner rect the layout ran against (wrap width /
             fit height).
+        vertical_placements: The per-char placement form when the layout
+            ran in vertical mode: ``[{char, x, y, rotate, w, h}, ...]`` in
+            INNER-LOCAL coordinates (paint() draws them after translating
+            to ``origin``). Empty for the horizontal path.
     """
 
     text: str
@@ -112,6 +182,7 @@ class LayoutResult:
     used_font_size_px: float = 0.0
     origin: QPointF = field(default_factory=QPointF)
     inner_size: QSizeF = field(default_factory=QSizeF)
+    vertical_placements: list = field(default_factory=list)  # list[dict]
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +285,155 @@ def _line_rects(doc: QTextDocument) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Vertical (tategaki) layout — pure geometry (D-11, RESEARCH Pattern 2)
+# ---------------------------------------------------------------------------
+
+
+def _vertical_placements(
+    text: str, style: TextStyle, inner_w: float, inner_h: float, size_px: float
+) -> tuple[list, int, float, float]:
+    """Per-char vertical placements at ``size_px`` (INNER-LOCAL coords).
+
+    Returns ``(placements, ncols, block_w, block_h)`` where placements are
+    ``[{char, x, y, rotate, w, h}, ...]`` in TEXT order (the first placement
+    is the first character). Geometry rules (W3C + BallonsTranslator
+    conventions):
+
+    - The char box is the natural glyph box: ``w`` = the horizontal
+      advance, ``h`` = the ink rect height. Latin/ASCII boxes are taller
+      than wide (h > w); CJK boxes are square (w >= h).
+    - Chars stack top-to-bottom; the per-char advance is the box HEIGHT
+      (Latin: measured along its height, not its width; CJK: its width
+      equals the height — square).
+    - A column wraps when the next char would exceed ``inner_h``.
+    - Column width = the max horizontal ink extent in the column (upright:
+      ``w``; rotated: ``h`` — a rotated glyph's horizontal extent is its
+      natural height) — the 1 em basis.
+    - Columns flow RIGHT-TO-LEFT, flush (gap 0); the block sits per
+      ``align_h`` (right = the natural tategaki origin, first column at the
+      right inner edge); ``align_v`` shifts the run along the column axis.
+    - Every char is centered within its column.
+    """
+    font = _style_font(style, size_px)
+    fm = QFontMetricsF(font)
+    chars = list(text)  # code points — never bytes (flagged assumption)
+    if not chars:
+        return [], 0, 0.0, 0.0
+
+    # Group into columns (top-to-bottom, wrap at inner_h).
+    columns: list[list[dict]] = []
+    cur: list[dict] = []
+    col_y = 0.0
+    for ch in chars:
+        br = fm.boundingRect(ch)
+        w = fm.horizontalAdvance(ch)
+        h = br.height()  # the ink height (CJK squares the advance; Latin is taller)
+        rot = char_rotates(ch)
+        extent = h if rot else w  # horizontal ink extent in the column
+        if cur and col_y + h > inner_h + _EPS:
+            columns.append(cur)
+            cur = []
+            col_y = 0.0
+        cur.append({"char": ch, "w": w, "h": h, "rotate": rot, "extent": extent})
+        col_y += h
+    if cur:
+        columns.append(cur)
+
+    col_widths = [max(c["extent"] for c in col) for col in columns]
+    block_w = float(sum(col_widths))
+    block_h = float(max(sum(c["h"] for c in col) for col in columns))
+
+    if style.align_h == "left":
+        dx_block = 0.0
+    elif style.align_h == "right":
+        dx_block = inner_w - block_w
+    else:  # center (the default)
+        dx_block = (inner_w - block_w) / 2.0
+
+    if style.align_v == "top":
+        dy_block = 0.0
+    elif style.align_v == "bottom":
+        dy_block = inner_h - block_h
+    else:  # middle (the default)
+        dy_block = (inner_h - block_h) / 2.0
+
+    placements: list[dict] = []
+    x = dx_block + block_w  # the block's RIGHT edge — columns flow leftward
+    for col, cw in zip(columns, col_widths):
+        x -= cw
+        y = dy_block
+        for c in col:
+            placements.append(
+                {
+                    "char": c["char"],
+                    "x": x + (cw - c["w"]) / 2.0,
+                    "y": y,
+                    "rotate": c["rotate"],
+                    "w": c["w"],
+                    "h": c["h"],
+                }
+            )
+            y += c["h"]
+    return placements, len(columns), block_w, block_h
+
+
+def layout_vertical(
+    text: str,
+    style: TextStyle,
+    inner_w: float,
+    inner_h: float,
+    size_px: float | None = None,
+) -> list[dict]:
+    """Per-char vertical placements for ``text`` inside an inner rect.
+
+    Pure geometry (no painting — RESEARCH A1: a future document-layout
+    wrapper can consume these placements): ``[{char, x, y, rotate, w, h},
+    ...]`` in INNER-LOCAL coordinates. ``size_px`` is the glyph size; when
+    None the style resolves it (manual size, or the vertical Auto-fit loop:
+    bounded 12 x 0.9 iterations on the column count and vertical extent,
+    5 px floor — the horizontal machinery applied to vertical metrics).
+
+    Classification and column rules: see the module docstring and
+    ``char_rotates``. Future polish (CONTEXT Deferred): kumimoji
+    compression, tate-chu-yoko combining, RTL-script bottom-to-top flow.
+    """
+    if size_px is None:
+        manual = style.font_size_px is not None and not style.auto_fit
+        if manual:
+            size_px = min(_FONT_SIZE_MAX, max(_FONT_SIZE_MIN, float(style.font_size_px)))
+        else:
+            size_px = _vertical_fit_size(text, style, inner_w, inner_h)
+    placements, _, _, _ = _vertical_placements(text, style, inner_w, inner_h, size_px)
+    return placements
+
+
+def _vertical_fit_size(
+    text: str, style: TextStyle, inner_w: float, inner_h: float
+) -> float:
+    """The vertical Auto-fit size: the bounded loop on column count.
+
+    Fit = the layout's column count <= floor(inner_w / 1 em) AND the run's
+    vertical extent fits inner_h. Same machinery as the horizontal loop:
+    box-adaptive base (the box dims = the inner dims + the constant inset),
+    [10,28] clamp, 12 x 0.9 iterations, 5 px floor checked at the loop TOP
+    (no iteration renders below it).
+    """
+    box_w = inner_w + 2.0 * _OVERLAY_INSET
+    box_h = inner_h + 2.0 * _OVERLAY_INSET
+    base = _OVERLAY_FONT_BASE * min(box_w, box_h) / _OVERLAY_BOX_REF_DIM
+    target = min(_BASE_CLAMP_MAX, max(_BASE_CLAMP_MIN, base))
+    for _ in range(_OVERLAY_FIT_MAX_ITERS):
+        if target <= _OVERLAY_FIT_FLOOR_PX:
+            break
+        _, ncols, _, block_h = _vertical_placements(text, style, inner_w, inner_h, target)
+        max_cols = max(1, int(inner_w // target))
+        if ncols <= max_cols and block_h <= inner_h + _EPS:
+            break
+        target *= _OVERLAY_FIT_STEP
+    return target
+
+
+# ---------------------------------------------------------------------------
 # layout() — pure geometry
 # ---------------------------------------------------------------------------
 
@@ -221,19 +441,22 @@ def _line_rects(doc: QTextDocument) -> list:
 def layout(
     text: str, style: TextStyle, box_rect: QRectF, vertical: bool = False
 ) -> LayoutResult:
-    """Lay out ``text`` inside ``box_rect`` per ``style`` (horizontal mode).
+    """Lay out ``text`` inside ``box_rect`` per ``style``.
 
-    The box rect is shrunk by the inner inset on every side; lines wrap at
-    the inner width (engine word wrap with anywhere fallback); the engine
-    applies ``align_h``; ``align_v`` offsets the block via the result's
-    ``origin``. A manual size (``font_size_px`` set, ``auto_fit`` False)
-    renders exactly at that size and reports ``overflow`` when the block
-    exceeds the inner height. Auto-fit (the default) runs the 04-09 bounded
-    loop at scene px. Empty text yields an empty result (renders nothing).
+    Horizontal mode (the default): the box rect is shrunk by the inner
+    inset on every side; lines wrap at the inner width (engine word wrap
+    with anywhere fallback); the engine applies ``align_h``; ``align_v``
+    offsets the block via the result's ``origin``. A manual size
+    (``font_size_px`` set, ``auto_fit`` False) renders exactly at that size
+    and reports ``overflow`` when the block exceeds the inner height.
+    Auto-fit (the default) runs the 04-09 bounded loop at scene px.
 
-    The true tategaki vertical path lands in plan 07-03; ``vertical=True``
-    currently falls back to the horizontal layout (the 07-01 default style
-    is horizontal, so no production path reaches it).
+    Vertical mode (``vertical=True`` — plan 07-03, D-11): the result
+    carries ``vertical_placements`` (per-char boxes, upright CJK / rotated
+    Latin, RTL columns, wrap at the inner height, per-char centering,
+    align_h/align_v block shifts — see ``layout_vertical``); ``origin`` is
+    the box top-left + inset and the placements are inner-local. Empty text
+    yields an empty result in both modes (renders nothing).
     """
     inner_w = max(1.0, box_rect.width() - 2.0 * _OVERLAY_INSET)
     inner_h = max(1.0, box_rect.height() - 2.0 * _OVERLAY_INSET)
@@ -248,6 +471,9 @@ def layout(
             ),
             inner_size=inner_size,
         )
+
+    if vertical:
+        return _layout_vertical_result(text, style, box_rect, inner_w, inner_h, inner_size)
 
     manual = style.font_size_px is not None and not style.auto_fit
     if manual:
@@ -303,6 +529,55 @@ def layout(
             box_rect.y() + _OVERLAY_INSET + dy,
         ),
         inner_size=inner_size,
+    )
+
+
+def _layout_vertical_result(
+    text: str,
+    style: TextStyle,
+    box_rect: QRectF,
+    inner_w: float,
+    inner_h: float,
+    inner_size: QSizeF,
+) -> LayoutResult:
+    """The vertical (tategaki) LayoutResult — per-char placements (D-11).
+
+    Manual size: placements at exactly that size; overflow when the column
+    BLOCK exceeds the inner rect in either dimension. Auto-fit: the bounded
+    loop on column count + vertical extent (``_vertical_fit_size``);
+    overflow when the final candidate still does not fit (the floor held).
+    """
+    manual = style.font_size_px is not None and not style.auto_fit
+    if manual:
+        size = min(_FONT_SIZE_MAX, max(_FONT_SIZE_MIN, float(style.font_size_px)))
+        placements, _, block_w, block_h = _vertical_placements(
+            text, style, inner_w, inner_h, size
+        )
+        overflow = block_w > inner_w + _EPS or block_h > inner_h + _EPS
+        used = size
+    else:
+        size = _vertical_fit_size(text, style, inner_w, inner_h)
+        placements, ncols, block_w, block_h = _vertical_placements(
+            text, style, inner_w, inner_h, size
+        )
+        max_cols = max(1, int(inner_w // size))
+        overflow = not (ncols <= max_cols and block_h <= inner_h + _EPS)
+        used = size
+
+    ink = QRectF()
+    for p in placements:
+        ink = ink.united(QRectF(p["x"], p["y"], p["w"], p["h"]))
+    return LayoutResult(
+        text=text,
+        style=style,
+        ink=ink,
+        overflow=overflow,
+        used_font_size_px=float(max(1, int(round(used)))),
+        origin=QPointF(
+            box_rect.x() + _OVERLAY_INSET, box_rect.y() + _OVERLAY_INSET
+        ),
+        inner_size=inner_size,
+        vertical_placements=placements,
     )
 
 
