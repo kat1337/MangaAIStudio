@@ -1,10 +1,11 @@
 ---
 phase: 7
 slug: typesetting-tran-02-render-translated-text-into-the-page
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-10
+reviewed_at: 2026-08-10
 ---
 
 # Phase 7 — UI Design Contract (Typesetting: render translated text into the page)
@@ -167,7 +168,7 @@ Phase 1–6 copy is inherited; the table lists Phase 7 additions/changes. All ne
 > `✅ covered` = truth string; `🧪 backstop` = held-out visual test; `⚠ unresolved`
 > = explicit planner assumption.
 
-Applicable state considerations resolved: **7 covered, 2 backstop, 0 unresolved, 1 dismissed**
+Applicable state considerations resolved: **7 covered, 2 backstop, 0 unresolved, 2 dismissed**
 
 | Category | Element(s) | Status | Resolution / Reason |
 |----------|------------|--------|---------------------|
