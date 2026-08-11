@@ -1,0 +1,287 @@
+"""GUI tests for the Inspector Style section (plan 07-05 Task 1, D-05).
+
+Mirrors the ``tests/test_gui_boxes.py`` conventions (``importorskip`` +
+``qtbot`` + ``@pytest.mark.gui`` + real ``MainWindow`` integration). This
+module covers the D-05 styling surface: the section's widgets exist and show
+the box's flat ``TextStyle``, every commit signal fires exactly once per real
+change and zero on a no-op focus cycle (WR-01), the Auto-fit checkbox couples
+the size spin (0/disabled <-> enabled/rounded-size), and the whole section
+rides the empty-state gate with the extended copy.
+
+The D-10 Mixed / apply-to-all tests land with plan 07-05 Task 2 (same file).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from PySide6.QtWidgets import (  # noqa: E402
+    QCheckBox,
+    QComboBox,
+    QFontComboBox,
+    QLabel,
+    QSpinBox,
+    QToolButton,
+)
+
+from manga_ai_studio.core.box_model import PageBox  # noqa: E402
+from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
+from manga_ai_studio.gui.inspector_panel import InspectorPanel  # noqa: E402
+from panelcleaner.structures import Box  # noqa: E402
+
+
+def _make_inspector(qtbot) -> InspectorPanel:
+    """Build an InspectorPanel added to qtbot (so it can parent widgets)."""
+    panel = InspectorPanel()
+    qtbot.addWidget(panel)
+    return panel
+
+
+def _pagebox_with_style(**style_kwargs) -> PageBox:
+    """A USER-origin PageBox carrying a TextStyle built from ``style_kwargs``."""
+    pb = PageBox(box=Box(10, 20, 210, 120), origin="user")
+    pb.set_recognized_text("hello")
+    pb.style = TextStyle(**style_kwargs)
+    return pb
+
+
+def _style_callbacks(fired: dict):
+    """The 7 style-section commit callbacks recording into ``fired``.
+
+    ``fired`` keys: font / font_style / size / auto_fit / color / align /
+    effect. The four Phase 4 callbacks are no-ops (unused here).
+    """
+    return dict(
+        on_recognized=lambda _t: None,
+        on_translation=lambda _t: None,
+        on_bubble=lambda _n: None,
+        on_vertical=lambda _v: None,
+        on_style_font=fired["font"].append,
+        on_style_font_style=fired["font_style"].append,
+        on_style_size=fired["size"].append,
+        on_style_auto_fit=fired["auto_fit"].append,
+        on_style_color=fired["color"].append,
+        # style_align_changed emits (h, v) — capture the tuple.
+        on_style_align=lambda h, v: fired["align"].append((h, v)),
+        # style_effect_changed emits (key, dict) — capture the tuple.
+        on_style_effect=lambda key, payload: fired["effect"].append((key, payload)),
+    )
+
+
+# ===========================================================================
+# Task 1 — the D-05 styling surface
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_styling_section_present(qtbot) -> None:
+    """The Style section's controls exist below the text fields and their
+    values match the box's flat TextStyle (D-05/D-06 — UI-SPEC surface 33)."""
+    panel = _make_inspector(qtbot)
+
+    # The section chrome: "Style" 12px semibold muted header + 1px divider.
+    assert isinstance(panel.style_header, QLabel)
+    assert panel.style_header.text() == "Style"
+    assert panel.style_header.objectName() == "styleHeaderLabel"
+    assert panel.style_divider is not None
+
+    # The controls (Don't-Hand-Roll: QFontComboBox / QColorDialog / QSpinBox).
+    assert isinstance(panel.font_combo, QFontComboBox)
+    assert isinstance(panel.style_combo, QComboBox)
+    assert isinstance(panel.size_spin, QSpinBox)
+    assert isinstance(panel.auto_fit_check, QCheckBox)
+    assert isinstance(panel.color_swatch, QToolButton)
+    assert panel.color_swatch.width() == 24 and panel.color_swatch.height() == 24
+    assert isinstance(panel.align_combo, QComboBox)
+    assert isinstance(panel.align_v_combo, QComboBox)
+    for key in ("outline", "glow", "shadow"):
+        assert isinstance(panel._effect_checks[key], QCheckBox)
+        assert isinstance(panel._effect_swatches[key], QToolButton)
+        assert isinstance(panel._effect_spins[key], QSpinBox)
+
+    # Size spin: 0..200 with the "Auto" sentinel at 0 (D-15).
+    assert panel.size_spin.minimum() == 0
+    assert panel.size_spin.maximum() == 200
+    assert panel.size_spin.specialValueText() == "Auto"
+
+    # A styled box populates the controls with its real values.
+    style = TextStyle(
+        font_family="Liberation Sans",
+        bold=False,
+        italic=False,
+        font_size_px=16.0,
+        auto_fit=False,
+        color="#ff0000",
+        align_h="left",
+        align_v="top",
+        outline={"enabled": True, "color": "#0b0b0e", "width_px": 3.0},
+        glow={"enabled": True, "color": "#ffff00", "radius_px": 6.0, "opacity": 0.8},
+        shadow={"enabled": False, "color": "#000000", "radius_px": 4.0, "dx": 2.0, "dy": 2.0, "opacity": 0.6},
+    )
+    panel.load_box(_pagebox_with_style(**{
+        "font_family": style.font_family,
+        "font_size_px": style.font_size_px,
+        "auto_fit": style.auto_fit,
+        "color": style.color,
+        "align_h": style.align_h,
+        "align_v": style.align_v,
+        "outline": dict(style.outline),
+        "glow": dict(style.glow),
+        "shadow": dict(style.shadow),
+    }))
+
+    assert panel.font_combo.currentText() == "Liberation Sans"
+    # QFontDatabase.styles("Liberation Sans") contains "Regular" on this stack.
+    assert panel.style_combo.currentText() in {
+        "Regular", "Italic", "Bold", "Bold Italic",
+    }
+    assert panel.size_spin.value() == 16
+    assert panel.size_spin.isEnabled() is True  # manual size -> spin enabled
+    assert panel.auto_fit_check.isChecked() is False
+    assert panel.color_swatch.color == "#ff0000"
+    assert panel.align_combo.currentText() == "Left"
+    assert panel.align_v_combo.currentText() == "Top"
+    assert panel._effect_checks["outline"].isChecked() is True
+    assert panel._effect_swatches["outline"].color == "#0b0b0e"
+    assert panel._effect_spins["outline"].value() == 3
+    assert panel._effect_checks["glow"].isChecked() is True
+    assert panel._effect_spins["glow"].value() == 6
+    assert panel._effect_swatches["glow"].color == "#ffff00"
+    assert panel._effect_checks["shadow"].isChecked() is False
+    assert panel._effect_spins["shadow"].value() == 2
+
+
+@pytest.mark.gui
+def test_style_commit_signal_fires(qtbot) -> None:
+    """WR-01: exactly ONE style emission per real change; ZERO on a no-op
+    focus cycle — an unchanged focus cycle must not push a no-op BOXES
+    snapshot (the D-10 one-commit-one-snapshot contract)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style())  # default style (auto-fit on)
+
+    # Font change -> exactly one style_font_changed emission.
+    panel.font_combo.setCurrentText("Arial")
+    assert fired["font"] == ["Arial"]
+
+    # Style-combo change (the family's styles) -> one emission.
+    panel.style_combo.setCurrentText("Bold")
+    assert fired["font_style"] == ["Bold"]
+
+    # Size: uncheck auto-fit (enables the spin), then commit a manual size.
+    panel.auto_fit_check.setChecked(False)
+    assert fired["auto_fit"] == [False]
+    panel.size_spin.setValue(14)
+    panel.size_spin.editingFinished.emit()
+    assert fired["size"] == [14]
+    # Post-commit reload (the MainWindow applies + reloads the panel) so the
+    # WR-01 loaded-memory reflects the applied style.
+    panel.load_box(_pagebox_with_style(auto_fit=False, font_size_px=14.0))
+
+    # Color + align + effect — one emission per real change.
+    panel._commit_style_color("#112233")
+    assert fired["color"] == ["#112233"]
+    panel.load_box(
+        _pagebox_with_style(auto_fit=False, font_size_px=14.0, color="#112233")
+    )
+    panel.align_combo.setCurrentIndex(0)  # Left
+    assert fired["align"] == [("left", "middle")]
+    panel._effect_checks["outline"].setChecked(False)
+    assert fired["effect"] == [("outline", {"enabled": False, "color": "#0b0b0e", "value": 2})]
+    # ---- WR-01 no-op focus cycles: no NEW emissions.
+    panel.align_combo.setCurrentIndex(0)  # unchanged
+    panel.size_spin.editingFinished.emit()  # unchanged value
+    panel.auto_fit_check.setChecked(False)  # unchanged
+    panel._effect_checks["outline"].setChecked(False)  # unchanged
+    panel._commit_style_color("#112233")  # unchanged
+    assert fired["font"] == ["Arial"]
+    assert fired["size"] == [14]
+    assert fired["auto_fit"] == [False]
+    assert fired["color"] == ["#112233"]
+    assert fired["align"] == [("left", "middle")]
+    assert fired["effect"] == [
+        ("outline", {"enabled": False, "color": "#0b0b0e", "value": 2})
+    ]
+
+
+@pytest.mark.gui
+def test_auto_fit_toggles_size_spin(qtbot) -> None:
+    """D-15: Auto-fit checked -> spin forced to 0/"Auto" + disabled; unchecked
+    -> spin enabled with the current rendered size (rounded) as the manual
+    start (UI-SPEC §33)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    # An Auto-fit box loads with the spin at 0/"Auto", disabled.
+    panel.load_box(_pagebox_with_style(auto_fit=True))
+    assert panel.auto_fit_check.isChecked() is True
+    assert panel.size_spin.value() == 0
+    assert panel.size_spin.isEnabled() is False
+
+    # Unchecking enables the spin at the current rendered size (rounded).
+    panel.load_box(
+        _pagebox_with_style(auto_fit=True), rendered_size_px=21.6
+    )
+    panel.auto_fit_check.setChecked(False)
+    assert fired["auto_fit"] == [False]
+    assert panel.size_spin.isEnabled() is True
+    assert panel.size_spin.value() == 22  # round(21.6)
+
+    # Simulate the MainWindow's post-commit reload (the applied style is now
+    # manual at 22px) — re-checking then fires a REAL change (WR-01).
+    panel.load_box(_pagebox_with_style(auto_fit=False, font_size_px=22.0))
+    assert panel.auto_fit_check.isChecked() is False
+    assert panel.size_spin.value() == 22
+    panel.auto_fit_check.setChecked(True)
+    assert fired["auto_fit"] == [False, True]
+    assert panel.size_spin.value() == 0
+    assert panel.size_spin.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_empty_state_disables_styling(qtbot) -> None:
+    """Empty state: the whole panel — text fields AND the styling section —
+    disables with the extended copy (UI-SPEC §33 empty row)."""
+    panel = _make_inspector(qtbot)
+    panel.clear()
+
+    # The extended empty-state copy (D-05: ", and style").
+    assert "text, translation, and style" in panel.empty_label.text()
+    assert panel.empty_label.isHidden() is False  # shown (panel unshown in tests)
+
+    # The styling controls follow the same gate as the text fields.
+    for w in (
+        panel.font_combo,
+        panel.style_combo,
+        panel.size_spin,
+        panel.auto_fit_check,
+        panel.color_swatch,
+        panel.align_combo,
+        panel.align_v_combo,
+        panel._effect_checks["outline"],
+        panel._effect_swatches["glow"],
+        panel._effect_spins["shadow"],
+        panel.vertical_check,
+    ):
+        assert w.isEnabled() is False, f"{w} must be disabled in the empty state"
+
+    # The multi-select hint is hidden with no selection.
+    assert panel.multi_hint_label.isHidden() is True
+
+    # A load re-enables the styling section (the auto-fit box keeps its spin
+    # disabled — the D-15 coupling, not the empty gate).
+    panel.load_box(_pagebox_with_style(auto_fit=True))
+    assert panel.font_combo.isEnabled() is True
+    assert panel.color_swatch.isEnabled() is True
+    assert panel.size_spin.isEnabled() is False  # auto-fit coupling
+    assert panel.empty_label.isVisible() is False
