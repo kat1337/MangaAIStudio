@@ -16,6 +16,7 @@ These tests need a display; on headless CI they skip via ``importorskip``.
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path  # noqa: F401  (mirrors test_gui_canvas header)
 
 import pytest
@@ -4382,3 +4383,142 @@ def test_size_action_converts_auto_fit(qtbot, tmp_path) -> None:
     window._on_font_size_delta(-1)
     QApplication.processEvents()
     assert item.pagebox.style.font_size_px == 1.0
+
+
+# ===========================================================================
+# Plan 07-06 — G-07-6 Ctrl+Z teardown UAF (graveyard lifetime contract)
+# ===========================================================================
+#
+# G-07-6 (07-UAT blocker): Ctrl+Z after a style commit natively crashes the
+# app (0xC0000409). Root cause: style commits queue scene UpdateRequests that
+# reference the overlay items (TypesetOverlayItem.set_content -> self.update()),
+# then on_undo -> apply_undo_boxes -> set_boxes removes every BoxItem and drops
+# the LAST Python refs synchronously mid-event-loop -> shiboken deletes the C++
+# items while pending updates still reference them -> the next flush dispatches
+# paint() to a freed TypesetOverlayItem -> pure-virtual call -> abort.
+#
+# The suite never caught it because every test helper HOLDS the item wrappers
+# (e.g. _seed_boxes_window returns the list), deferring C++ deletion to window
+# teardown. These regressions deliberately drop ALL wrapper refs before
+# on_undo()/Delete — mirroring the app lifetime — and pin the graveyard
+# contract with weakrefs: removed wrappers must stay ALIVE through the pending
+# update flush and die only after the next event-loop iteration.
+
+
+@pytest.mark.gui
+def test_undo_style_commit_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
+    """G-07-6 regression: Ctrl+Z after a style commit must NOT drop the last
+    BoxItem refs synchronously inside on_undo (the teardown UAF).
+
+    Mirrors the app lifetime: style-commit a multi-selection (queues overlay
+    updates), drop EVERY wrapper ref except the canvas's own ``_box_items``,
+    then ``on_undo()`` WITHOUT an event-loop flush. The graveyard must hold
+    the removed wrappers through the pending UpdateRequest flush (weakrefs
+    ALIVE); the FOLLOWING ``processEvents()`` releases them (weakrefs DEAD).
+    The rebuild restores the exact pre-commit snapshot.
+    """
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    items[0].pagebox.style = TextStyle(color="#ff0000")
+    items[1].pagebox.style = TextStyle(color="#0000ff")
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    # ONE style commit (queues overlay updates per selected box — the UAF
+    # precondition) + ONE BOXES snapshot pushed.
+    window.inspector_panel._commit_style_color("#00ff00")
+    QApplication.processEvents()
+    assert items[0].pagebox.style.color == "#00ff00"
+    assert items[1].pagebox.style.color == "#00ff00"
+
+    # App lifetime: capture weakrefs, then drop EVERY wrapper ref — the
+    # canvas's _box_items becomes the only strong reference (what the app's
+    # undo path sees at Ctrl+Z time).
+    wrs = [weakref.ref(it) for it in items]
+    del items
+
+    # Ctrl+Z WITHOUT an event-loop flush. Pre-fix, set_boxes drops _box_items
+    # synchronously -> the wrappers die INSIDE on_undo (RED — the exact
+    # teardown the crash diagnosis describes). The graveyard fix holds them.
+    window.on_undo()
+    assert all(wr() is not None for wr in wrs), (
+        "removed BoxItems must stay alive through the pending update flush "
+        "(graveyard contract) - set_boxes must not drop the last refs "
+        "synchronously mid-event-loop"
+    )
+
+    # The next event-loop iteration flushes the queued updates (painting live
+    # items) and then fires the graveyard release timer -> wrappers die.
+    QApplication.processEvents()
+    assert all(wr() is None for wr in wrs), (
+        "the graveyard must release removed wrappers after the update flush "
+        "(next event-loop iteration)"
+    )
+
+    # The rebuild restored the exact pre-commit snapshot (detached styles).
+    restored = [it.pagebox for it in window.canvas._box_items]
+    assert len(restored) == 2
+    assert restored[0].style.color == "#ff0000"
+    assert restored[1].style.color == "#0000ff"
+
+
+@pytest.mark.gui
+def test_delete_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
+    """G-07-6 delete-path variant: Delete after a style commit must retire the
+    removed item through the SAME graveyard (no second drop-the-last-ref site).
+
+    Style-commit a box (queues overlay updates), drop every wrapper ref, drive
+    the real Delete key handler — the weakref must be ALIVE immediately after
+    (the graveyard holds the item through the pending flush) and DEAD after
+    ``processEvents()``. One undo restores the box to the pre-delete state.
+    """
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    items = _seed_boxes_window(window, [Box(10, 20, 80, 80)])
+    item = items[0]
+    item.pagebox.style = TextStyle(color="#ff0000")
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    # Style commit (queues overlay updates — the UAF precondition).
+    window.inspector_panel._commit_style_color("#00ff00")
+    QApplication.processEvents()
+    assert item.pagebox.style.color == "#00ff00"
+
+    # Drop EVERY wrapper ref except the canvas's _box_items.
+    wr = weakref.ref(item)
+    del items, item
+
+    # Delete key without a flush: pre-fix the wrapper dies when the key
+    # handler returns (synchronous last-ref drop); the fix retires it to the
+    # graveyard -> alive.
+    del_key = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier
+    )
+    canvas.keyPressEvent(del_key)
+    assert wr() is not None, (
+        "the deleted item must stay alive through the pending update flush "
+        "(graveyard contract) - _remove_box must not drop the last ref "
+        "synchronously"
+    )
+
+    # Next event-loop iteration: updates flushed on live items, then the
+    # graveyard release timer drops the wrapper.
+    QApplication.processEvents()
+    assert wr() is None, "the graveyard must release the deleted item post-flush"
+
+    # One undo restores the box to the PRE-DELETE state (the committed style).
+    window.on_undo()
+    QApplication.processEvents()
+    assert canvas.box_count() == 1
+    restored = canvas._box_items[0].pagebox
+    assert restored.style.color == "#00ff00"
