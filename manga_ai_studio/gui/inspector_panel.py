@@ -1188,6 +1188,8 @@ class InspectorPanel(QWidget):
     def _emit_style_font_if_changed(self, family: str, on_style_font) -> None:
         if not family or family == "Mixed":
             return  # the sentinel never leaves the widget layer (Pitfall 7)
+        if self.font_combo.findText(family) == -1:
+            return  # free-typed text is not a real family (T-07-18 / WR-01)
         if family != self._loaded_style_font:
             on_style_font(family)
 
@@ -1223,14 +1225,18 @@ class InspectorPanel(QWidget):
     def _on_default_font_clicked(self) -> None:
         """G-07-3: emit ``default_font_requested`` with the CURRENT combo family.
 
-        The Set-as-Default affordance is an explicit user action (no WR-01
-        no-op guard needed), but the 'Mixed' sentinel NEVER leaves the widget
-        layer (Pitfall 7) — a click while the combo shows Mixed (multi-select
-        with differing families) emits nothing. The family is always one of
-        the QFontComboBox's real families — never free text (T-07-18).
+        WR-01 (07-REVIEW-GAPS): the QFontComboBox is editable, so its line
+        edit accepts FREE TEXT that is not a family in the list — the click
+        commits only when the current text EXACTLY matches an installed
+        family (the ``findText`` gate; T-07-18 "never free text"). The
+        'Mixed' sentinel NEVER leaves the widget layer (Pitfall 7) — a click
+        while the combo shows Mixed (multi-select with differing families)
+        emits nothing.
         """
         family = self.font_combo.currentText()
         if family and family != "Mixed":
+            if self.font_combo.findText(family) == -1:
+                return  # free-typed text is not a real family (T-07-18)
             self.default_font_requested.emit(family)
 
     def _emit_style_font_style_if_changed(self, name: str, on_style_font_style) -> None:

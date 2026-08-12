@@ -275,6 +275,58 @@ def test_style_commit_signal_fires(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_font_free_text_never_commits(qtbot) -> None:
+    """WR-01 (07-REVIEW-GAPS): the QFontComboBox is editable, so free-typed
+    text fires ``currentTextChanged`` on EVERY keystroke with a partial /
+    garbage string — pre-fix each emission became a full style commit
+    (a spurious BOXES undo entry + a nonexistent family persisted into the
+    model). The ``findText`` gate commits ONLY when the text exactly matches
+    an installed family (T-07-18 'never free text'); the Set-as-Default
+    click rides the same gate."""
+    from PySide6.QtGui import QFontDatabase
+
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [], "default": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.default_font_requested.connect(fired["default"].append)
+    panel.load_box(_pagebox_with_style())
+    loaded = panel._loaded_style_font  # "Liberation Sans" (TextStyle default)
+    assert loaded
+
+    # The typing path: the editable line edit emits currentTextChanged with
+    # the PARTIAL string on every keystroke — a garbage family must never
+    # become a style commit.
+    panel.font_combo.setCurrentText("Ari")
+    assert panel.font_combo.currentText() == "Ari"
+    assert fired["font"] == [], (
+        "free-typed text must never become a style commit (WR-01)"
+    )
+
+    # A full free-typed string that is not an installed family is rejected.
+    panel.font_combo.setCurrentText("Totally Fake Family")
+    assert fired["font"] == []
+
+    # The Set-as-Default click rides the same gate (T-07-18): the old
+    # docstring claimed 'never free text' — with the gate it is finally true.
+    panel.default_font_button.click()
+    assert fired["default"] == [], (
+        "a free-typed family must not reach the default-font store (WR-01)"
+    )
+
+    # An EXACT real-family match commits once; the click emits it too.
+    real = next(f for f in QFontDatabase.families() if f != loaded)
+    panel.font_combo.setCurrentText(real)
+    assert fired["font"] == [real], (
+        "an exact match of an installed family must commit (T-07-18)"
+    )
+    panel.default_font_button.click()
+    assert fired["default"] == [real]
+
+
+@pytest.mark.gui
 def test_auto_fit_toggles_size_spin(qtbot) -> None:
     """D-15: Auto-fit checked -> spin forced to 0/"Auto" + disabled; unchecked
     -> spin enabled with the current rendered size (rounded) as the manual
