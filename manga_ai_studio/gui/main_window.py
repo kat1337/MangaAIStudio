@@ -128,6 +128,16 @@ class MainWindow(QMainWindow):
         # OCR worker. Connected right after construction (the canvas's
         # class-scope signal exists before any event can fire).
         self.canvas.ocr_requested.connect(self._on_canvas_ocr_requested)
+        # G-07-3: new user-drawn boxes are born with the saved default
+        # family. The provider returns None when no family is saved — a
+        # no-key box keeps style None and the renderer's TextStyle() defaults
+        # apply (matching today's behavior, so the existing box tests pass
+        # UNCHANGED). D-06: existing boxes are never re-styled by this.
+        self.canvas.new_box_style_provider = (
+            lambda: default_style(self._default_font_family())
+            if self._default_font_family()
+            else None
+        )
 
         # Track loaded pages + the index of the currently-shown page.
         self.image_files: list[ImageFile] = []
@@ -3927,6 +3937,10 @@ class MainWindow(QMainWindow):
         pixmap = self.canvas.image_item.pixmap()
         img_w = pixmap.width()
         img_h = pixmap.height()
+        # G-07-3: detected boxes are born with the saved default family —
+        # an empty read -> None -> the renderer's TextStyle() defaults apply
+        # (the same empty-family contract as the user-box provider).
+        default_family = self._default_font_family()
         detected_pageboxes: list[PageBox] = []
         for blk in blk_list:
             box = textblock_to_box(blk)  # int coercion (plan 03-01, pure)
@@ -3947,7 +3961,12 @@ class MainWindow(QMainWindow):
             # + Phase 5 export (CONTEXT). origin DETECTED so re-detect can
             # replace it (D-03).
             detected_pageboxes.append(
-                PageBox(box=clamped, origin=DETECTED, payload=blk)
+                PageBox(
+                    box=clamped,
+                    origin=DETECTED,
+                    payload=blk,
+                    style=default_style(default_family) if default_family else None,
+                )
             )
 
         # Step 3 — D-03: keep USER boxes, replace detected. boxes_snapshot()

@@ -221,6 +221,14 @@ class EditorCanvas(QGraphicsView):
         self.box_layer.setZValue(BOX_LAYER_Z)
         self._scene.addItem(self.box_layer)
         self._box_items: list[BoxItem] = []  # live box layer membership
+        # G-07-3 (plan 07-11): an optional callable producing the TextStyle
+        # for NEW user-drawn boxes (``Callable[[], TextStyle | None]``).
+        # MainWindow sets it to the app-level default-family provider; the
+        # canvas stays Qt-free of QSettings (the is-primary-owner weakref
+        # precedent — the provider seam, not a second QSettings accessor).
+        # None return keeps today's behavior: the renderer falls back to
+        # TextStyle() (Liberation Sans).
+        self.new_box_style_provider = None
         # Plan 07-06 (G-07-6 blocker): removed BoxItems awaiting DEFERRED
         # release (see _retire_boxes / _release_graveyard — the teardown-UAF
         # fix). Removal sites must never drop the last Python refs to a
@@ -2163,10 +2171,18 @@ class EditorCanvas(QGraphicsView):
             return  # < 8x8 — no-op (D-06 min on create-release)
         # Build a user PageBox with int coords (Pitfall 6 — int at the
         # Box<->QRectF boundary; payload None for user boxes until OCR runs).
+        # G-07-3: the new box is born with the app-level default style when
+        # MainWindow supplied a provider (None return -> style None -> the
+        # renderer's TextStyle() defaults apply, today's behavior).
         pb = PageBox(
             box=Box(int(rect.x()), int(rect.y()), int(rect.right()), int(rect.bottom())),
             origin=USER,
             payload=None,
+            style=(
+                self.new_box_style_provider()
+                if self.new_box_style_provider is not None
+                else None
+            ),
         )
         item = BoxItem(pb)
         self._scene.addItem(item)
