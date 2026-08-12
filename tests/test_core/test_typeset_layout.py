@@ -117,16 +117,51 @@ def test_manual_size_renders_at_exact_size(qapp) -> None:
 
 @pytest.mark.unit
 def test_auto_fit_uses_box_adaptive_base(qapp) -> None:
-    """Auto-fit (default) uses the box-adaptive base 14 x min(w,h)/100, clamped [10,28]."""
-    # 200x100 rect -> min dim 100 -> base 14 (the UI-SPEC reference box).
+    """Auto-fit (default) starts from the box-adaptive base 14 x min(w,h)/100
+    clamped [10,28] — but the clamp is a STARTING point, not a hard max
+    (G-07-4): short text GROWS above it, bounded by the per-box growth cap
+    min(inner_w, inner_h), never overflowing."""
+    # 200x100 rect -> min dim 100 -> base 14 (the UI-SPEC reference box):
+    # short text grows above the 14 px base, capped at min(inner_w, inner_h).
     r14 = layout("hello", TextStyle(), QRectF(0, 0, 200, 100))
-    assert r14.used_font_size_px == pytest.approx(14.0, abs=0.1)
-    # 300x300 rect -> min dim 300 -> base 42 -> clamped to 28.
+    cap14 = min(_inner(200, 100))
+    assert r14.used_font_size_px > 14.0, "growth must exceed the 14 px base"
+    assert r14.used_font_size_px <= cap14 + 1e-6, (
+        "growth is capped at min(inner_w, inner_h)"
+    )
+    assert r14.overflow is False
+    # 300x300 rect -> min dim 300 -> base 42 -> the old 28 px clamp is NOT
+    # a hard max: the rendered size exceeds it (bounded by the cap).
     r28 = layout("hello", TextStyle(), QRectF(0, 0, 300, 300))
-    assert r28.used_font_size_px == pytest.approx(28.0, abs=0.1)
-    # 100x40 rect -> min dim 40 -> base 5.6 -> clamped up to 10.
+    cap28 = min(_inner(300, 300))
+    assert r28.used_font_size_px > 28.0, (
+        "growth must exceed the old 28 px clamp max (clamp-as-max removed)"
+    )
+    assert r28.used_font_size_px <= cap28 + 1e-6
+    assert r28.overflow is False
+    # 100x40 rect -> min dim 40 -> base 5.6 -> clamped up to 10: short text
+    # grows above the 10 px floor (cap = min(96, 36) = 36).
     r10 = layout("hello", TextStyle(), QRectF(0, 0, 100, 40))
-    assert r10.used_font_size_px == pytest.approx(10.0, abs=0.1)
+    cap10 = min(_inner(100, 40))
+    assert r10.used_font_size_px > 10.0, "growth must exceed the 10 px floor clamp"
+    assert r10.used_font_size_px <= cap10 + 1e-6
+    assert r10.overflow is False
+
+
+@pytest.mark.unit
+def test_auto_fit_grows_short_text_to_fit(qapp) -> None:
+    """G-07-4: short text in a large box renders ABOVE the old 28 px clamp max
+    — auto-fit fills the box (big enough to be legible), bounded by the
+    per-box growth cap min(inner_w, inner_h), never overflowing."""
+    result = layout("hello", TextStyle(), QRectF(0, 0, 300, 300))
+    inner_w, inner_h = _inner(300, 300)
+    assert result.used_font_size_px > 28.0, (
+        "auto-fit must grow short text beyond the old 28 px clamp max"
+    )
+    assert result.used_font_size_px <= min(inner_w, inner_h) + 1e-6, (
+        "growth is capped at min(inner_w, inner_h)"
+    )
+    assert result.overflow is False
 
 
 @pytest.mark.unit
