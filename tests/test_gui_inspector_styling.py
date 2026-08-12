@@ -546,6 +546,64 @@ def test_mixed_align_keeps_real_items_and_maps_sentinel(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_align_sentinel_repick_after_commit_no_op(qtbot) -> None:
+    """WR-02 (07-REVIEW-GAPS): re-picking the 'Mixed' sentinel after a
+    per-axis align commit must NOT fire a ``(None, None)`` commit.
+
+    After H→'Left' on a both-Mixed selection, the consumer applies H to
+    every box and the MainWindow reloads the panel: loaded becomes
+    ('Left', 'Mixed'). If the H combo presents the 'Mixed' sentinel again
+    (the review's WR-02 shape) and the user re-picks it, the widget layer
+    reports ('Mixed', 'Mixed') != loaded — but BOTH axes translate to None,
+    nothing to apply. Emitting it would push a before==after BOXES undo
+    entry + a refresh; the both-None guard drops it. A real per-axis change
+    still commits.
+    """
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    pb_a = _pagebox_with_style(align_h="left", align_v="top")
+    pb_b = _pagebox_with_style(align_h="right", align_v="bottom")
+    panel.load_multi_selection([pb_a, pb_b])
+
+    # Per-axis commit: H -> "Left" (V untouched -> None).
+    panel.align_combo.setCurrentText("Left")
+    assert fired["align"] == [("left", None)]
+
+    # The consumer applies H to every box; the MainWindow reloads the panel:
+    # H is now uniform ("Left"), V stays Mixed.
+    pb_a.style.align_h = "left"
+    pb_b.style.align_h = "left"
+    panel.load_multi_selection([pb_a, pb_b])
+    assert (panel._loaded_style_align_h, panel._loaded_style_align_v) == (
+        "Left",
+        "Mixed",
+    )
+
+    # WR-02 shape: the H combo offers the 'Mixed' sentinel again (the review
+    # notes item 0 persists after the reload) and the user re-picks it — the
+    # commit translates to (None, None) and must NOT fire.
+    panel._select_combo(
+        panel.align_combo, ["Mixed", "Left", "Center", "Right"], "Mixed"
+    )
+    panel._emit_style_align_if_changed(
+        lambda h, v: fired["align"].append((h, v))
+    )
+    assert fired["align"] == [("left", None)], (
+        "re-picking the sentinel must not push a (None, None) commit (WR-02)"
+    )
+
+    # A REAL per-axis change still commits — the guard only drops the
+    # nothing-to-apply case.
+    panel.align_combo.setCurrentText("Center")
+    assert fired["align"] == [("left", None), ("center", None)]
+
+
+@pytest.mark.gui
 def test_load_multi_selection_bare_payload_defensive(qtbot) -> None:
     """WR-03/G-07-1: ``load_multi_selection`` must survive a bare-marker
     payload (a non-``TextBlock`` object — the suite builds

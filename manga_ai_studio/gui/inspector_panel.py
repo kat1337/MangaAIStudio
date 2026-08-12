@@ -1293,6 +1293,12 @@ class InspectorPanel(QWidget):
         mirror), and the commit fires when ANY axis differs from its loaded
         display value. An unchanged focus cycle (current == loaded on both
         axes) is a WR-01 no-op.
+
+        WR-02 (07-REVIEW-GAPS): a state that translates to ``(None, None)``
+        — BOTH axes showing the Mixed sentinel against a loaded state that
+        differs — carries NOTHING to apply (``_replace_align`` skips None
+        axes); emitting it would still push a before==after BOXES undo entry
+        + refresh, so it is skipped here.
         """
         h = self.align_combo.currentText()
         v = self.align_v_combo.currentText()
@@ -1300,6 +1306,8 @@ class InspectorPanel(QWidget):
             return  # WR-01: an unchanged focus cycle is a no-op (per-axis)
         h_model = None if h == "Mixed" else _ALIGN_H_TO_MODEL[h]
         v_model = None if v == "Mixed" else _ALIGN_V_TO_MODEL[v]
+        if h_model is None and v_model is None:
+            return  # WR-02: a both-None commit carries nothing to apply
         on_style_align(h_model, v_model)
 
     def _commit_effect_enabled(self, key: str, on_style_effect) -> None:
