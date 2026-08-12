@@ -72,6 +72,22 @@ def _window_with_page(qtbot, tmp_path: Path, w: int = 60, h: int = 50) -> MainWi
     return window
 
 
+def _isolate_settings(window, tmp_path: Path, monkeypatch) -> None:
+    """Point the window's QSettings at a throwaway INI (never the real one).
+
+    Mirrors ``tests/test_gui_project.py::_isolate_settings`` — the G-07-3
+    persistence tests must never touch the user's registry.
+    """
+    from PySide6.QtCore import QSettings
+
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        window,
+        "_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+
 # ===========================================================================
 # D-01: Detect Boxes mode toggle gates the build
 # ===========================================================================
@@ -364,3 +380,52 @@ def test_toggle_box_overlay_action_exists_checkable(qtbot, tmp_path) -> None:
     assert act.isCheckable()
     sc = act.shortcut().toString()
     assert "Shift" in sc and "M" in sc
+
+
+# ===========================================================================
+# G-07-3 — detected boxes are born with the saved default family (plan 07-11)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_detected_boxes_use_saved_default_family(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-3: detected PageBoxes carry ``style=default_style(fam)`` — the
+    saved 'defaultFontFamily' becomes every detected box's starting font."""
+    window = _window_with_page(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)
+    window._settings().setValue("defaultFontFamily", "Yu Gothic UI")
+    window.action_detect_boxes_mode.setChecked(True)
+
+    result = {"mask": _mask_np(), "blocks": [_blk(5, 6, 25, 30), _blk(30, 10, 50, 40)]}
+    window._on_detection_finished(result)
+
+    items = list(window.canvas._box_items)
+    assert len(items) == 2
+    for it in items:
+        assert it.pagebox.origin == DETECTED
+        assert it.pagebox.style is not None, (
+            "a detected box must be born with the saved default family"
+        )
+        assert it.pagebox.style.font_family == "Yu Gothic UI"
+
+
+@pytest.mark.gui
+def test_detected_boxes_keep_style_none_without_key(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-3 no-key contract: with no saved family, detected boxes keep
+    ``style is None`` — the renderer's TextStyle() defaults apply (the
+    pre-plan behavior is unchanged)."""
+    window = _window_with_page(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)  # fresh INI -> no key
+    window.action_detect_boxes_mode.setChecked(True)
+
+    result = {"mask": _mask_np(), "blocks": [_blk(5, 6, 25, 30)]}
+    window._on_detection_finished(result)
+
+    items = list(window.canvas._box_items)
+    assert len(items) == 1
+    assert items[0].pagebox.origin == DETECTED
+    assert items[0].pagebox.style is None

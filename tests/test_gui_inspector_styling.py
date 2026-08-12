@@ -56,6 +56,53 @@ def _isolate_settings(window, tmp_path, monkeypatch) -> None:
     )
 
 
+def _press_at(canvas, sx: float, sy: float) -> "QMouseEvent":
+    """A left-button Alt+press whose viewport coords map to scene (sx, sy).
+
+    Mirrors ``tests/test_gui_boxes.py`` — drives the Alt+drag user-box
+    create flow (plan 03-03 D-13) on a window's canvas.
+    """
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.AltModifier,
+    )
+
+
+def _move_at(canvas, sx: float, sy: float) -> "QMouseEvent":
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(vp),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _release_at(canvas, sx: float, sy: float) -> "QMouseEvent":
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,  # the RELEASED button (mirrors test_gui_boxes)
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
 def _pagebox_with_style(**style_kwargs) -> PageBox:
     """A USER-origin PageBox carrying a TextStyle built from ``style_kwargs``."""
     pb = PageBox(box=Box(10, 20, 210, 120), origin="user")
@@ -760,3 +807,59 @@ def test_set_as_default_writes_key_and_flashes_status(
     assert window.status_bar_left.text() == "Default font: Yu Gothic UI"
     # The reader (the same store the new-box sites consult) round-trips it.
     assert window._default_font_family() == "Yu Gothic UI"
+
+
+@pytest.mark.gui
+def test_new_user_box_uses_saved_default_family(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-3: a new Alt+drag user box is born with the saved default family
+    (canvas._commit_create applies the new_box_style_provider)."""
+    window = _window_with_page(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)
+    window._settings().setValue("defaultFontFamily", "Yu Gothic UI")
+    # The T-4-14 gate: suppress the auto-OCR dispatch the create-release
+    # emits (it would spin up the real OCR worker in this test).
+    window._op_running = True
+    try:
+        canvas = window.canvas
+        canvas.mousePressEvent(_press_at(canvas, 30, 30))
+        canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
+        canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
+        QApplication.processEvents()
+    finally:
+        window._op_running = False
+
+    assert canvas.box_count() == 1
+    item = canvas._box_items[0]
+    assert item.pagebox.origin == "user"
+    assert item.pagebox.style is not None
+    assert item.pagebox.style.font_family == "Yu Gothic UI"
+    # Every other field stays at the defaults (the factory overrides ONLY
+    # the family — a new box looks like today's default box otherwise).
+    assert item.pagebox.style.to_dict() == TextStyle(
+        font_family="Yu Gothic UI"
+    ).to_dict()
+
+
+@pytest.mark.gui
+def test_new_user_box_keeps_style_none_without_key(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-3 no-key contract: with no saved family a new user box keeps
+    ``style is None`` — the renderer's TextStyle() defaults (Liberation
+    Sans) apply, exactly today's behavior."""
+    window = _window_with_page(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)  # fresh INI -> no key
+    window._op_running = True
+    try:
+        canvas = window.canvas
+        canvas.mousePressEvent(_press_at(canvas, 30, 30))
+        canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
+        canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
+        QApplication.processEvents()
+    finally:
+        window._op_running = False
+
+    assert canvas.box_count() == 1
+    assert canvas._box_items[0].pagebox.style is None
