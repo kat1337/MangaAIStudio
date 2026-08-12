@@ -165,6 +165,47 @@ def test_canvas_style_paint_equals_bake_pixels(qapp) -> None:
     )
 
 
+@pytest.mark.unit
+def test_bake_align_v_bottom_places_ink_below_top(qapp) -> None:
+    """The bake carries the align_v dy INDEPENDENTLY of the canvas (G-07-5
+    smoke guard): with align_v=bottom the first opaque ink row sits strictly
+    BELOW the top-aligned row for the same box/text.
+
+    The plan 07-08 fix re-adds the dy to the CANVAS overlay; this assertion
+    guards the bake side of the canvas≡bake contract — if a future change
+    ever dropped the dy in the bake, this test fails even when the overlay
+    tests pass.
+    """
+    from dataclasses import replace
+
+    page = _page(30)
+    box = Box(2, 2, 62, 30)  # 60x28 rect -> inner 56x24: bottom dy ~= 10px
+    top_pb = PageBox(box=box, origin=DETECTED, style=_PIXEL_STYLE)
+    top_pb.set_recognized_text("Hi")
+    bottom_pb = PageBox(
+        box=box, origin=DETECTED, style=replace(_PIXEL_STYLE, align_v="bottom")
+    )
+    bottom_pb.set_recognized_text("Hi")
+    baked_top = bake_typeset_page(page, [top_pb])
+    baked_bottom = bake_typeset_page(page, [bottom_pb])
+
+    def _first_ink_row(baked: np.ndarray) -> int | None:
+        region = baked[2:30, 2:62]
+        rows = np.where(((region == _FILL_RGB).all(axis=2)).any(axis=1))[0]
+        return int(rows.min()) if rows.size else None
+
+    first_top = _first_ink_row(baked_top)
+    first_bottom = _first_ink_row(baked_bottom)
+    assert first_top is not None and first_bottom is not None, (
+        "both bakes must contain opaque fill rows inside the box rect"
+    )
+    assert first_bottom > first_top, (
+        "G-07-5 bake guard: align_v=bottom must place the first ink row "
+        f"below the top-aligned row (got top={first_top}, bottom={first_bottom}) "
+        "— the bake's align_v dy was dropped"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 3 Test 2 — overflow renders UNCLIPPED (UI-SPEC A6)
 # ---------------------------------------------------------------------------

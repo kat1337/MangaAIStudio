@@ -1387,6 +1387,29 @@ def test_overlay_align_v_bottom_and_middle_equals_bake_pixels(qtbot) -> None:
     assert ok, f"align_v=middle: {reason}"
 
 
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "align_h,align_v",
+    [
+        (h, v)
+        for v in ("top", "middle", "bottom")
+        for h in ("left", "center", "right")
+    ],
+)
+def test_overlay_align_v_matrix_equals_bake(qtbot, align_h, align_v) -> None:
+    """The full 3x3 align_v x align_h equivalence matrix at the OVERLAY level.
+
+    Pins canvas ≡ bake for EVERY combo the style model supports, at MANUAL
+    sizes (so the plan 07-10 grow-to-fit change cannot perturb the rendered
+    geometry): the top x left/center/right rows are the historical dy=0 cases;
+    the middle/bottom rows are the new non-zero-dy cases that the plan 07-08
+    fix carries. A regression on either side of the dy contract (canvas or
+    bake) trips one of these combos.
+    """
+    ok, reason = _overlay_align_v_pixel_equals_bake(align_v, align_h=align_h)
+    assert ok, f"align_h={align_h!r} align_v={align_v!r}: {reason}"
+
+
 # -- UAT test 1 gap closure (plan 04-08): overlay geometry tracking (RC-1) --
 # The overlay child must track the box through the canvas geometry paths. The
 # canvas moves/resizes boxes via setRect + _sync_handles (canvas.py:1022-1023,
