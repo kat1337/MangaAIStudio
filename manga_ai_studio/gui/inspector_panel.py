@@ -63,7 +63,7 @@ Security:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QRegularExpression, QSortFilterProxyModel, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QSpinBox,
     QTextEdit,
     QToolButton,
@@ -123,6 +124,17 @@ QSpinBox:disabled {
 }
 QCheckBox { color: #e8e8ea; }
 QCheckBox:disabled { color: #6a6a72; }
+QLineEdit {
+    background: #2d2d33;
+    border: 1px solid #3a3a42;
+    border-radius: 2px;
+    padding: 1px 4px;
+    color: #e8e8ea;
+}
+QLineEdit:disabled {
+    background: #25252b;
+    color: #6a6a72;
+}
 QFontComboBox, QComboBox {
     background: #2d2d33;
     border: 1px solid #3a3a42;
@@ -376,8 +388,35 @@ class InspectorPanel(QWidget):
         # G-07-3: the compact Set-as-Default QToolButton rides the same row —
         # it emits the CURRENT combo family so MainWindow can persist the
         # app-level default font (the user's 'select a default font' action).
+        # G-07-2: the 'Filter fonts…' line-edit directly above the row
+        # contains-filters the family list (the QFontComboBox's built-in
+        # incremental search only matches from the START of a family name —
+        # 'Wild Words' cannot find 'CC Wild Words'). The QSortFilterProxyModel
+        # filters a VIEW of the combo's own model; the source family list
+        # stays intact (QFontDatabase remains the single source). The combo's
+        # internal model is reparented to the proxy FIRST — QComboBox.setModel
+        # deletes the model it previously owned, and that delete would
+        # otherwise destroy the proxy's source (an empty dropdown).
         self.font_combo = QFontComboBox()
         self.font_combo.setToolTip("Font family for the selected box(es).")
+        self.font_filter_edit = QLineEdit()
+        self.font_filter_edit.setPlaceholderText("Filter fonts\u2026")
+        self.font_filter_edit.setClearButtonEnabled(True)
+        self.font_filter_edit.setToolTip(
+            "Type any part of a font name to filter the family list "
+            "(case-insensitive)."
+        )
+        self._font_proxy = QSortFilterProxyModel(self)
+        _font_source = self.font_combo.model()
+        _font_source.setParent(self._font_proxy)
+        self._font_proxy.setSourceModel(_font_source)
+        self._font_proxy.setFilterKeyColumn(0)
+        self._font_proxy.setFilterCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive
+        )
+        self.font_combo.setModel(self._font_proxy)
+        self.font_filter_edit.textChanged.connect(self._on_font_filter_changed)
+        form.addRow(self.font_filter_edit)  # directly above the Font row
         self.default_font_button = QToolButton()
         self.default_font_button.setText("Set as Default Font")
         self.default_font_button.setToolTip("Use this font for new boxes")
@@ -517,6 +556,9 @@ class InspectorPanel(QWidget):
         spurious-commit the just-loaded values back onto the pagebox). Hue-
         colours the Origin label per the box origin.
         """
+        # G-07-2: the font filter never leaks into a load — clearing it
+        # emits textChanged -> the proxy resets to the FULL family list.
+        self.font_filter_edit.clear()
         # Bubble # (None -> 0 as the unset sentinel; the field still enables).
         bubble = pagebox.bubble_no if pagebox.bubble_no is not None else 0
         was = self.bubble_spin.blockSignals(True)
@@ -600,6 +642,9 @@ class InspectorPanel(QWidget):
         vertical checkbox stay ENABLED (edit-all); the muted hint shows the
         exact selection count.
         """
+        # G-07-2: same as load_box — the filter never leaks into a
+        # multi-selection load (the combo population sees the full list).
+        self.font_filter_edit.clear()
         styles = [
             pb.style if pb.style is not None else TextStyle() for pb in pageboxes
         ]
@@ -949,6 +994,9 @@ class InspectorPanel(QWidget):
         selection (or the D-10 Mixed sentinel) never lingers into the next
         load (Pitfall 7 — the sentinel never survives a clear either).
         """
+        # G-07-2: the font filter resets with the empty state (the clear
+        # emits textChanged -> the proxy resets to the full family list).
+        self.font_filter_edit.clear()
         self.empty_label.setVisible(True)
         self.multi_hint_label.setVisible(False)
         self._load_style_section(TextStyle())
@@ -1141,6 +1189,35 @@ class InspectorPanel(QWidget):
             return  # the sentinel never leaves the widget layer (Pitfall 7)
         if family != self._loaded_style_font:
             on_style_font(family)
+
+    def _on_font_filter_changed(self, text: str) -> None:
+        """G-07-2: the live contains-match filter on the font dropdown.
+
+        ``text`` is escaped (``QRegularExpression.escape``) before it enters
+        the filter expression — user input is a literal substring, never
+        regex syntax (ASVS V5 / T-07-20). The proxy filters a VIEW of the
+        combo's own model; the source family list is never mutated
+        (Don't-Hand-Roll — QFontDatabase stays the single source).
+
+        The combo's signals are blocked around the update: the proxy's row
+        churn would otherwise move the combo's current index (rows above the
+        selection disappear) and re-emit ``currentTextChanged`` with a
+        DIFFERENT family — a spurious font commit on every keystroke. The
+        loaded family (or the 'Mixed' sentinel) is then restored to the
+        display so the selection never drifts while the user browses the
+        filtered list; the real commit still fires when the user PICKS a row.
+        """
+        self._font_proxy.setFilterRegularExpression(
+            QRegularExpression(
+                QRegularExpression.escape(text),
+                QRegularExpression.PatternOption.CaseInsensitiveOption,
+            )
+        )
+        family = self._loaded_style_font
+        if family:
+            was = self.font_combo.blockSignals(True)
+            self.font_combo.setCurrentText(family)
+            self.font_combo.blockSignals(was)
 
     def _on_default_font_clicked(self) -> None:
         """G-07-3: emit ``default_font_requested`` with the CURRENT combo family.
