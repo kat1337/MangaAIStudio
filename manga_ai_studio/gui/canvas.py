@@ -1492,6 +1492,11 @@ class EditorCanvas(QGraphicsView):
                 for it in selected_items:
                     self._scene.removeItem(it)
                     self._box_items.remove(it)
+                # Plan 07-06 (G-07-6): same graveyard retirement as the
+                # single-delete path — the group delete runs mid-event-loop
+                # with pending overlay updates; the wrapper release must be
+                # deferred past the flush (no drop-the-last-ref site remains).
+                self._retire_boxes(selected_items)
                 self._refresh_empty_box_hint()
                 self._pending_boxes_op_name = f"Deleted {len(selected_items)} boxes"
                 self._selection_order = []
@@ -2193,6 +2198,11 @@ class EditorCanvas(QGraphicsView):
 
         Silent (no confirm dialog) — the BOXES undo stack in plan 03-05
         recovers the box. Used by the Delete/Backspace key handler.
+
+        Plan 07-06 (G-07-6): the removed wrapper is retired to the graveyard
+        (deferred release) — the Delete key is hit mid-event-loop with the
+        same queued-update precondition as the undo path, so a synchronous
+        last-ref drop would delete the C++ item before the pending flush.
         """
         if item not in self._box_items:
             return
@@ -2201,6 +2211,7 @@ class EditorCanvas(QGraphicsView):
         before = self.boxes_snapshot()
         self._scene.removeItem(item)
         self._box_items.remove(item)
+        self._retire_boxes([item])
         self._refresh_empty_box_hint()
         # Plan 07-02: a removed box can no longer be the primary — promote the
         # last-selected remaining item (UI-SPEC §32) + re-assert handle
