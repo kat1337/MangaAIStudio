@@ -3056,6 +3056,24 @@ class MainWindow(QMainWindow):
             effect["dy"] = value
         pb.style = dreplace(style, **{key: effect})
 
+    def _replace_align(self, pb, *, align_h=None, align_v=None) -> None:
+        """Assign a fresh ``TextStyle`` with ONLY the changed align axes (G-07-7).
+
+        The align-Mixed override's commit carries ``None`` for an untouched
+        axis (the panel's sentinel->None translation — the ``_effect_payload``
+        mirror); ``None`` axes are SKIPPED so every box keeps its OWN value on
+        that axis (the WR-02 ``_replace_effect`` per-key preservation model).
+        A both-None call is a no-op (defensive — the panel's per-axis WR-01
+        guard already prevents it).
+        """
+        changes: dict = {}
+        if align_h is not None:
+            changes["align_h"] = align_h
+        if align_v is not None:
+            changes["align_v"] = align_v
+        if changes:
+            self._replace_style(pb, **changes)
+
     def _style_rendered_size(self, item) -> float:
         """The box's CURRENT rendered font size (A11 — renderer.layout's
         auto-fit result; the box's own manual size when it has one)."""
@@ -3124,9 +3142,12 @@ class MainWindow(QMainWindow):
             lambda item: self._replace_style(item.pagebox, color=color_hex)
         )
 
-    def _on_inspector_style_align_committed(self, h: str, v: str) -> None:
+    def _on_inspector_style_align_committed(self, h, v) -> None:
+        # G-07-7: h/v are model values with None = the untouched axis on a
+        # Mixed selection — _replace_align preserves each box's own value on
+        # the None axes (never a both-axes overwrite).
         self._inspector_style_commit(
-            lambda item: self._replace_style(item.pagebox, align_h=h, align_v=v)
+            lambda item: self._replace_align(item.pagebox, align_h=h, align_v=v)
         )
 
     def _on_inspector_style_effect_committed(self, key: str, changes: dict) -> None:

@@ -526,6 +526,66 @@ def test_mixed_sentinel_never_persists(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
+def test_mixed_align_override_commits_per_axis(qtbot, tmp_path) -> None:
+    """G-07-7 end-to-end: an override on a Mixed align state commits ONLY the
+    changed axis — every box keeps its OWN untouched axis; exactly ONE BOXES
+    emission; ONE Ctrl+Z restores both boxes' pre-commit aligns (the snapshot
+    carries the detached styles); the 'Mixed' sentinel never lands in any
+    TextStyle."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 20, 60, 60), Box(80, 20, 60, 60)]
+    )
+    # Both axes differ across the selection: box A (left, top), box B
+    # (right, bottom) -> both align combos go Mixed.
+    items[0].pagebox.style = TextStyle(align_h="left", align_v="top")
+    items[1].pagebox.style = TextStyle(align_h="right", align_v="bottom")
+    items[0].setSelected(True)
+    items[1].setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    assert panel._loaded_style_align_h == "Mixed"
+    assert panel._loaded_style_align_v == "Mixed"
+    # The real options stay selectable under the leading Mixed entry.
+    assert panel.align_v_combo.itemText(1) == "Top"
+
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    # Override ONLY align_v -> Bottom; align_h stays Mixed (untouched).
+    panel.align_v_combo.setCurrentText("Bottom")
+    QApplication.processEvents()
+
+    # The changed axis applies to BOTH boxes; each box keeps its OWN align_h.
+    assert items[0].pagebox.style.align_v == "bottom"
+    assert items[1].pagebox.style.align_v == "bottom"
+    assert items[0].pagebox.style.align_h == "left", (
+        "box A had align_h left — a vertical-only override must not clobber it"
+    )
+    assert items[1].pagebox.style.align_h == "right", (
+        "box B had align_h right — a vertical-only override must not clobber it"
+    )
+    assert len(emitted) == 1, (
+        "an align override must emit boxes_modified exactly once"
+    )
+
+    # Pitfall 7: no 'Mixed' sentinel persisted into any TextStyle.
+    for pb in window.canvas.boxes_snapshot():
+        d = pb.style.to_dict()
+        assert "Mixed" not in str(d), f"sentinel leaked into a TextStyle: {d}"
+
+    # ONE Ctrl+Z restores BOTH boxes' pre-commit aligns.
+    window.on_undo()
+    QApplication.processEvents()
+    restored = [it.pagebox for it in window.canvas._box_items]
+    assert restored[0].style.align_h == "left"
+    assert restored[0].style.align_v == "top"
+    assert restored[1].style.align_h == "right"
+    assert restored[1].style.align_v == "bottom"
+
+
+@pytest.mark.gui
 def test_mixed_effect_value_commit_preserves_per_box_enabled(qtbot, tmp_path) -> None:
     """WR-02: a VALUE-only commit on a MIXED effect row must NOT silently
     switch the effect on for every box — each box keeps its OWN enabled state
