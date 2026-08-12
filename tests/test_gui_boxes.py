@@ -35,12 +35,14 @@ from PySide6.QtWidgets import (  # noqa: E402
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.box_model import DETECTED, USER, PageBox  # noqa: E402
 from manga_ai_studio.core.mask_editor import ToolMode  # noqa: E402
+from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
 from panelcleaner.structures import Box  # noqa: E402
 
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle  # noqa: E402
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
 from manga_ai_studio.gui.inline_editor import InlineEditor  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
+from manga_ai_studio.gui.text_renderer import layout  # noqa: E402
 
 
 def _solid_pixmap(size: int, color: QColor) -> "QImage":  # type: ignore[name-defined]
@@ -1497,13 +1499,16 @@ def test_text_overlay_reposition_does_not_rebuild_document(qtbot) -> None:
 @pytest.mark.parametrize("zoom", [0.5, 1.0, 4.0])
 def test_text_overlay_size_is_zoom_independent_scene_px(qtbot, zoom) -> None:
     """apply_overlay_zoom does NOT re-derive the style: the rendered size stays
-    the scene-px Auto-fit base (14 for the reference box) at every zoom."""
+    the scene-px Auto-fit result for the reference box at every zoom — which
+    now GROWS above the 14 px base (G-07-4: the clamp is not a hard max)."""
     pb = _pagebox_with_text(recognized="hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
+    expected = layout("hello", TextStyle(), QRectF(20, 20, 200, 100)).used_font_size_px
+    assert expected > 14.0, "the reference box must grow above the 14 px base"
     item.apply_overlay_zoom(zoom)
     assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
-        14.0, abs=0.1
+        expected, abs=0.1
     )
 
 
@@ -1533,8 +1538,10 @@ def test_text_overlay_content_refresh_keeps_scene_px_style(qtbot) -> None:
     item.apply_overlay_zoom(0.5)
     pb.set_translation("hola")  # content change -> current focus flips
     item.refresh_text_overlay()
+    expected = layout("hola", TextStyle(), QRectF(20, 20, 200, 100)).used_font_size_px
+    assert expected > 14.0, "the refreshed text must re-fit and grow (G-07-4)"
     assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
-        14.0, abs=0.1
+        expected, abs=0.1
     )
     assert item._text_overlay.text() == "hola"
 
@@ -1548,9 +1555,11 @@ def test_zoom_changed_reapplies_overlay_style_canvas(qtbot) -> None:
     canvas.set_boxes(user_pageboxes=[], detected_pageboxes=[pb])
     item = canvas._box_items[0]
     assert item._text_overlay.text() == "hello"
+    expected = layout("hello", TextStyle(), QRectF(20, 20, 200, 100)).used_font_size_px
+    assert expected > 14.0, "the reference box must grow above the 14 px base"
     canvas._on_zoom_changed_reposition_handles(0.5)
     assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
-        14.0, abs=0.1
+        expected, abs=0.1
     )
     # The overlay must stay inside the box rect after the zoom re-apply.
     assert (
@@ -1590,7 +1599,7 @@ def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
 
 @pytest.mark.gui
 @pytest.mark.parametrize(
-    "box,expected_font",
+    "box,base",
     [
         # Box is (x1, y1, x2, y2): (20,20,220,120) -> 200x100 rect, min dim 100
         # -> base 14 (the UI-SPEC reference box).
@@ -1601,16 +1610,24 @@ def test_text_overlay_wraps_long_text_to_box_width(qtbot) -> None:
         (Box(20, 20, 320, 320), 28.0),
     ],
 )
-def test_text_overlay_font_adapts_to_box_size(qtbot, box, expected_font) -> None:
-    """The Auto-fit font is BOX-ADAPTIVE: 14 x min(box_w, box_h)/100, clamped [10,28]
-    at SCENE px (the 04-09 machinery preserved inside the shared renderer)."""
+def test_text_overlay_font_adapts_to_box_size(qtbot, box, base) -> None:
+    """The Auto-fit font is BOX-ADAPTIVE AND grows to fill (G-07-4): short
+    text renders ABOVE the 14 x min(box_w, box_h)/100 base (the [10,28] clamp
+    is the STARTING point, not a hard max), bounded by the per-box growth cap
+    min(inner_w, inner_h) at SCENE px (the 04-09 machinery preserved inside
+    the shared renderer)."""
     pb = PageBox(box=box, origin=DETECTED)
     pb.set_recognized_text("hello")
     _scene, item = _scene_with_box(pb)
     item.refresh_text_overlay()
-    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
-        expected_font, abs=0.1
+    used = item._text_overlay.layout_result.used_font_size_px
+    inner_w = max(1.0, box.x2 - box.x1 - 4.0)
+    inner_h = max(1.0, box.y2 - box.y1 - 4.0)
+    assert used > base, "short text must grow above the box-adaptive base"
+    assert used <= min(inner_w, inner_h) + 1e-6, (
+        "growth is capped at min(inner_w, inner_h)"
     )
+    assert item._text_overlay.layout_result.overflow is False
 
 
 @pytest.mark.gui
@@ -1639,8 +1656,9 @@ def test_resize_commit_rewraps_overlay_text_canvas(qtbot) -> None:
     """A resize COMMIT re-wraps/re-fits the overlay to the final rect (once per drag).
 
     _commit_resize must refresh the overlay after _sync_handles: after a
-    resize to (20,20,320,200) the Auto-fit base is 28 (min dim 200) — the
-    stale reference-box layout (14) must be gone.
+    resize to (20,20,320,200) the Auto-fit result grows past the old 28 px
+    clamp (min dim 200 -> base 28, then grow-while-fits, G-07-4) — the
+    stale reference-box layout must be gone.
     """
     canvas = _canvas_with_image_and_boxes(qtbot)
     pb = _pagebox_with_text(recognized="hello")
@@ -1651,11 +1669,14 @@ def test_resize_commit_rewraps_overlay_text_canvas(qtbot) -> None:
     canvas._boxes_interaction_start_snapshot = []
     item.setRect(QRectF(20, 20, 320, 200))
     canvas._commit_resize()
-    # min dim 200 -> base 28 (no shrink: "hello" is one line at 28px within
-    # the inner height 194).
-    assert item._text_overlay.layout_result.used_font_size_px == pytest.approx(
-        28.0, abs=0.1
+    # min dim 200 -> base 28, then growth: "hello" is one line at 28+ px
+    # within the inner height, so the size exceeds the old 28 px clamp.
+    used = item._text_overlay.layout_result.used_font_size_px
+    assert used > 28.0, "the resize commit must re-fit beyond the old clamp max"
+    assert used <= min(296.0, 176.0) + 1e-6, (
+        "growth is capped at min(inner_w, inner_h)"
     )
+    assert item._text_overlay.layout_result.overflow is False
 
 
 @pytest.mark.gui
