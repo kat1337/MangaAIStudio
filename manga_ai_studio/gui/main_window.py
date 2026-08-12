@@ -72,7 +72,7 @@ from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
 )
-from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.core.text_style import TextStyle, default_style
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
@@ -1875,6 +1875,17 @@ class MainWindow(QMainWindow):
 
         return QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
 
+    def _default_font_family(self) -> str:
+        """Read the persisted app-level default font family (G-07-3, plan 07-11).
+
+        Returns ``""`` when no family was ever saved — the empty-family
+        contract: the new-box creation sites map an empty read -> ``None`` ->
+        the renderer's ``TextStyle()`` defaults (Liberation Sans), keeping
+        today's behavior on a fresh install. ``str(... or "")`` coercion on
+        read (T-07-18): a garbage/absent value can never reach the factory.
+        """
+        return str(self._settings().value("defaultFontFamily", "") or "")
+
     def _recent_files(self) -> list[Path]:
         raw = self._settings().value("recentFiles", []) or []
         out: list[Path] = []
@@ -2763,6 +2774,11 @@ class MainWindow(QMainWindow):
             on_style_align=self._on_inspector_style_align_committed,
             on_style_effect=self._on_inspector_style_effect_committed,
         )
+        # G-07-3 (plan 07-11): the Set-as-Default affordance -> the
+        # 'defaultFontFamily' writer (the QSettings persistence chain).
+        self.inspector_panel.default_font_requested.connect(
+            self._on_inspector_default_font_requested
+        )
 
         # Edit-menu actions -> the two unified handlers.
         self.action_undo.triggered.connect(self.on_undo)
@@ -3154,6 +3170,18 @@ class MainWindow(QMainWindow):
         self._inspector_style_commit(
             lambda item: self._replace_effect(item.pagebox, key, changes)
         )
+
+    def _on_inspector_default_font_requested(self, family: str) -> None:
+        """G-07-3: persist the Set-as-Default family + flash the status.
+
+        The writer end of the 'defaultFontFamily' chain — the SAME
+        ``_settings()`` store as the recents (the convention is reused, not
+        duplicated). The family originates from the Inspector's QFontComboBox
+        real family list, never free text (T-07-18). Existing boxes are never
+        re-styled (D-06 flat per-box) — the default applies to NEW boxes only.
+        """
+        self._settings().setValue("defaultFontFamily", family)
+        self._show_transient_status(f"Default font: {family}")
 
     # ------------------------------------------------- font-size actions (D-16)
     def _on_font_size_delta(self, delta: int) -> None:

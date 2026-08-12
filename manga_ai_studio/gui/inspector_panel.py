@@ -282,6 +282,9 @@ class InspectorPanel(QWidget):
     style_color_changed = Signal(str)
     style_align_changed = Signal(object, object)  # (align_h, align_v) model values; None = untouched axis (G-07-7)
     style_effect_changed = Signal(str, dict)  # effect key + {enabled, color, value}
+    # G-07-3 (plan 07-11): the Set-as-Default affordance's family emission —
+    # MainWindow persists it under QSettings 'defaultFontFamily'.
+    default_font_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -370,9 +373,22 @@ class InspectorPanel(QWidget):
 
         # Font — QFontComboBox (Don't-Hand-Roll: system fonts + native preview,
         # RESEARCH §Don't Hand-Roll). Default "Liberation Sans" = TextStyle().
+        # G-07-3: the compact Set-as-Default QToolButton rides the same row —
+        # it emits the CURRENT combo family so MainWindow can persist the
+        # app-level default font (the user's 'select a default font' action).
         self.font_combo = QFontComboBox()
         self.font_combo.setToolTip("Font family for the selected box(es).")
-        form.addRow("Font", self.font_combo)
+        self.default_font_button = QToolButton()
+        self.default_font_button.setText("Set as Default Font")
+        self.default_font_button.setToolTip("Use this font for new boxes")
+        self.default_font_button.clicked.connect(self._on_default_font_clicked)
+        font_row = QWidget()
+        font_h = QHBoxLayout(font_row)
+        font_h.setContentsMargins(0, 0, 0, 0)
+        font_h.setSpacing(4)
+        font_h.addWidget(self.font_combo, 1)
+        font_h.addWidget(self.default_font_button)
+        form.addRow("Font", font_row)
 
         # Style — a per-family QComboBox (Regular/Italic/Bold/Bold Italic as
         # the font provides; repopulated on Font change — D-05).
@@ -969,6 +985,7 @@ class InspectorPanel(QWidget):
             self.translation_edit,
             self.vertical_check,
             self.font_combo,
+            self.default_font_button,
             self.style_combo,
             self.size_spin,
             self.auto_fit_check,
@@ -1124,6 +1141,19 @@ class InspectorPanel(QWidget):
             return  # the sentinel never leaves the widget layer (Pitfall 7)
         if family != self._loaded_style_font:
             on_style_font(family)
+
+    def _on_default_font_clicked(self) -> None:
+        """G-07-3: emit ``default_font_requested`` with the CURRENT combo family.
+
+        The Set-as-Default affordance is an explicit user action (no WR-01
+        no-op guard needed), but the 'Mixed' sentinel NEVER leaves the widget
+        layer (Pitfall 7) — a click while the combo shows Mixed (multi-select
+        with differing families) emits nothing. The family is always one of
+        the QFontComboBox's real families — never free text (T-07-18).
+        """
+        family = self.font_combo.currentText()
+        if family and family != "Mixed":
+            self.default_font_requested.emit(family)
 
     def _emit_style_font_style_if_changed(self, name: str, on_style_font_style) -> None:
         if name == "Mixed":

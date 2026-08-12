@@ -52,6 +52,20 @@ _ALIGN_H_VALUES = ("left", "center", "right")
 _ALIGN_V_VALUES = ("top", "middle", "bottom")
 
 
+def default_style(font_family: str | None = None) -> "TextStyle":
+    """The Qt-free factory for the app-level default font (G-07-3, plan 07-11).
+
+    ``None`` (or an empty string) -> the plain ``TextStyle()`` defaults
+    (Liberation Sans); a family -> the defaults with ONLY ``font_family``
+    overridden. QSettings stays GUI-side — the MainWindow reads
+    'defaultFontFamily' and passes the family string in here; core/ never
+    imports Qt. The new-box creation sites (user-drawn + detected) call this
+    factory when a family was saved, and pass ``None`` (style stays None,
+    the renderer's ``TextStyle()`` defaults apply) when none was.
+    """
+    return TextStyle(font_family=font_family or DEFAULT_FONT_FAMILY)
+
+
 def _clamp_float(value, lo: float, hi: float, default: float) -> float:
     """Coerce ``value`` to a float clamped into ``[lo, hi]``; non-numeric -> ``default``.
 
