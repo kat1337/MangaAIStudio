@@ -32,10 +32,12 @@ Mechanism notes (verified by probe on the pinned Python 3.14.2 / PySide6
   clip; the bake clips only at the page edge (the image's natural bound).
 
 Vertical (tategaki) mode (plan 07-03 Task 1 — D-11, the phase's highest-
-risk decision): ``layout(vertical=True)`` returns per-char placements
-(upright Han/Kana/vertical-form punctuation; halfwidth ASCII 0x21..0x7E
-plus the bracket/dash set rotate 90 deg clockwise — the W3C mixed
-orientation). Columns stack top-to-bottom, wrap at the inner height, and
+risk decision; G-07-1 user override): ``layout(vertical=True)`` returns
+per-char placements — Han/Kana, vertical-form punctuation, AND Latin
+letters/digits stay UPRIGHT (roman text stacks one letter above the
+other, the user override of the W3C rotated-Latin convention); halfwidth
+ASCII punctuation plus the bracket/dash set rotate 90 deg clockwise.
+Columns stack top-to-bottom, wrap at the inner height, and
 flow right-to-left (later chars at smaller x) from the box's right inner
 edge; each column is 1 em wide (the max char extent in the column), gap 0;
 every char is centered within its column. ``align_h`` shifts the column
@@ -104,12 +106,20 @@ _ALIGN_H_TO_QT = {
 
 # ---------------------------------------------------------------------------
 # Vertical (tategaki) classification constants (D-11 — RESEARCH Pattern 2,
-# Common Operation 2, verbatim). Orientation contract:
-#   - Upright:  Han/Kana + vertical-form punctuation (_ALIGN_CENTER).
-#   - Rotated 90 deg clockwise: halfwidth ASCII 0x21..0x7E + the
-#     bracket/dash set (W3C mixed orientation).
+# Common Operation 2, verbatim; G-07-1 user override). Orientation contract:
+#   - Upright:  Han/Kana + vertical-form punctuation (_ALIGN_CENTER) +
+#     Latin letters/digits (_ASCII_UPRIGHT — the user override of the W3C
+#     rotated-Latin convention: roman text stacks ONE letter above the other).
+#   - Rotated 90 deg clockwise: halfwidth ASCII punctuation (0x21..0x7E
+#     minus letters/digits) + the bracket/dash set (the typographic
+#     rotation convention).
 # ---------------------------------------------------------------------------
-_ASCII_ROTATE = set(chr(i) for i in range(0x21, 0x7F))
+_ASCII_UPRIGHT = (
+    set(chr(i) for i in range(0x30, 0x3A))  # digits 0-9
+    | set(chr(i) for i in range(0x41, 0x5B))  # A-Z
+    | set(chr(i) for i in range(0x61, 0x7B))  # a-z
+)
+_ASCII_ROTATE = set(chr(i) for i in range(0x21, 0x7F)) - _ASCII_UPRIGHT
 _ROTATE_EXTRA = {
     "「",
     "」",
@@ -136,10 +146,12 @@ _ALIGN_CENTER = {"。", "．", "，", "、", "·", "：", "；", "！", "？"}
 def char_rotates(ch: str) -> bool:
     """True when ``ch`` must be rotated 90 deg clockwise in vertical text.
 
-    Halfwidth ASCII (letters/digits/ASCII punctuation, 0x21..0x7E) and the
-    bracket/dash/ellipsis set rotate; Han/Kana and vertical-form punctuation
-    (the ``_ALIGN_CENTER`` set) stay upright. A multi-char string (or the
-    space 0x20) is False.
+    Halfwidth ASCII punctuation (0x21..0x7E minus letters/digits) and the
+    bracket/dash/ellipsis set rotate; Latin letters/digits stay UPRIGHT
+    (G-07-1 — the user override of the W3C rotated-Latin convention: roman
+    text stacks one letter above the other), as do Han/Kana and
+    vertical-form punctuation (the ``_ALIGN_CENTER`` set). A multi-char
+    string (or the space 0x20) is False.
     """
     if len(ch) != 1:
         return False
@@ -447,7 +459,9 @@ def layout_vertical(
     5 px floor — the horizontal machinery applied to vertical metrics).
 
     Classification and column rules: see the module docstring and
-    ``char_rotates``. Future polish (CONTEXT Deferred): kumimoji
+    ``char_rotates`` (G-07-1: Latin letters/digits stay upright, one above
+    the other — the user override of the W3C rotated convention). Future
+    polish (CONTEXT Deferred): kumimoji
     compression, tate-chu-yoko combining, RTL-script bottom-to-top flow.
     """
     if size_px is None:

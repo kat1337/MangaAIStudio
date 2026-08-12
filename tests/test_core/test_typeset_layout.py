@@ -200,10 +200,27 @@ def _assert_upright(p: dict) -> None:
 
 @pytest.mark.unit
 def test_vertical_classification(qapp) -> None:
-    """Halfwidth ASCII + brackets/dashes rotate 90 deg; CJK/kana and
-    vertical-form punctuation stay upright (W3C mixed orientation)."""
-    # Halfwidth ASCII 0x21..0x7E: letters, digits, ASCII punctuation.
-    ascii_rotate = [chr(i) for i in range(0x21, 0x7F)]
+    """G-07-1 (user override): Latin letters/digits stay UPRIGHT (one letter
+    above the other — the override of the W3C rotated-Latin convention);
+    halfwidth ASCII punctuation + brackets/dashes rotate 90 deg; CJK/kana
+    and vertical-form punctuation stay upright."""
+    # Letters and digits (0-9, A-Z, a-z) — UPRIGHT (G-07-1).
+    ascii_upright = (
+        [chr(i) for i in range(0x30, 0x3A)]
+        + [chr(i) for i in range(0x41, 0x5B)]
+        + [chr(i) for i in range(0x61, 0x7B)]
+    )
+    for ch in ascii_upright:
+        assert char_rotates(ch) is False, (
+            f"{ch!r} (0x{ord(ch):02X}) must stay upright (G-07-1)"
+        )
+    # Halfwidth ASCII punctuation (0x21..0x7E minus letters/digits) rotates.
+    ascii_rotate = [
+        chr(i)
+        for i in range(0x21, 0x7F)
+        if not (0x30 <= i <= 0x39 or 0x41 <= i <= 0x5A or 0x61 <= i <= 0x7A)
+    ]
+    assert ascii_rotate, "the punctuation-only rotate set must be non-empty"
     for ch in ascii_rotate:
         assert char_rotates(ch) is True, f"{ch!r} (0x{ord(ch):02X}) must rotate"
     # Bracket/dash/ellipsis set (fullwidth + halfwidth).
@@ -291,24 +308,61 @@ def test_vertical_wrap_at_height(qapp) -> None:
 
 @pytest.mark.unit
 def test_vertical_rotated_advance(qapp) -> None:
-    """A Latin char's placed box is TALLER than wide (rotated); a CJK char's
-    box is square-ish (upright); the per-char vertical advance is measured
-    along the box HEIGHT — never the width."""
-    style = TextStyle(font_size_px=14.0, auto_fit=False)
-    placements = layout_vertical("A1漢", style, 96.0, 96.0)
-    a, one, kan = placements[0], placements[1], placements[2]
-    assert a["rotate"] is True and one["rotate"] is True
-    assert a["h"] > a["w"], "Latin 'A' placed height must exceed its width"
-    assert one["h"] > one["w"], "Latin '1' placed height must exceed its width"
+    """G-07-1 (user override): Latin letters/digits place UPRIGHT — the
+    column extent is the char WIDTH (one letter above the other); a rotated
+    punctuation sample keeps the height > width + height-based-advance
+    assertions; CJK unchanged.
+
+    NOTE: the plan's literal "square-ish (w >= h - tolerance)" for upright
+    Latin does not hold on the real font stack — the Qt line-box height
+    (15.62 px) exceeds the advance width (A: 9.33 px) at 14 px, so upright
+    Latin is NEVER square-ish (07-03's CJK square assertion, 14 x 14, is the
+    only square geometry). The upright-vs-rotated observable IS the column
+    extent: upright chars contribute their WIDTH (extent = w -> the placed
+    box sits flush at the column's left edge, x == 0 with align_h left),
+    rotated chars contribute their HEIGHT (extent = h -> centered in a
+    height-wide column, x offset beyond the glyph's own width).
+    """
+    style = TextStyle(font_size_px=14.0, auto_fit=False, align_h="left")
+
+    # Upright Latin letters/digits: rotate False + width-based column extent.
+    for ch in ("A", "1"):
+        p = layout_vertical(ch, style, 96.0, 96.0)[0]
+        _assert_upright(p)
+        assert p["x"] == pytest.approx(0.0, abs=0.5), (
+            f"upright {ch!r}: the column extent is the char WIDTH (x=0), "
+            "not its height"
+        )
+
+    # Stacked A over 1: the vertical advance is the box HEIGHT.
+    stack = layout_vertical("A1", style, 96.0, 96.0)
+    assert stack[1]["y"] == pytest.approx(
+        stack[0]["y"] + stack[0]["h"], abs=0.5
+    )
+
+    # Rotated punctuation: extent = the char HEIGHT -> the column is
+    # height-wide, so the placed box centers with x offset beyond its width.
+    bang = layout_vertical("!", style, 96.0, 96.0)[0]
+    assert bang["rotate"] is True, "halfwidth ASCII punctuation ('!') rotates"
+    assert bang["h"] > bang["w"], "rotated '!' placed height must exceed its width"
+    assert bang["x"] > bang["w"], (
+        "a rotated char centers in a HEIGHT-wide column (x offset beyond "
+        "its own width)"
+    )
+
+    # The advance after a rotated char is measured along the HEIGHT, not the
+    # width; the CJK char stays upright + square-ish (unchanged).
+    mix = layout_vertical("!漢", style, 96.0, 96.0)
+    kan = mix[1]
+    assert mix[1]["y"] == pytest.approx(
+        mix[0]["y"] + mix[0]["h"], abs=0.5
+    )
+    assert mix[1]["y"] > mix[0]["y"] + mix[0]["w"], (
+        "the advance after a rotated char is measured along the HEIGHT, "
+        "not the width"
+    )
     _assert_upright(kan)
     assert kan["w"] >= kan["h"] - 1.5, "CJK char must be square-ish (width >= height)"
-    # The vertical step is the box HEIGHT (rotated advance along the height).
-    assert placements[1]["y"] == pytest.approx(
-        placements[0]["y"] + placements[0]["h"], abs=0.5
-    )
-    assert placements[1]["y"] > placements[0]["y"] + placements[0]["w"], (
-        "the advance is measured along the HEIGHT, not the width"
-    )
 
 
 # ---------------------------------------------------------------------------
