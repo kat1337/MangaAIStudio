@@ -928,3 +928,65 @@ def test_font_filter_contains_match(qtbot) -> None:
     assert panel._loaded_style_font == "Mixed"
     # The load clears the filter — it never leaks into a new selection.
     assert panel.font_filter_edit.text() == ""
+
+
+@pytest.mark.gui
+def test_font_filter_contains_match_scenario(qtbot) -> None:
+    """G-07-2 user-report shape: 'Wild Words' finds 'CC Wild Words'. Any
+    multi-word installed family is surfaced by its TRAILING word (the exact
+    start-of-name blind spot the user hit); the popup view shows the
+    filtered rows; and the filter is a first-class styling control —
+    disabled in the empty state, enabled with a selection, and its
+    filtering never disturbs the loaded family selection."""
+    from PySide6.QtGui import QFontDatabase
+
+    panel = _make_inspector(qtbot)
+    panel.clear()
+
+    # First-class control: disabled in the empty state (mirrors the other
+    # styling controls), with the copy-writing placeholder.
+    assert panel.font_filter_edit.isEnabled() is False
+    assert panel.font_filter_edit.placeholderText() == "Filter fonts\u2026"
+
+    # ...and enabled with a selection.
+    panel.load_box(_pagebox_with_style())
+    assert panel.font_filter_edit.isEnabled() is True
+    assert panel.font_combo.currentText() == "Liberation Sans"
+
+    # The 'Wild Words' -> 'CC Wild Words' shape: the trailing word of a
+    # multi-word family is a contains-match query, never a prefix.
+    families = QFontDatabase.families()
+    multi = [f for f in families if len(f.split()) > 1]
+    assert multi, "need a multi-word installed family for the scenario"
+    family = max(multi, key=len)
+    tail = family.split()[-1]
+    assert not family.startswith(tail), "the query must be a MID-name word"
+
+    full = panel._font_proxy.rowCount()
+    panel.font_filter_edit.setText(tail)
+    # The popup view is the proxy — it shows the filtered rows live (no
+    # explicit refresh needed on popup open).
+    view = panel.font_combo.view()
+    assert view.model() is panel._font_proxy
+    visible = [
+        view.model().data(view.model().index(r, 0))
+        for r in range(view.model().rowCount())
+    ]
+    assert len(visible) < full, "the filtered popup must shrink the list"
+    assert family in visible, "typing a mid-name word must surface its family"
+
+    # Filtering never disturbs the loaded family selection (the filter
+    # excludes Liberation Sans on this machine — either way the display
+    # stays on the loaded family, and no spurious commit can fire).
+    assert panel.font_combo.currentText() == "Liberation Sans"
+
+    # Clearing restores the full list and the loaded selection.
+    panel.font_filter_edit.setText("")
+    assert panel._font_proxy.rowCount() == full
+    assert panel.font_combo.currentText() == "Liberation Sans"
+
+    # A load clears a stale filter (it never leaks into a new selection).
+    panel.font_filter_edit.setText(tail)
+    panel.load_box(_pagebox_with_style())
+    assert panel.font_filter_edit.text() == ""
+    assert panel._font_proxy.rowCount() == full

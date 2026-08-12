@@ -1033,6 +1033,7 @@ class InspectorPanel(QWidget):
             self.translation_edit,
             self.vertical_check,
             self.font_combo,
+            self.font_filter_edit,
             self.default_font_button,
             self.style_combo,
             self.size_spin,
