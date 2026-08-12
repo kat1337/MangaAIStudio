@@ -4757,3 +4757,61 @@ def test_delete_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
     assert canvas.box_count() == 1
     restored = canvas._box_items[0].pagebox
     assert restored.style.color == "#00ff00"
+
+
+@pytest.mark.gui
+def test_graveyard_release_against_invalidated_wrapper_safe(
+    qtbot, tmp_path
+) -> None:
+    """WR-03 (07-REVIEW-GAPS): the graveyard release timer can fire against
+    a canvas wrapper whose C++ object was deleted at teardown (a box removal
+    followed by window close in the same event-loop iteration). The
+    ``Shiboken.isValid`` guard (the paint-path belt-and-suspenders pattern,
+    box_item.py) must skip the release instead of raising ``RuntimeError``
+    from inside the event loop — and must leave the dead wrapper's state
+    untouched (the alive path below still drains normally)."""
+    from PySide6 import Shiboken
+    from PySide6.QtCore import QTimer
+
+    window = _window_with_page(qtbot, tmp_path)
+    canvas = window.canvas
+    items = _seed_boxes_window(window, [Box(10, 20, 60, 60)])
+    del items
+
+    # A pending graveyard batch: retire a box WITHOUT letting the timer fire.
+    canvas._retire_boxes([canvas._box_items[0]])
+    assert canvas._graveyard_pending is True
+    assert len(canvas._box_graveyard) == 1
+
+    # Teardown: the canvas's C++ object is deleted by its QObject parent
+    # chain — the Python wrapper survives but is invalidated; the pending
+    # singleShot(0) will fire against it on the next event-loop iteration.
+    Shiboken.delete(canvas)
+    assert Shiboken.isValid(canvas) is False
+
+    # The direct callback must no-op — not raise — and must leave the dead
+    # wrapper's attributes untouched (the release is skipped entirely).
+    canvas._release_graveyard()
+    assert canvas._graveyard_pending is True
+    assert len(canvas._box_graveyard) == 1
+
+    # The timer path (the exact WR-03 shape): firing the 0ms timer against
+    # the invalidated wrapper raises no RuntimeError from the event loop.
+    QTimer.singleShot(0, canvas._release_graveyard)
+    QApplication.processEvents()
+
+    # The alive path is unchanged: a fresh canvas drains the graveyard on
+    # the next event-loop iteration (the 07-06 lifetime contract). The real
+    # removal site (``_remove_box``) drops the item from the scene + list
+    # and retires it — the graveyard holds the last ref through the flush.
+    window2 = _window_with_page(qtbot, tmp_path)
+    canvas2 = window2.canvas
+    items2 = _seed_boxes_window(window2, [Box(10, 20, 60, 60)])
+    wr = weakref.ref(items2[0])
+    del items2
+    canvas2._remove_box(canvas2._box_items[0])
+    assert wr() is not None, "the graveyard holds the removed wrapper"
+    QApplication.processEvents()
+    assert wr() is None, (
+        "the graveyard must still release wrappers on the alive path (WR-03)"
+    )

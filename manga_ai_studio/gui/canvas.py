@@ -33,6 +33,7 @@ from weakref import ref as _weakref
 
 import numpy as np
 
+from PySide6 import Shiboken
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -1677,7 +1678,17 @@ class EditorCanvas(QGraphicsView):
         Runs on the next event-loop iteration, AFTER the scene's queued
         UpdateRequests were flushed (they were posted before this timer), so
         no paint dispatch can land on an item whose C++ object dies here.
+
+        WR-03 (07-REVIEW-GAPS): belt-and-suspenders guard behind the timer —
+        the callback can fire against a wrapper invalidated at teardown (a
+        box removal followed by window close in the same event-loop
+        iteration), which would raise ``RuntimeError: Internal C++ object
+        already deleted`` from inside the event loop. The paint-path
+        ``Shiboken.isValid`` pattern (box_item.py) skips the release
+        entirely — the C++ object is gone, there is nothing left to drop.
         """
+        if not Shiboken.isValid(self):
+            return
         self._graveyard_pending = False
         self._box_graveyard.clear()
 
