@@ -17,6 +17,7 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - [x] Export cleaned raws as PNG/JPG — *Validated in Phase 2: Cleaning Output & Batch (single-page Export via Ctrl+E)*
 - [x] Dual-mode workflow: batch-process a whole chapter (clean + OCR), then open individual pages for per-page fixes, flipping freely — *Cleaning half validated in Phase 2 (Batch Detect / Batch Clean / Batch Detect+Clean + per-page mask persistence); OCR half pending later phases*
 - [x] Basic image operations: crop, rotate, levels/curves, resize — *Validated in Phase 5 (crop/rotate/levels/resize) + Phase 6 (full curve editor replacing the Levels dialog, PROJ-04)*
+- [x] Typeset translated text into the page with full styling controls (font selection incl. machine fonts, style, size + auto-fit, color, alignment, effects: outline/glow/shadow, vertical tategaki text, default font) with bake-to-image export — *Validated in Phase 7: Typesetting (TRAN-02)*
 
 ### Active
 
@@ -34,7 +35,7 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - Cloud sync / collaboration — single-user desktop app
 - Mobile app — desktop only
 - Re-OCR of an existing mokuro `_ocr.json` without image reprocessing — out of v1, can be revisited
-- Typesetting engine (auto-fit, vertical text, font management, bubble auto-sizing) — text is positioned in boxes; advanced typesetting is v2+
+- Advanced typesetting beyond Phase 7's delivery (bubble auto-sizing / auto-layout, font management / bundled fonts, kumimoji-depth vertical typography, per-line styling, MT integration) — text is positioned in boxes and basic typesetting is delivered (Phase 7); the rest is v2+
 
 ## Context
 
@@ -106,4 +107,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-09 after Phase 6 (Refinement & Polish) completion*
+*Last updated: 2026-08-12 after Phase 7 (Typesetting, TRAN-02) completion*
