@@ -1,9 +1,9 @@
 ---
-status: diagnosed
+status: complete
 phase: 07-typesetting-tran-02-render-translated-text-into-the-page
 source: [07-VERIFICATION.md]
 started: 2026-08-12T00:09:47Z
-updated: 2026-08-12T01:00:00Z
+updated: 2026-08-12T05:45:00Z
 ---
 
 ## Current Test
@@ -51,7 +51,9 @@ blocked: 0
 
 - gap_id: G-07-1
   truth: "Vertical mode renders Roman text upright, one letter above the other (not rotated 90°); detected-vertical or detected-horizontal text renders horizontally by default"
-  status: failed
+  status: resolved
+  resolved_by: 07-07-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: when vertical is enabled, roman text should render one letter above the other, not just rotated 90 degrees; rendering should be horizontal by default regardless of detected orientation"
   severity: major
   test: 1
@@ -71,7 +73,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-typeset-gaps-a-e.md"
 - gap_id: G-07-2
   truth: "Font dropdown search matches substring (INCLUDE) — typing part of a font name finds it (e.g. 'Wild Words' finds 'CC Wild Words')"
-  status: failed
+  status: resolved
+  resolved_by: 07-12-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported (clarified): machine fonts ARE usable; the dropdown search is weird because it won't search 'CC Wild Words' for 'Wild Words' — a contains-match search option is the stopgap"
   severity: minor
   test: 1
@@ -84,7 +88,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-typeset-gaps-a-e.md"
 - gap_id: G-07-3
   truth: "User can select a default font (app-level default, applied to new boxes)"
-  status: failed
+  status: resolved
+  resolved_by: 07-11-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: it should let me select a default font"
   severity: major
   test: 1
@@ -101,7 +107,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-typeset-gaps-a-e.md"
 - gap_id: G-07-4
   truth: "Auto-fit grows text to fit the box (big enough to fill, within bounds) — not tiny text in a large box"
-  status: failed
+  status: resolved
+  resolved_by: 07-10-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: Autofit should make the text big enough to fit not just tiny text in a massive box"
   severity: minor
   test: 2
@@ -114,7 +122,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-typeset-gaps-a-e.md"
 - gap_id: G-07-5
   truth: "Vertical alignment (align V) applies to horizontal text"
-  status: failed
+  status: resolved
+  resolved_by: 07-08-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: align V doesn't work with horizontal text"
   severity: major
   test: 2
@@ -128,7 +138,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-typeset-gaps-a-e.md"
 - gap_id: G-07-6
   truth: "Ctrl+Z (undo) never crashes the app"
-  status: failed
+  status: resolved
+  resolved_by: 07-06-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: the app crashed when pressing ctrl z"
   severity: blocker
   test: 3
@@ -147,7 +159,9 @@ blocked: 0
   debug_session: ".planning/debug/phase7-ctrl-z-crash.md"
 - gap_id: G-07-7
   truth: "Mixed align V state can be overridden in multi-select (commit applies the override to all selected)"
-  status: failed
+  status: resolved
+  resolved_by: 07-09-PLAN.md
+  resolved_at: 2026-08-12
   reason: "User reported: align V doesn't allow me to override, it just says mixed, selected all horizontal boxes"
   severity: major
   test: 3
