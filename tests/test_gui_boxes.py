@@ -1232,6 +1232,161 @@ def test_text_overlay_pixmap_matches_bake_at_scene_position(qtbot) -> None:
     )
 
 
+# -- Plan 07-08 (G-07-5): align_v applies to horizontal text on the canvas --
+# The renderer computes the align_v dy correctly (layout() rides it on
+# result.origin.y), but TypesetOverlayItem.set_content CANCELS result.origin in
+# full and re-derives _ink_offset from the doc-local ink rect — the dy is
+# dropped on canvas (the bake keeps it -> canvas != bake for align_v != top).
+# The fix adds the box-relative origin delta back into _ink_offset.y
+# (dy = origin.y - box.y - inset); the vertical path's origin carries no dy so
+# the term is exactly 0 there. All existing equivalence tests used align_v="top"
+# (dy = 0) — the blind spot these tests close. Manual sizes (font_size_px set,
+# auto_fit False) keep the geometry independent of the plan 07-10 grow-to-fit
+# change.
+
+
+def _overlay_align_v_pixel_equals_bake(
+    align_v: str, align_h: str = "left"
+) -> tuple[bool, str]:
+    """Composite the overlay pixmap at its scene position onto a page QImage
+    and compare the OPAQUE glyph pixels against ``bake_typeset_page``.
+
+    Returns ``(ok, reason)`` — the D-01 canvas≡bake check at the OVERLAY level
+    (the renderer-level twin test_canvas_style_paint_equals_bake_pixels never
+    instantiates the overlay, so it cannot catch the set_content dy drop).
+    """
+    import numpy as np
+
+    from PySide6.QtGui import QPainter
+
+    from manga_ai_studio.core.text_style import TextStyle
+    from manga_ai_studio.gui.text_renderer import (
+        bake_typeset_page,
+        numpy_to_qimage,
+        qimage_to_numpy,
+    )
+
+    style = TextStyle(
+        font_size_px=14.0,
+        auto_fit=False,
+        align_h=align_h,
+        align_v=align_v,
+        outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+    )
+    page = np.full((200, 300, 3), (30, 40, 50), dtype=np.uint8)
+    pb = PageBox(box=Box(40, 30, 140, 90), origin=DETECTED, style=style)
+    pb.set_translation("Hello")
+
+    baked = bake_typeset_page(page, [pb])
+
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay = item._text_overlay
+    assert overlay.pixmap() is not None
+    pm = overlay.pixmap().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    alpha = np.frombuffer(bytes(pm.bits()), dtype=np.uint8).reshape(
+        pm.height(), pm.width(), 4
+    )[..., 3]
+
+    qimg = numpy_to_qimage(page).copy()
+    painter = QPainter(qimg)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.drawPixmap(overlay.pos(), overlay.pixmap())
+    painter.end()
+    canvas_arr = qimage_to_numpy(qimg)
+
+    pos = overlay.pos()
+    pi, pj = int(round(pos.x())), int(round(pos.y()))
+    opaque = alpha == 255
+    if not opaque.any():
+        return False, "the overlay pixmap must carry opaque glyph interior pixels"
+    oy, ox = np.nonzero(opaque)
+    if not np.array_equal(canvas_arr[oy + pj, ox + pi], baked[oy + pj, ox + pi]):
+        return (
+            False,
+            "opaque overlay pixels composited at the scene position differ "
+            "from the bake — the align_v dy was dropped by set_content "
+            "(G-07-5: canvas shows top-aligned, bake paints "
+            f"{align_v}-aligned)",
+        )
+    return True, ""
+
+
+@pytest.mark.gui
+def test_overlay_align_v_preserves_dy(qtbot) -> None:
+    """G-07-5 unit contract: ``_ink_offset.y()`` carries the layout's own
+    align_v origin delta.
+
+    ``bottom`` -> ``_ink_offset.y() == ink.top() - pad + dy`` with
+    ``dy = origin.y - box.y - inset > 0``; ``top`` -> ``dy == 0`` (the
+    historical, blind-spot case); the vertical (tategaki) path -> the layout
+    origin carries NO dy, so the term is exactly 0 (no behavior change).
+    RED before the fix: the bottom/middle cases equal the top-case value (the
+    dy is dropped by set_content's origin-cancel).
+    """
+    from manga_ai_studio.core.text_style import TextStyle
+    from manga_ai_studio.gui.text_renderer import (
+        _OVERLAY_INSET,
+        effect_padding,
+        layout as renderer_layout,
+    )
+
+    cases = [
+        # (align_v, vertical, expect_dy_zero)
+        ("bottom", False, False),
+        ("middle", False, False),
+        ("top", False, True),
+        ("bottom", True, True),  # vertical origin carries no dy
+    ]
+    for align_v, vertical, expect_dy_zero in cases:
+        style = TextStyle(
+            font_size_px=14.0,
+            auto_fit=False,
+            align_h="left",
+            align_v=align_v,
+            vertical=vertical,
+            outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+        )
+        pb = PageBox(box=Box(40, 30, 140, 90), origin=DETECTED, style=style)
+        pb.set_translation("Hello")
+        _scene, item = _scene_with_box(pb)
+        item.refresh_text_overlay()
+        overlay = item._text_overlay
+
+        # The reference: the layout's OWN origin delta (the renderer contract
+        # the overlay must preserve through the origin-cancel).
+        result = renderer_layout("Hello", style, item.rect(), vertical=vertical)
+        pad = effect_padding(style)
+        dy = result.origin.y() - item.rect().y() - _OVERLAY_INSET
+        expected = result.ink.top() - pad + dy
+
+        assert dy == pytest.approx(0.0, abs=1e-6) if expect_dy_zero else dy > 0.0, (
+            f"precondition: align_v={align_v!r} vertical={vertical} must yield "
+            f"dy={dy} ({'zero — the blind-spot case' if expect_dy_zero else 'non-zero — the G-07-5 case'})"
+        )
+        assert overlay._ink_offset.y() == pytest.approx(expected, abs=1e-6), (
+            f"align_v={align_v!r} vertical={vertical}: _ink_offset.y() must "
+            f"carry the layout dy ({expected}); got "
+            f"{overlay._ink_offset.y()} — set_content's origin-cancel dropped "
+            "the align_v dy (G-07-5)"
+        )
+
+
+@pytest.mark.gui
+def test_overlay_align_v_bottom_and_middle_equals_bake_pixels(qtbot) -> None:
+    """G-07-5 pixel contract (D-01): for align_v=bottom AND middle the overlay
+    composited at its scene position matches the bake in the ink region.
+
+    The historical equivalence tests all used align_v="top" (dy=0) — the blind
+    spot that let the set_content dy drop through. RED before the fix: the
+    overlay ink sits at the box top while the bake paints bottom/middle.
+    """
+    ok, reason = _overlay_align_v_pixel_equals_bake("bottom")
+    assert ok, f"align_v=bottom: {reason}"
+    ok, reason = _overlay_align_v_pixel_equals_bake("middle")
+    assert ok, f"align_v=middle: {reason}"
+
+
 # -- UAT test 1 gap closure (plan 04-08): overlay geometry tracking (RC-1) --
 # The overlay child must track the box through the canvas geometry paths. The
 # canvas moves/resizes boxes via setRect + _sync_handles (canvas.py:1022-1023,
