@@ -863,3 +863,68 @@ def test_new_user_box_keeps_style_none_without_key(
 
     assert canvas.box_count() == 1
     assert canvas._box_items[0].pagebox.style is None
+
+
+# ===========================================================================
+# G-07-2 — the font dropdown contains filter (plan 07-12)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_font_filter_contains_match(qtbot) -> None:
+    """G-07-2: the font dropdown filter matches SUBSTRINGS — typing a
+    mid-name word finds its family ('Wild Words' finds 'CC Wild Words'
+    shape, driven on the REAL installed font DB: the longest installed
+    family is found by its TRAILING word, which the built-in start-of-name
+    search can never match). The filter is case-insensitive; clearing
+    restores the full family list; the 'Mixed' load path keeps working with
+    the proxy installed."""
+    from PySide6.QtGui import QFontDatabase
+
+    panel = _make_inspector(qtbot)
+
+    families = QFontDatabase.families()
+    assert families, "the real font database must be populated"
+    longest = max(families, key=len)
+    words = longest.split()
+    assert len(words) > 1, "need a multi-word family for a mid-name query"
+    query = words[-1]  # NOT a prefix of the family — start-of-name blind spot
+
+    full = panel._font_proxy.rowCount()
+    assert full == len(families), "the proxy must wrap the full family list"
+
+    # A mid-name substring filters the list down AND keeps the target family.
+    panel.font_filter_edit.setText(query)
+    filtered = panel._font_proxy.rowCount()
+    assert filtered < full, "the contains filter must shrink the list"
+    visible = [
+        panel._font_proxy.data(panel._font_proxy.index(r, 0))
+        for r in range(filtered)
+    ]
+    assert longest in visible, (
+        "typing a mid-name substring must find its family (contains match)"
+    )
+
+    # Case-insensitive: a case-shifted query still finds the family.
+    panel.font_filter_edit.setText(query.swapcase())
+    assert panel._font_proxy.rowCount() == filtered
+    visible = [
+        panel._font_proxy.data(panel._font_proxy.index(r, 0))
+        for r in range(panel._font_proxy.rowCount())
+    ]
+    assert longest in visible, "the filter must be case-insensitive"
+
+    # Clearing the filter restores the FULL family list.
+    panel.font_filter_edit.setText("")
+    assert panel._font_proxy.rowCount() == full
+
+    # The 'Mixed' load path keeps working with the proxy installed
+    # (07-09's mixed combos: differing fonts -> the Mixed sentinel).
+    panel.load_multi_selection([
+        _pagebox_with_style(font_family="Arial"),
+        _pagebox_with_style(font_family="Bahnschrift"),
+    ])
+    assert panel.font_combo.currentText() == "Mixed"
+    assert panel._loaded_style_font == "Mixed"
+    # The load clears the filter — it never leaks into a new selection.
+    assert panel.font_filter_edit.text() == ""
