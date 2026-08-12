@@ -319,7 +319,10 @@ class TypesetOverlayItem(QGraphicsItem):
         self._pixmap: QPixmap | None = None
         self.layout_result: LayoutResult | None = None
         # The padded ink top-left in inner-rect coordinates (used by the
-        # setPos-only refresh_position).
+        # setPos-only refresh_position). Since plan 07-08 (G-07-5) it also
+        # carries the align_v dy (the box-relative origin delta), so the
+        # setPos-only reposition rides the dy through every move/resize/zoom
+        # without a re-layout (RC-1).
         self._ink_offset = QPointF(0.0, 0.0)
 
     # ------------------------------------------------------------ geometry
@@ -402,7 +405,17 @@ class TypesetOverlayItem(QGraphicsItem):
         renderer_paint(painter, result, style)
         painter.end()
         self._pixmap = QPixmap.fromImage(qimg)
-        self._ink_offset = QPointF(ink.left() - pad, ink.top() - pad)
+        # G-07-5 (plan 07-08): the origin-cancel translate above cancels the
+        # layout origin IN FULL, but the align_v dy rides that origin (the
+        # renderer offsets horizontal blocks top/middle/bottom via
+        # result.origin.y). Re-add the box-relative origin delta to the ink
+        # offset so the overlay sits exactly where the bake paints for
+        # align_v != top (D-01 canvas ≡ bake). The vertical path's origin
+        # carries no dy (origin.y == box.y + inset — text_renderer
+        # :func:`_layout_vertical_result`), so dy is exactly 0 there and the
+        # tategaki geometry is byte-unchanged.
+        dy = result.origin.y() - box_rect.y() - _OVERLAY_INSET
+        self._ink_offset = QPointF(ink.left() - pad, ink.top() - pad + dy)
         self.update()
 
     def refresh_position(self, box_rect: QRectF, inset: float) -> None:
