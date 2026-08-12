@@ -46,6 +46,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from PySide6 import Shiboken
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (
     QBrush,
@@ -329,7 +330,16 @@ class TypesetOverlayItem(QGraphicsItem):
         return QRectF(QPointF(0.0, 0.0), QSizeF(self._pixmap.size()))
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: D401
-        """Blit the cached pixmap (opaque glyphs composite over the page)."""
+        """Blit the cached pixmap (opaque glyphs composite over the page).
+
+        Plan 07-06 (G-07-6): belt-and-suspenders guard behind the canvas
+        graveyard (the load-bearing fix). If a paint is ever dispatched to a
+        wrapper whose C++ object is gone (a teardown race that the graveyard
+        makes unreachable), this no-ops BEFORE touching ``self._pixmap`` —
+        a stale draw from a freed pixmap is the 0xC0000409 crash line.
+        """
+        if not Shiboken.isValid(self):
+            return
         if self._pixmap is not None:
             painter.drawPixmap(QPointF(0.0, 0.0), self._pixmap)
 

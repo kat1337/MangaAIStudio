@@ -33,7 +33,7 @@ from weakref import ref as _weakref
 
 import numpy as np
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -221,6 +221,14 @@ class EditorCanvas(QGraphicsView):
         self.box_layer.setZValue(BOX_LAYER_Z)
         self._scene.addItem(self.box_layer)
         self._box_items: list[BoxItem] = []  # live box layer membership
+        # Plan 07-06 (G-07-6 blocker): removed BoxItems awaiting DEFERRED
+        # release (see _retire_boxes / _release_graveyard — the teardown-UAF
+        # fix). Removal sites must never drop the last Python refs to a
+        # removed item synchronously mid-event-loop; the graveyard holds them
+        # until the zero-timeout release timer fires (after the scene's
+        # pending UpdateRequest flush).
+        self._box_graveyard: list[BoxItem] = []
+        self._graveyard_pending = False
         self.empty_box_hint = QGraphicsTextItem(_EMPTY_BOX_HINT_TEXT)
         self.empty_box_hint.setDefaultTextColor(QColor("#9a9aa2"))
         hint_font = QFont("Segoe UI", 10)  # ~12px at 96 DPI
@@ -1619,6 +1627,47 @@ class EditorCanvas(QGraphicsView):
 
     # ============================================================== Phase 3
     # ------------------------------------------------------------- box layer
+    # Plan 07-06 (G-07-6 blocker) — the graveyard: DEFERRED deletion of
+    # removed BoxItems.
+    #
+    # The teardown UAF: removal sites (set_boxes, _remove_box, the multi-select
+    # Delete branch) drop the last Python refs to BoxItems mid-event-loop while
+    # the scene still holds pending UpdateRequests referencing their overlay
+    # children (TypesetOverlayItem.set_content -> self.update(), queued by the
+    # last style commit). Shiboken then synchronously deletes the C++ items,
+    # and the next flush dispatches paint() to a freed TypesetOverlayItem ->
+    # pure-virtual call -> abort (0xC0000409, G-07-6). The graveyard holds the
+    # removed wrappers and releases them via a zero-delay ``QTimer.singleShot``
+    # callback: the
+    # scene's update request was queued BEFORE our release timer (at
+    # update()-time), so the pending flush always paints LIVE items and the
+    # refs drop only on the next event-loop iteration — after the updates
+    # referencing them were processed.
+    def _retire_boxes(self, items: list) -> None:
+        """Hold ``items`` in the graveyard; schedule ONE deferred release.
+
+        ``_graveyard_pending`` guarantees at most one outstanding zero-timeout
+        timer — items enqueued before the timer fires simply join the same
+        batch, and the single release clears the whole graveyard.
+        """
+        if not items:
+            return
+        self._box_graveyard.extend(items)
+        if self._graveyard_pending:
+            return
+        self._graveyard_pending = True
+        QTimer.singleShot(0, self._release_graveyard)
+
+    def _release_graveyard(self) -> None:
+        """Drop the graveyard's refs — the singleShot(0) timer callback.
+
+        Runs on the next event-loop iteration, AFTER the scene's queued
+        UpdateRequests were flushed (they were posted before this timer), so
+        no paint dispatch can land on an item whose C++ object dies here.
+        """
+        self._graveyard_pending = False
+        self._box_graveyard.clear()
+
     def set_boxes(
         self,
         user_pageboxes: list[PageBox],
@@ -1646,10 +1695,18 @@ class EditorCanvas(QGraphicsView):
         # test or future caller drives set_boxes as a user edit. Mirrors the
         # image side's pre-edit push contract.
         before = self.boxes_snapshot()
-        # Remove existing items from the scene + the list.
-        for item in self._box_items:
-            self._scene.removeItem(item)
+        # Remove existing items from the scene. Plan 07-06 (G-07-6): retire
+        # the removed wrappers to the graveyard instead of dropping the last
+        # refs synchronously — set_boxes runs mid-event-loop (Ctrl+Z /
+        # restore / page switch) and pending scene UpdateRequests from the
+        # last style commit still reference the overlay children; a
+        # synchronous last-ref drop would delete the C++ items before the
+        # flush and paint() would dispatch to freed objects (0xC0000409).
+        removed = self._box_items
         self._box_items = []
+        for item in removed:
+            self._scene.removeItem(item)
+        self._retire_boxes(removed)
         # Plan 07-02 (D-08): the layer rebuild resets the multi-select state.
         self._selection_order = []
         self._primary_box = None
