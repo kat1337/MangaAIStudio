@@ -483,22 +483,41 @@ def _vertical_fit_size(
     Fit = the layout's column count <= floor(inner_w / 1 em) AND the run's
     vertical extent fits inner_h. Same machinery as the horizontal loop:
     box-adaptive base (the box dims = the inner dims + the constant inset),
-    [10,28] clamp, 12 x 0.9 iterations, 5 px floor checked at the loop TOP
-    (no iteration renders below it).
+    [10,28] clamp as the STARTING target, then grow-while-fits-with-cap
+    (G-07-4: ``grow_cap = min(inner_w, inner_h)``, ``_OVERLAY_FIT_GROW_STEP``
+    — the clamp is not a hard max); a text that never fits at the base
+    follows the exact old shrink path (12 x 0.9, 5 px floor checked at the
+    loop TOP — no iteration renders below it).
     """
     box_w = inner_w + 2.0 * _OVERLAY_INSET
     box_h = inner_h + 2.0 * _OVERLAY_INSET
     base = _OVERLAY_FONT_BASE * min(box_w, box_h) / _OVERLAY_BOX_REF_DIM
     target = min(_BASE_CLAMP_MAX, max(_BASE_CLAMP_MIN, base))
+    grow_cap = min(inner_w, inner_h)
+    size = target
+    fit_held = False
     for _ in range(_OVERLAY_FIT_MAX_ITERS):
+        # Floor check at the loop TOP — no iteration renders below it.
         if target <= _OVERLAY_FIT_FLOOR_PX:
             break
         _, ncols, _, block_h = _vertical_placements(text, style, inner_w, inner_h, target)
         max_cols = max(1, int(inner_w // target))
         if ncols <= max_cols and block_h <= inner_h + _EPS:
-            break
-        target *= _OVERLAY_FIT_STEP
-    return target
+            # Fits: keep the last-fitting candidate, then grow (bounded by
+            # the cap — same cap/iteration rules as the horizontal loop).
+            size = target
+            fit_held = True
+            if target >= grow_cap - _EPS:
+                break
+            target = min(grow_cap, target * _OVERLAY_FIT_GROW_STEP)
+        else:
+            # Does not fit: after growth, keep the last fit; from the base,
+            # the old shrink path (byte-equivalent when the base never fits).
+            if fit_held:
+                break
+            size = target
+            target *= _OVERLAY_FIT_STEP
+    return size
 
 
 # ---------------------------------------------------------------------------
