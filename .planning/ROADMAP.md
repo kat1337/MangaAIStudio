@@ -309,7 +309,7 @@ Plans:
 
 **Requirements**: TRAN-02 (currently deferred v2 line in REQUIREMENTS.md)
 **Depends on:** Phase 4, Phase 5
-**Plans:** 12/12 plans executed
+**Plans:** 12/12 plans complete
 
 Plans:
 
