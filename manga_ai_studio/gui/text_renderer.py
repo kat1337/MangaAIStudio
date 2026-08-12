@@ -91,6 +91,7 @@ _OVERLAY_FONT_BASE = 14.0  # scene-px base for the UI-SPEC reference box
 _OVERLAY_BOX_REF_DIM = 100.0  # the reference box min dimension
 _OVERLAY_FIT_MAX_ITERS = 12  # bounded shrink loop
 _OVERLAY_FIT_STEP = 0.9  # per-iteration reduction factor
+_OVERLAY_FIT_GROW_STEP = 1.1  # per-iteration growth factor (G-07-4)
 _OVERLAY_FIT_FLOOR_PX = 5.0  # hard floor, checked at the loop TOP
 _BASE_CLAMP_MIN = 10.0  # [10, 28] base clamp (UI-SPEC A2)
 _BASE_CLAMP_MAX = 28.0
@@ -548,26 +549,43 @@ def layout(
         doc = _build_document(text, style, size, inner_w)
         overflow = doc.size().height() > inner_h + _EPS
     else:
-        # Auto-fit (D-15): box-adaptive base + [10,28] clamp + bounded shrink.
+        # Auto-fit (D-15 / G-07-4): box-adaptive base + [10,28] clamp as the
+        # STARTING target, then grow-while-fits-with-cap — the base clamp is
+        # no longer a hard max. A text that never fits at the base follows
+        # the exact old shrink path (12 x 0.9, 5 px floor at the loop TOP).
         base = (
             _OVERLAY_FONT_BASE
             * min(box_rect.width(), box_rect.height())
             / _OVERLAY_BOX_REF_DIM
         )
         target = min(_BASE_CLAMP_MAX, max(_BASE_CLAMP_MIN, base))
+        grow_cap = min(inner_w, inner_h)
         doc = None
         size = target
         overflow = True
+        fit_held = False
         for _ in range(_OVERLAY_FIT_MAX_ITERS):
             # Floor check at the loop TOP — no iteration renders below it.
             if target <= _OVERLAY_FIT_FLOOR_PX:
                 break
             candidate = _build_document(text, style, target, inner_w)
-            doc, size = candidate, target
             if candidate.size().height() <= inner_h + _EPS:
+                # Fits: keep the last-fitting candidate, then grow (bounded
+                # by the cap — the fit check and the cap share the inner box).
+                doc, size = candidate, target
                 overflow = False
-                break
-            target *= _OVERLAY_FIT_STEP
+                fit_held = True
+                if target >= grow_cap - _EPS:
+                    break
+                target = min(grow_cap, target * _OVERLAY_FIT_GROW_STEP)
+            else:
+                # Does not fit: after growth, keep the last fit (never a
+                # shrink fall-through); from the base, the old shrink path.
+                if fit_held:
+                    break
+                doc, size = candidate, target
+                overflow = True
+                target *= _OVERLAY_FIT_STEP
 
     used_size = float(max(1, int(round(size))))
     block_h = doc.size().height()
