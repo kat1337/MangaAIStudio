@@ -457,11 +457,19 @@ def test_vertical_centering_and_alignment(qapp) -> None:
 @pytest.mark.unit
 def test_vertical_auto_fit(qapp) -> None:
     """The vertical fit loop operates on the column count (floor(inner_w /
-    1 em)) and the run's vertical extent; a long text floors at 5 px like the
-    horizontal loop (A8)."""
-    # 5 CJK chars in a 200x100 box: 1 column at the 14 px base -> fits, no shrink.
+    1 em)) and the run's vertical extent; short text GROWS above the base
+    (G-07-4, capped at min(inner_w, inner_h)); a long text floors at 5 px
+    like the horizontal loop (A8)."""
+    # 5 CJK chars in a 200x100 box: 1 column at the 14 px base -> fits, and
+    # the grow phase enlarges it above the base (capped, no overflow).
     result = layout("あ" * 5, TextStyle(), QRectF(0, 0, 200, 100), vertical=True)
-    assert result.used_font_size_px == pytest.approx(14.0, abs=0.1)
+    inner_w, inner_h = _inner(200, 100)
+    assert result.used_font_size_px > 14.0, (
+        "the vertical Auto-fit must grow short text above the 14 px base"
+    )
+    assert result.used_font_size_px <= min(inner_w, inner_h) + 1e-6, (
+        "vertical growth is capped at min(inner_w, inner_h)"
+    )
     assert result.overflow is False
     assert len(result.vertical_placements) == 5
     # 2000 chars in a 200x60 box: the bounded loop terminates and never
