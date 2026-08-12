@@ -280,7 +280,7 @@ class InspectorPanel(QWidget):
     style_size_changed = Signal(int)  # 0 = the "Auto" sentinel (D-15)
     style_auto_fit_changed = Signal(bool)
     style_color_changed = Signal(str)
-    style_align_changed = Signal(str, str)  # (align_h, align_v) model values
+    style_align_changed = Signal(object, object)  # (align_h, align_v) model values; None = untouched axis (G-07-7)
     style_effect_changed = Signal(str, dict)  # effect key + {enabled, color, value}
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -670,7 +670,9 @@ class InspectorPanel(QWidget):
             self._loaded_style_color = None
             self._set_swatch_color(self.color_swatch, None)
 
-        # Aligns.
+        # Aligns. A differing axis shows the leading "Mixed" entry AND keeps
+        # the real options selectable (G-07-7 — the override must be pickable);
+        # a uniform axis shows the plain real-item list, never Mixed.
         aligns_h = {s.align_h for s in styles}
         aligns_v = {s.align_v for s in styles}
         if len(aligns_h) == 1:
@@ -680,7 +682,9 @@ class InspectorPanel(QWidget):
             )
             self._loaded_style_align_h = display
         else:
-            self._select_combo(self.align_combo, ["Mixed"], "Mixed")
+            self._select_combo(
+                self.align_combo, ["Mixed", "Left", "Center", "Right"], "Mixed"
+            )
             self._loaded_style_align_h = "Mixed"
         if len(aligns_v) == 1:
             display = _ALIGN_V_DISPLAY.get(next(iter(aligns_v)), "Middle")
@@ -689,7 +693,9 @@ class InspectorPanel(QWidget):
             )
             self._loaded_style_align_v = display
         else:
-            self._select_combo(self.align_v_combo, ["Mixed"], "Mixed")
+            self._select_combo(
+                self.align_v_combo, ["Mixed", "Top", "Middle", "Bottom"], "Mixed"
+            )
             self._loaded_style_align_v = "Mixed"
 
         # Effects — per-row common-value; a differing row shows the tri-state
@@ -1165,12 +1171,22 @@ class InspectorPanel(QWidget):
             on_style_color(color_hex)
 
     def _emit_style_align_if_changed(self, on_style_align) -> None:
+        """Per-axis align commit: Mixed->None translation + per-axis WR-01 guard.
+
+        G-07-7: a Mixed axis no longer suppresses the OTHER axis — each axis
+        is translated independently (``"Mixed"`` -> ``None``, the untouched
+        sentinel the consumer preserves per box — the ``_effect_payload``
+        mirror), and the commit fires when ANY axis differs from its loaded
+        display value. An unchanged focus cycle (current == loaded on both
+        axes) is a WR-01 no-op.
+        """
         h = self.align_combo.currentText()
         v = self.align_v_combo.currentText()
-        if h == "Mixed" or v == "Mixed":
-            return  # the sentinel never leaves the widget layer (Pitfall 7)
-        if (h, v) != (self._loaded_style_align_h, self._loaded_style_align_v):
-            on_style_align(_ALIGN_H_TO_MODEL[h], _ALIGN_V_TO_MODEL[v])
+        if (h, v) == (self._loaded_style_align_h, self._loaded_style_align_v):
+            return  # WR-01: an unchanged focus cycle is a no-op (per-axis)
+        h_model = None if h == "Mixed" else _ALIGN_H_TO_MODEL[h]
+        v_model = None if v == "Mixed" else _ALIGN_V_TO_MODEL[v]
+        on_style_align(h_model, v_model)
 
     def _commit_effect_enabled(self, key: str, on_style_effect) -> None:
         """Effect enable-checkbox commit: real state only (tri-state = sentinel)."""
