@@ -1875,11 +1875,15 @@ def test_inspector_empty_state_disables_fields(qtbot) -> None:
 
 @pytest.mark.gui
 def test_inspector_load_box_populates_fields(qtbot) -> None:
-    """load_box populates bubble_no/origin/recognized/translation/language/vertical from the pagebox."""
+    """load_box populates bubble_no/origin/recognized/translation/language
+    from the pagebox; the vertical checkbox reads the per-box STYLE flag
+    (G-07-1 — style.vertical, not the export-metadata payload flag)."""
+    from manga_ai_studio.core.text_style import TextStyle
+
     pb = _pagebox_with_text(recognized="hello", translation="hola")
     pb.bubble_no = 7
     pb.payload.language = "ja"
-    pb.payload.vertical = True
+    pb.style = TextStyle(vertical=True)
 
     panel = _make_inspector(qtbot)
     panel.load_box(pb)
@@ -4195,10 +4199,11 @@ def test_primary_removal_promotes(qtbot) -> None:
 
 @pytest.mark.gui
 def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
-    """D-13: toggling the Inspector Vertical checkbox flips the overlay's
-    layout mode (tategaki <-> horizontal) — a toggle must RE-RENDER, not just
-    write metadata (Pitfall 9); the bake renders the same vertical layout
-    (the shared OR expression); the 'Coming soon' tooltip is gone."""
+    """G-07-1: toggling the Inspector Vertical checkbox writes STYLE.vertical
+    and flips the overlay's layout mode (tategaki <-> horizontal) — a toggle
+    must RE-RENDER, not just write metadata (Pitfall 9); the bake renders the
+    same vertical layout (the shared single-flag expression); the 'Coming
+    soon' tooltip is gone."""
     from manga_ai_studio.gui import text_renderer as tr_module
     from manga_ai_studio.gui.text_renderer import bake_typeset_page
 
@@ -4213,10 +4218,10 @@ def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
     # placements).
     assert item._text_overlay.layout_result.vertical_placements == []
 
-    # Toggle ON via the live checkbox -> the overlay re-renders vertically.
+    # Toggle ON via the live checkbox -> style.vertical True + re-render.
     window.inspector_panel.vertical_check.setChecked(True)
     QApplication.processEvents()
-    assert item.pagebox.payload.vertical is True
+    assert item.pagebox.style.vertical is True
     assert item._text_overlay.layout_result.vertical_placements, (
         "the overlay must re-render vertically after the toggle (Pitfall 9)"
     )
@@ -4224,7 +4229,7 @@ def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
     # Toggle back -> horizontal again.
     window.inspector_panel.vertical_check.setChecked(False)
     QApplication.processEvents()
-    assert item.pagebox.payload.vertical is False
+    assert item.pagebox.style.vertical is False
     assert item._text_overlay.layout_result.vertical_placements == []
 
     # The tooltip holds the D-13 copy (no 'Coming soon').
@@ -4232,9 +4237,9 @@ def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
     assert "Coming soon" not in tip
     assert "tategaki" in tip
 
-    # The bake renders the box vertically too — the SAME OR expression
-    # (spy text_renderer.layout: bake_typeset_page calls it by module name,
-    # box_item's renderer_layout alias stays untouched).
+    # The bake renders the box vertically too — the SAME single-flag
+    # expression (spy text_renderer.layout: bake_typeset_page calls it by
+    # module name, box_item's renderer_layout alias stays untouched).
     window.inspector_panel.vertical_check.setChecked(True)
     QApplication.processEvents()
     captured: list[bool] = []
@@ -4254,12 +4259,13 @@ def test_vertical_checkbox_live(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
-def test_vertical_toggle_constructs_payload_on_never_ocrd_box(
+def test_vertical_toggle_writes_style_and_never_constructs_payload(
     qtbot, tmp_path
 ) -> None:
-    """WR-01: toggling Vertical on a payload-None (never-OCR'd user) box must
-    WRITE the flag — the lazy-construction guard turns the toggle into a real
-    change (no silent no-op with a spurious undo entry + checkbox flip-back)."""
+    """G-07-1/WR-01: toggling Vertical on a payload-None (never-OCR'd user)
+    box writes style.vertical — the toggle NEVER constructs the payload (the
+    payload stays None; no side-effect mutation beyond the user's intent).
+    ONE Ctrl+Z restores the pre-toggle style (None — defaults again)."""
     window = _window_with_page(qtbot, tmp_path)
     item = _seed_boxes_window(window, [Box(10, 20, 80, 80)])[0]
     assert item.pagebox.payload is None  # a never-OCR'd user box
@@ -4268,16 +4274,17 @@ def test_vertical_toggle_constructs_payload_on_never_ocrd_box(
 
     window.inspector_panel.vertical_check.setChecked(True)
     QApplication.processEvents()
-    assert item.pagebox.payload is not None, (
-        "the vertical toggle must lazily construct the payload (WR-01)"
+    assert item.pagebox.payload is None, (
+        "the vertical toggle must never construct the payload (G-07-1)"
     )
-    assert item.pagebox.payload.vertical is True
+    assert item.pagebox.style is not None
+    assert item.pagebox.style.vertical is True
 
-    # ONE Ctrl+Z restores the pre-toggle state (payload None again).
+    # ONE Ctrl+Z restores the pre-toggle state (style None — defaults again).
     window.on_undo()
     QApplication.processEvents()
-    assert window.canvas._box_items[0].pagebox.payload is None, (
-        "undo must restore the payload-None pre-toggle state (WR-01)"
+    assert window.canvas._box_items[0].pagebox.style is None, (
+        "undo must restore the pre-toggle style-None state (G-07-1)"
     )
 
 

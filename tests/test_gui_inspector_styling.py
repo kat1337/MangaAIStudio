@@ -372,11 +372,10 @@ def test_mixed_state_presented(qtbot) -> None:
 
 @pytest.mark.gui
 def test_load_multi_selection_bare_payload_defensive(qtbot) -> None:
-    """WR-03: ``load_multi_selection`` must survive a bare-marker payload (a
-    non-``TextBlock`` object — the suite builds ``PageBox(payload="p")``): the
-    vertical read is ``getattr``-based, mirroring
-    ``gui/text_renderer.current_focus_text``, so no AttributeError in the
-    selection handler."""
+    """WR-03/G-07-1: ``load_multi_selection`` must survive a bare-marker
+    payload (a non-``TextBlock`` object — the suite builds
+    ``PageBox(payload="p")``): the vertical read is STYLE-based with a
+    style-None fallback, so no AttributeError in the selection handler."""
     from PySide6.QtCore import Qt
 
     panel = _make_inspector(qtbot)
@@ -389,8 +388,7 @@ def test_load_multi_selection_bare_payload_defensive(qtbot) -> None:
     assert panel.vertical_check.isChecked() is False
 
     # bare (False) vs a vertical-True box -> tri-state Mixed, still no crash.
-    vertical_box = _pagebox_with_style()
-    vertical_box.payload.vertical = True
+    vertical_box = _pagebox_with_style(vertical=True)
     panel.load_multi_selection([bare, vertical_box])
     assert panel.vertical_check.checkState() == Qt.CheckState.PartiallyChecked
 

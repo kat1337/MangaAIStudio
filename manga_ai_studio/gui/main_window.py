@@ -3223,22 +3223,22 @@ class MainWindow(QMainWindow):
         self._inspector_commit_post(item)
 
     def _on_inspector_vertical_committed(self, vertical: bool) -> None:
-        """Vertical checkbox -> write ``payload.vertical`` on EVERY selected box
-        (D-13/D-10 — one commit, ONE snapshot) + re-render the overlays.
+        """Vertical checkbox -> write ``style.vertical`` on EVERY selected box
+        (G-07-1/D-10 — one commit, ONE snapshot) + re-render the overlays.
 
-        The overlay + bake read the OR of ``style.vertical`` and
-        ``payload.vertical`` (``box_item.refresh_text_overlay`` /
-        ``text_renderer.bake_typeset_page`` — the SAME expression, atomic
-        canvas ≡ bake flip), so this commit switches the canvas + bake to the
-        renderer's tategaki path immediately (Pitfall 9 — a toggle must
-        re-render, not just write metadata). Records the "style change" op
-        name (every style commit incl. the vertical toggle, D-10/surface 13).
+        The overlay + bake + size probe read the single ``bool(style.vertical)``
+        flag (``box_item.refresh_text_overlay`` /
+        ``text_renderer.bake_typeset_page`` / ``_style_rendered_size`` — the
+        SAME expression, atomic canvas ≡ bake flip), so this commit switches
+        the canvas + bake to the renderer's tategaki path immediately
+        (Pitfall 9 — a toggle must re-render, not just write metadata).
+        Records the "style change" op name (every style commit incl. the
+        vertical toggle, D-10/surface 13).
 
-        WR-01 (07-REVIEW): a user-drawn box that was never OCR'd has
-        ``payload=None``; ``_ensure_payload()`` (the SINGLE centralized
-        payload-None guard the text setters use) lazily constructs the
-        ``TextBlock`` so the toggle actually writes instead of silently
-        dropping into a no-op undo entry with the checkbox flipping back.
+        The toggle never touches the payload (G-07-1): a never-OCR'd box's
+        payload stays None — the checkbox is a STYLE control, and the
+        payload's `vertical` field is pure export metadata written only by
+        the exporter/detector paths.
         """
         selected = self._selected_box_items()
         if not selected:
@@ -3249,8 +3249,7 @@ class MainWindow(QMainWindow):
                 pb.payload = copy.copy(pb.payload)
         self._boxes_interaction_start_snapshot = before
         for item in selected:
-            item.pagebox._ensure_payload()
-            item.pagebox.payload.vertical = vertical
+            self._replace_style(item.pagebox, vertical=vertical)
         self.canvas.set_pending_boxes_op_name("style change")
         for item in selected:
             item.refresh_text_overlay()

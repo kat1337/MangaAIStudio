@@ -21,11 +21,12 @@ for the currently-selected box:
   Commits route through ``translation_changed`` →
   :meth:`PageBox.set_translation` (the D-13 MT seam).
 - **Language** — a read-only ``QLabel`` (from ``payload.language``).
-- **Vertical** — a ``QCheckBox`` writing ``payload.vertical``. LIVE since plan
-  07-05 (D-13): toggling flips the canvas + bake to the renderer's tategaki
-  path (the Phase 4 placeholder tooltip is replaced with the D-13 copy); in a
-  multi-selection it becomes tri-state (indeterminate = mixed vertical flags,
-  D-10).
+- **Vertical** — a ``QCheckBox`` reading/writing ``style.vertical`` (G-07-1:
+  the per-box STYLE flag drives rendering; the payload's `vertical` field is
+  pure export metadata the toggle never touches). LIVE since plan 07-05
+  (D-13): toggling flips the canvas + bake to the renderer's tategaki path
+  (Pitfall 9); in a multi-selection it becomes tri-state (indeterminate =
+  mixed vertical flags, D-10).
 - **Style section** (plan 07-05, D-05/D-06/D-10/D-14/D-15 — UI-SPEC surface
   33): the per-box styling controls BELOW the text fields — Font
   (``QFontComboBox``), Style (per-family ``QComboBox``), Size + Auto-fit
@@ -339,15 +340,18 @@ class InspectorPanel(QWidget):
         self.language_label = QLabel("\u2014")
         form.addRow("Language", self.language_label)
 
-        # Vertical — LIVE since plan 07-05 (D-13): toggling writes
-        # payload.vertical AND the MainWindow re-renders the canvas + bake
-        # through the renderer's tategaki path (Pitfall 9 — a toggle must
-        # re-render, not just write metadata). The Phase 4 placeholder
-        # tooltip is REPLACED (D-13 copy). In a multi-selection the checkbox
-        # becomes tri-state (indeterminate = mixed vertical flags, D-10).
+        # Vertical — LIVE since plan 07-05 (D-13); G-07-1: the checkbox
+        # reads/writes style.vertical (the payload's `vertical` field is pure
+        # export metadata the toggle never touches) and the MainWindow
+        # re-renders the canvas + bake through the renderer's tategaki path
+        # (Pitfall 9 — a toggle must re-render, not just write metadata). The
+        # Phase 4 placeholder tooltip is REPLACED (D-13 copy). In a
+        # multi-selection the checkbox becomes tri-state (indeterminate =
+        # mixed vertical flags, D-10).
         self.vertical_check = QCheckBox("Vertical text")
         self.vertical_check.setToolTip(
-            "Render this box's text vertically, top-to-bottom (tategaki)."
+            "Render this box's text vertically, top-to-bottom (tategaki). "
+            "Roman letters stack upright, one above the other."
         )
         form.addRow("", self.vertical_check)
 
@@ -537,12 +541,13 @@ class InspectorPanel(QWidget):
         self.translation_edit.blockSignals(was_t)
         self._loaded_translation = self.translation_edit.toPlainText()
 
-        # Language + vertical.
+        # Language (payload — read-only label) + vertical (STYLE-driven,
+        # G-07-1: the checkbox mirrors style.vertical; the payload's vertical
+        # field is export metadata only).
         language = "unknown"
-        vertical = False
         if pagebox.payload is not None:
             language = str(getattr(pagebox.payload, "language", "unknown") or "unknown")
-            vertical = bool(getattr(pagebox.payload, "vertical", False))
+        vertical = bool(pagebox.style.vertical) if pagebox.style is not None else False
         self.language_label.setText(language)
         was_v = self.vertical_check.blockSignals(True)
         self.vertical_check.setTristate(False)
@@ -692,13 +697,12 @@ class InspectorPanel(QWidget):
         for key in ("outline", "glow", "shadow"):
             self._load_effect_row_multi(key, styles)
 
-        # Vertical checkbox — differing vertical flags -> tri-state (D-10).
-        # WR-03 (07-REVIEW): getattr keeps a bare-marker payload (any
-        # non-TextBlock object) defensive — same contract as the renderer.
+        # Vertical checkbox — differing style.vertical flags -> tri-state
+        # (D-10; G-07-1: the checkbox reads the per-box STYLE flag, not the
+        # export-metadata payload flag — a style-None box reads False, so
+        # bare-marker payloads stay safe without a getattr contract).
         verticals = {
-            bool(getattr(pb.payload, "vertical", False))
-            if pb.payload is not None
-            else False
+            (pb.style.vertical if pb.style is not None else False)
             for pb in pageboxes
         }
         was = self.vertical_check.blockSignals(True)
