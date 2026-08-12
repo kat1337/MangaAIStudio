@@ -371,6 +371,66 @@ def test_mixed_state_presented(qtbot) -> None:
 
 
 @pytest.mark.gui
+def test_mixed_align_keeps_real_items_and_maps_sentinel(qtbot) -> None:
+    """G-07-7: a Mixed align state stays OVERRIDABLE — the align combos keep
+    the real options under a leading 'Mixed' entry (Mixed current), and
+    picking a value commits the changed axis as its model value while the
+    untouched axis arrives as None (the ``_effect_payload`` mirror). The
+    uniform case shows the real value with NO Mixed entry; an unchanged
+    Mixed focus cycle still emits nothing (WR-01 per-axis no-op)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    # BOTH axes differ across the selection -> both combos go Mixed WITH the
+    # real items kept (the old items-replaced-with-['Mixed'] behavior is gone).
+    pb_a = _pagebox_with_style(align_h="left", align_v="top")
+    pb_b = _pagebox_with_style(align_h="right", align_v="bottom")
+    panel.load_multi_selection([pb_a, pb_b])
+
+    assert [
+        panel.align_combo.itemText(i) for i in range(panel.align_combo.count())
+    ] == ["Mixed", "Left", "Center", "Right"]
+    assert panel.align_combo.currentText() == "Mixed"
+    assert [
+        panel.align_v_combo.itemText(i) for i in range(panel.align_v_combo.count())
+    ] == ["Mixed", "Top", "Middle", "Bottom"]
+    assert panel.align_v_combo.currentText() == "Mixed"
+
+    # The uniform case keeps the plain real-item list — no Mixed entry.
+    panel.load_multi_selection([
+        _pagebox_with_style(align_h="center", align_v="middle"),
+        _pagebox_with_style(align_h="center", align_v="middle"),
+    ])
+    assert [
+        panel.align_combo.itemText(i) for i in range(panel.align_combo.count())
+    ] == ["Left", "Center", "Right"]
+    assert panel.align_combo.currentText() == "Center"
+    assert [
+        panel.align_v_combo.itemText(i) for i in range(panel.align_v_combo.count())
+    ] == ["Top", "Middle", "Bottom"]
+    assert panel.align_v_combo.currentText() == "Middle"
+
+    # Back to the differing selection: picking Bottom in align_v while
+    # align_h stays Mixed commits the changed axis as 'bottom' and the
+    # untouched axis as None — the consumer's preserve-per-box sentinel.
+    panel.load_multi_selection([pb_a, pb_b])
+    panel.align_v_combo.setCurrentText("Bottom")
+    assert fired["align"] == [(None, "bottom")], (
+        "a real change on one combo must not be discarded by the other "
+        "combo's Mixed sentinel (G-07-7)"
+    )
+
+    # WR-01 per-axis no-op: returning the combo to its loaded Mixed sentinel
+    # is an unchanged focus cycle — nothing fires.
+    panel.align_v_combo.setCurrentText("Mixed")
+    assert fired["align"] == [(None, "bottom")]
+
+
+@pytest.mark.gui
 def test_load_multi_selection_bare_payload_defensive(qtbot) -> None:
     """WR-03/G-07-1: ``load_multi_selection`` must survive a bare-marker
     payload (a non-``TextBlock`` object — the suite builds
