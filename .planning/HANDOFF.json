@@ -1,0 +1,50 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-12T05:36:26.280Z",
+  "phase": "07",
+  "phase_name": "Typesetting (TRAN-02): render translated text into the page",
+  "phase_dir": "C:/Src/Manga AI Studio/.planning/phases/07-typesetting-tran-02-render-translated-text-into-the-page",
+  "plan": 12,
+  "task": 0,
+  "total_tasks": 0,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Phase 7 planning (RESEARCH/VALIDATION/PATTERNS + 5 plans)", "status": "done", "commit": "e6739ee"},
+    {"id": 2, "name": "Phase 7 main execution (07-01..07-05, tracer/multi-select/tategaki/persistence/inspector)", "status": "done", "commit": "4440de0"},
+    {"id": 3, "name": "Code review + 4 fixes (CR-01 overlay pixmap bug + 3 warnings)", "status": "done", "commit": "332b4df"},
+    {"id": 4, "name": "UAT session (5 tests: 2 passed, 7 gaps found)", "status": "done", "commit": "afc636e"},
+    {"id": 5, "name": "Gap diagnosis (7 gaps, root causes + debug sessions)", "status": "done", "commit": "b628a0c"},
+    {"id": 6, "name": "Gap-closure plans 07-06..07-12 (verified, 2 revision rounds)", "status": "done", "commit": "abebe48"},
+    {"id": 7, "name": "Gap-closure execution 07-06..07-12 (all 7 gaps fixed)", "status": "done", "commit": "0c61b52"},
+    {"id": 8, "name": "Gap review + 3 warning fixes (font free-text gate, no-op undo, graveyard teardown)", "status": "done", "commit": "43d1729"},
+    {"id": 9, "name": "Phase re-verification (passed 44/46) + phase.complete + PROJECT.md evolution", "status": "done", "commit": "f341d0b"}
+  ],
+  "remaining_tasks": [
+    {"id": 10, "name": "UAT re-run: 2 visual backstop gates (tategaki real-CJK look, effects fluidity) + prohibition sign-off; reconciles 7 gaps to resolved", "status": "not_started"},
+    {"id": 11, "name": "Optional: /gsd-secure-phase 7 (security enforcement on, ASVS L1, no SECURITY.md yet)", "status": "not_started"},
+    {"id": 12, "name": "Optional: /gsd-ui-review 7 (frontend files modified)", "status": "not_started"},
+    {"id": 13, "name": "Milestone closeout: /gsd-complete-milestone (v1.1, is_last_phase: true)", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "None technical. 2 visual backstop gates + prohibition sign-off need the user (UAT).", "type": "human_action", "workaround": "/gsd-verify-work 7"}
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {"action": "Run UAT tests 1-2 (real-CJK tategaki visual check; effects quality/fluidity) and confirm prohibitions", "context": "Phase marked complete; these 2 backstop must-haves are held-out human gates (insufficient_spec abstain)", "blocking": true},
+    {"action": "Optional security review /gsd-secure-phase 7", "context": "security_enforcement: true, ASVS L1 — no SECURITY.md exists yet", "blocking": false},
+    {"action": "Optional UI audit /gsd-ui-review 7", "context": "Frontend files modified across the phase", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "OCR_JSON_VERSION bumped to \"2\" for the D-07 style block", "rationale": "User decision at the one-way-door checkpoint (published contract extension; consumers can branch on version)", "phase": "07"},
+    {"decision": "D-11 override: Roman text renders UPRIGHT stacked in vertical mode (not rotated 90\u00b0); horizontal-by-default for all boxes", "rationale": "User override of the W3C rotated-Latin convention during UAT; payload.vertical is export metadata only, render flag = style.vertical", "phase": "07"},
+    {"decision": "Ctrl+Z UAF fixed with graveyard pattern (QTimer.singleShot(0) release) + Shiboken.isValid guards", "rationale": "Native crash 0xC0000409: set_boxes deleted BoxItems mid-event-loop while pending scene updates referenced them", "phase": "07"},
+    {"decision": "G-07-2 stopgap: contains/substring search (QSortFilterProxyModel + escaped regex) for the font dropdown", "rationale": "User confirmed machine fonts usable; QFontComboBox start-of-name search missed 'CC Wild Words'", "phase": "07"},
+    {"decision": "Default font: Qt-free default_style() factory + QSettings 'defaultFontFamily' + Set-as-Default button", "rationale": "G-07-3; no-key boxes keep style None (renderer defaults apply)", "phase": "07"},
+    {"decision": "G-07-4 auto-fit grows to fill (cap min(inner_w, inner_h), _OVERLAY_FIT_GROW_STEP 1.1)", "rationale": "User: tiny text in massive box; shrink-only loop kept for oversized text", "phase": "07"}
+  ],
+  "uncommitted_files": [
+    ".planning/phases/01-cleaning-workspace/01-RESEARCH.md (USER'S OWN pre-existing change — do NOT touch or revert)"
+  ],
+  "next_action": "Run /gsd-verify-work 7 — executes the 2 remaining visual UAT gates and reconciles the 7 UAT gaps to resolved (their fix plans 07-06..07-12 have SUMMARYs). Then optional /gsd-secure-phase 7 and milestone closeout.",
+  "context_notes": "Phase 7 is fully planned, executed, gap-closed, code-reviewed (clean), and verified (44/46, 2 documented human gates). 717 tests green. The remaining work is user-facing: UAT visual confirmation, then milestone wrap-up (v1.1 is the last phase — no next phase exists). The repo has user-owned uncommitted changes (01-RESEARCH.md) plus pre-existing untracked artifacts (AGENTS.md, start.bat, .python-version, .planning/ui-reviews/, research/.cache/, various phase .gitkeep/PATTERNS) — leave them alone. Executors in this environment sometimes return empty with zero work; resume the same session with a 'continue' prompt before re-spawning fresh (worked for 07-03/07-05)."
+}
