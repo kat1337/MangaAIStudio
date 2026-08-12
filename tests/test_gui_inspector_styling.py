@@ -40,6 +40,22 @@ def _make_inspector(qtbot) -> InspectorPanel:
     return panel
 
 
+def _isolate_settings(window, tmp_path, monkeypatch) -> None:
+    """Point the window's QSettings at a throwaway INI (never the real one).
+
+    Mirrors ``tests/test_gui_project.py::_isolate_settings`` — the G-07-3
+    persistence tests must never touch the user's registry.
+    """
+    from PySide6.QtCore import QSettings
+
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        window,
+        "_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+
 def _pagebox_with_style(**style_kwargs) -> PageBox:
     """A USER-origin PageBox carrying a TextStyle built from ``style_kwargs``."""
     pb = PageBox(box=Box(10, 20, 210, 120), origin="user")
@@ -685,3 +701,62 @@ def test_hint_label_count(qtbot) -> None:
     # Single select hides the hint (the Phase 4 follower behavior).
     panel.load_box(_pagebox_with_style())
     assert panel.multi_hint_label.isHidden() is True
+
+
+# ===========================================================================
+# G-07-3 — the Set-as-Default Font affordance (plan 07-11)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_set_as_default_button_emits_family(qtbot) -> None:
+    """G-07-3: the Font row's Set-as-Default button emits
+    ``default_font_requested`` with the CURRENT font-combo family; a click
+    while the combo shows the 'Mixed' sentinel emits nothing (Pitfall 7 —
+    the sentinel never leaves the widget layer)."""
+    panel = _make_inspector(qtbot)
+    captured: list = []
+    panel.default_font_requested.connect(captured.append)
+    panel.load_box(_pagebox_with_style())
+
+    # The affordance sits on the Font row, QSS-consistent (QToolButton token).
+    assert isinstance(panel.default_font_button, QToolButton)
+    assert panel.default_font_button.toolTip() == "Use this font for new boxes"
+
+    panel.font_combo.setCurrentText("Yu Gothic UI")
+    panel.default_font_button.click()
+    assert captured == ["Yu Gothic UI"], (
+        "the click must emit the CURRENT combo family"
+    )
+
+    # Mixed sentinel guard: no emission.
+    panel.load_multi_selection(
+        [_pagebox_with_style(font_family="Arial"), _pagebox_with_style(font_family="Bahnschrift")]
+    )
+    panel.default_font_button.click()
+    assert captured == ["Yu Gothic UI"], "a Mixed click must emit nothing"
+
+
+@pytest.mark.gui
+def test_set_as_default_writes_key_and_flashes_status(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-3 end-to-end: the MainWindow handler for
+    ``default_font_requested`` persists the family under 'defaultFontFamily'
+    in the shared _settings() store (isolated INI) and flashes the transient
+    status — the reader/writer chain round-trips."""
+    window = _window_with_page(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)
+
+    panel = window.inspector_panel
+    panel.load_box(_pagebox_with_style())
+    QApplication.processEvents()
+
+    panel.font_combo.setCurrentText("Yu Gothic UI")
+    panel.default_font_button.click()
+    QApplication.processEvents()
+
+    assert window._settings().value("defaultFontFamily") == "Yu Gothic UI"
+    assert window.status_bar_left.text() == "Default font: Yu Gothic UI"
+    # The reader (the same store the new-box sites consult) round-trips it.
+    assert window._default_font_family() == "Yu Gothic UI"

@@ -261,3 +261,42 @@ def test_style_field_defaults_to_none() -> None:
     """A fresh PageBox has style=None (renderers fall back to TextStyle())."""
     pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
     assert pb.style is None
+
+
+# ---------------------------------------------------------------------------
+# G-07-3 — the default_style() factory (the Qt-free end of the QSettings
+# 'defaultFontFamily' chain; plan 07-11). The factory takes the family as a
+# parameter — QSettings stays GUI-side, core/ stays Qt-free.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_style_none_uses_default_family() -> None:
+    """default_style(None) == the plain TextStyle() defaults exactly.
+
+    The no-key contract: when no family was ever saved, the creation sites
+    pass None and the renderer's TextStyle() defaults (Liberation Sans)
+    apply — so the factory with None must equal the defaults field-for-field.
+    """
+    from manga_ai_studio.core.text_style import (
+        DEFAULT_FONT_FAMILY,
+        default_style,
+    )
+
+    s = default_style(None)
+    assert s.font_family == DEFAULT_FONT_FAMILY
+    assert s.to_dict() == TextStyle().to_dict()
+
+
+@pytest.mark.unit
+def test_default_style_explicit_family_overrides_only_family() -> None:
+    """default_style("Yu Gothic UI") keeps every field at the TextStyle()
+    defaults except font_family — the saved family NEVER drags the other
+    fields off their defaults (a new box looks like today's default box,
+    only with the chosen family)."""
+    from manga_ai_studio.core.text_style import default_style
+
+    s = default_style("Yu Gothic UI")
+    expected = TextStyle(font_family="Yu Gothic UI")
+    assert s.font_family == "Yu Gothic UI"
+    assert s.to_dict() == expected.to_dict()
