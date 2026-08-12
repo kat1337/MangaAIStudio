@@ -3066,14 +3066,12 @@ class MainWindow(QMainWindow):
         text = current_focus_text(pb)
         if not text:
             return 14.0  # the auto-fit base (nothing renders — the size is moot)
-        vertical = bool(
-            style.vertical
-            or (
-                bool(getattr(pb.payload, "vertical", False))
-                if pb.payload is not None
-                else False
-            )
-        )
+        # G-07-1: the render vertical flag is bool(style.vertical) ONLY —
+        # payload.vertical is pure export metadata, never a render
+        # instruction — the SAME single expression
+        # box_item.refresh_text_overlay and text_renderer.bake_typeset_page
+        # use (no divergence window).
+        vertical = bool(style.vertical)
         result = renderer_layout(text, style, item.rect(), vertical=vertical)
         return float(result.used_font_size_px)
 

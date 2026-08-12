@@ -4282,9 +4282,18 @@ def test_vertical_toggle_constructs_payload_on_never_ocrd_box(
 
 
 @pytest.mark.gui
-def test_vertical_preflagged_box_renders_vertical(qtbot, tmp_path) -> None:
-    """D-13: a CTD pre-flagged box (payload.vertical=True) renders tategaki
-    with the DEFAULT style — the OR expression picks up payload.vertical."""
+def test_preflagged_box_renders_horizontal_by_default(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """G-07-1: a CTD pre-flagged box (payload.vertical=True) renders
+    HORIZONTAL by default — payload.vertical is pure export metadata, never a
+    render instruction; the render flag is bool(style.vertical) ONLY. The
+    bake agrees: bake_typeset_page captures vertical=False in the layout spy
+    (the shared single-flag expression; box_item's renderer_layout alias is
+    untouched so the overlay stays on the real layout)."""
+    from manga_ai_studio.gui import text_renderer as tr_module
+    from manga_ai_studio.gui.text_renderer import bake_typeset_page
+
     window = _window_with_page(qtbot, tmp_path)
     pb = PageBox(box=Box(10, 20, 80, 80), origin=DETECTED)
     pb.set_recognized_text("日本語テスト")
@@ -4296,8 +4305,28 @@ def test_vertical_preflagged_box_renders_vertical(qtbot, tmp_path) -> None:
         window._suppress_boxes_push = False
     item = window.canvas._box_items[0]
     assert item.pagebox.style is None  # default style
-    assert item._text_overlay.layout_result.vertical_placements, (
-        "a payload.vertical box must render through the vertical path (D-13)"
+    assert item._text_overlay.layout_result.vertical_placements == [], (
+        "a payload.vertical box renders HORIZONTAL by default — the detector "
+        "metadata never flips rendering (G-07-1)"
+    )
+
+    # The bake renders the same preflagged box HORIZONTALLY.
+    captured: list[bool] = []
+    original_layout = tr_module.layout
+
+    def _spy_layout(text, style, rect, vertical=False):
+        captured.append(bool(vertical))
+        return original_layout(text, style, rect, vertical=vertical)
+
+    monkeypatch.setattr(tr_module, "layout", _spy_layout)
+    import numpy as np
+
+    page = np.full((120, 120, 3), 200, dtype=np.uint8)
+    bake_typeset_page(page, window.canvas.boxes_snapshot())
+    assert captured, "the bake must call the shared layout"
+    assert not any(captured), (
+        "a preflagged box with style None bakes HORIZONTAL — payload.vertical "
+        "is metadata, not a render instruction (G-07-1)"
     )
 
 

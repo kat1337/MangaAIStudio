@@ -675,19 +675,14 @@ class BoxItem(QGraphicsRectItem):
         """
         text = self._current_focus_text()
         style = self.pagebox.style if self.pagebox.style is not None else TextStyle()
-        # D-13: the render vertical flag = style.vertical OR payload.vertical —
-        # the SAME expression text_renderer.bake_typeset_page uses, so the
-        # canvas and the bake flip atomically (no divergence window). CTD
-        # pre-flagged boxes (payload.vertical=True) render tategaki with the
-        # default style; the Inspector checkbox writes payload.vertical.
-        vertical = bool(
-            style.vertical
-            or (
-                bool(getattr(self.pagebox.payload, "vertical", False))
-                if self.pagebox.payload is not None
-                else False
-            )
-        )
+        # G-07-1: the render vertical flag is bool(style.vertical) ONLY —
+        # the box payload's `vertical` field is pure export metadata (the
+        # detector's CTD orientation), never a render instruction. The SAME
+        # single expression text_renderer.bake_typeset_page and
+        # main_window._style_rendered_size use, so the canvas, the bake, and
+        # the size probe flip atomically (no divergence window); the
+        # Inspector checkbox writes style.vertical.
+        vertical = bool(style.vertical)
         # Pass the FULL box rect — the renderer applies its own inner inset
         # (identical for canvas and bake, D-01).
         self._text_overlay.set_content(
