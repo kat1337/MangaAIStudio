@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 status: planning
-last_updated: "2026-08-14T03:57:24.038Z"
-last_activity: 2026-08-14
+last_updated: "2026-08-13T12:00:00.000Z"
+last_activity: 2026-08-13
 progress:
-  total_phases: 0
+  total_phases: 2
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 07 — Typesetting (TRAN-02): render translated text into the page
+**Current focus:** Phase 8 — Masker & Selective Inpaint (MASK-01/02/03): mask dilation radius + selective per-box inpaint (Phase 3 D-15 seam)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: Phase 8 — Masker & Selective Inpaint (not started)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-08-14 — Milestone v1.2 started
+Status: Roadmap defined (Phases 8–9); ready to plan Phase 8
+Last activity: 2026-08-13 — v1.2 roadmap created
 
 ## Performance Metrics
 
@@ -264,6 +264,8 @@ Recent decisions affecting current work:
 
 - Phase 6 added: Refinement & Polish — deferred fixes (empty-state overlay, toolbar active-tool highlight, stale shortcut copy, dialog typography) + full curve editor (2026-08-09)
 - Phase 7 added: Typesetting (TRAN-02) — render translated text into the page (2026-08-09)
+- Phase 8 added: Masker & Selective Inpaint — mask dilation radius + std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility/override (milestone v1.2, 2026-08-13)
+- Phase 9 added: UI Rework — modular side panel, top inspector toggle, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (milestone v1.2, 2026-08-13)
 
 ### Pending Todos
 

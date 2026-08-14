@@ -6,7 +6,7 @@ Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and tra
 
 **Mode:** mvp
 **Granularity:** standard (5 phases)
-**Coverage:** 18/18 v1 requirements mapped ✓
+**Coverage:** 18/18 v1 requirements mapped; 8/8 v1.2 requirements mapped (Phases 8–9) ✓
 
 ## Phases
 
@@ -22,6 +22,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Text Box Detection & Interaction** - Detect text boxes as editable objects and select/move/resize/delete them (completed 2026-08-04)
 - [x] **Phase 4: OCR Recognition & Text Editing** - Draw-to-OCR regions, correct recognized text, add manual translations (completed 2026-08-08)
 - [x] **Phase 5: Project Persistence, Image Ops & Export** - Save/resume .mas projects, basic image operations, export _ocr.json (completed 2026-08-08)
+- [x] **Phase 6: Refinement & Polish** - Deferred v1.1 fixes (empty-state overlay, toolbar active-tool highlight, stale hint copy, dialog typography) + full draggable curve editor replacing the Levels dialog (completed 2026-08-09)
+- [x] **Phase 7: Typesetting (TRAN-02)** - Render translated text into the page with full styling controls (font, style, size, color, alignment, effects, tategaki) (completed 2026-08-09)
+- [ ] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override
+- [ ] **Phase 9: UI Rework** - Modular side panel, inspector toggle at top, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section
 
 ## Phase Details
 
@@ -247,7 +251,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -256,6 +260,10 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 3. Text Box Detection & Interaction | 8/8 | Complete    | 2026-08-04 |
 | 4. OCR Recognition & Text Editing | 10/10 | Complete    | 2026-08-08 |
 | 5. Project Persistence, Image Ops & Export | 10/10 | Complete    | 2026-08-08 |
+| 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
+| 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
+| 8. Masker & Selective Inpaint | 0/0 | Not started | - |
+| 9. UI Rework | 0/0 | Not started | - |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
 
@@ -335,5 +343,57 @@ Plans:
 
 - [x] 07-05-PLAN.md — Inspector Style section + Mixed common-value + live vertical checkbox + Size +/- actions (D-05/D-10/D-13/D-16)
 
+### Phase 8: Masker & Selective Inpaint
+
+**Goal:** User can grow auto-detected masks to cover letter edges the conservative CTD heatmap leaves unmasked, and selectively inpaint only the text masks inside boxes whose region is uniform enough (low std-deviation) — preserving complex artwork instead of inpainting whole boxes — with per-box visibility and override. This activates the deferred cleaning-track seams (01-UAT dilation + Phase 3 decision D-15).
+
+**Scope (inherited deferrals):**
+
+- MASK-01 mask dilation: `phases/01-cleaning-workspace/01-UAT.md` deferred follow-up — "the CTD heatmap boundary is conservative and leaves the edges of letters unmasked... a small morphological dilation post-processing step (cv2.dilate or a configurable radius in TorchCTDModel.postprocess)." A detection-time configurable radius that grows auto-detected masks so letter edges get covered; surfaced as a cleaning-profile parameter.
+- MASK-02 / MASK-03 selective per-box inpaint: Phase 3 decision D-15 (`phases/03-text-box-detection-interaction/03-CONTEXT.md`, `03-RESEARCH.md`). Goal: inpaint ONLY the detected masks inside a box when the box's std deviation is low enough (uniform-enough region), rather than masking/inpainting the whole box. The machinery is ALREADY vendored (Phase 3 vendored `panelcleaner/masker.py` + `structures.py` per D-14) and the data-model seam is open: `PageBox.mask` and `PageBox.std_dev` currently default to `None` (the D-15 seam). Functions to use: `border_std_deviation(base_image, mask_1bit, off_white_threshold, allow_color) -> (std_dev, median_color)` and `pick_best_mask(...)` in `panelcleaner/image_ops.py`. MASK-03 adds per-box visibility (an indicator showing which boxes are selectively inpainted) and override (force inpaint / skip).
+- Reused seams: cleaning/inpaint foundation (Phase 1), box model + masker vendoring (Phase 3), OCR box context (Phase 4), `.mas` persistence (Phase 5).
+- Explicitly NOT in scope: interactive mask grow/shrink brush (MASK-04 — v2), per-region LaMa params (FLOW-07 — v2).
+
+**Requirements:** MASK-01, MASK-02, MASK-03
+**Depends on:** Phase 1, Phase 3, Phase 4
+**Success Criteria** (what must be TRUE):
+
+  1. User can set a mask dilation radius (N pixels) that grows auto-detected text masks so letter edges the conservative CTD heatmap leaves unmasked get covered
+  2. User can run selective per-box inpainting that inpaints only the detected text masks inside boxes whose region is uniform enough (low std-deviation), preserving complex artwork regions instead of inpainting whole box regions
+  3. User can see, per box, whether it was selectively inpainted via an on-canvas/inspector indicator
+  4. User can override the auto selective-inpaint decision per box — force inpaint the whole box, or skip inpainting it
+  5. The Phase 3 D-15 seam (`PageBox.mask` / `PageBox.std_dev`) is populated by the vendored `masker.py` machinery and round-trips through `.mas` project save/load
+
+**Plans:** TBD
+**UI hint**: yes
+
+### Phase 9: UI Rework
+
+**Goal:** User works in a reorganized editor — a modular side panel of discrete independently-collapsible sections, a relocated right-side tools toolbar, a renamed "Typesetting" section, and a new "Edit" section consolidating the image-editing tools — replacing the monolithic panel and scattered menu/dialog access without removing any existing functionality. This activates the deferred 06-UAT sidebar revamp.
+
+**Scope (inherited deferral):**
+
+- Activates `phases/06-refinement-polish-deferred-fixes-full-curve-editor/06-UAT.md`: "Consider adding Curves (and possibly other tools) to the sidebar — user plans a later phase to revamp the sidebar a bit."
+- UI-01 modular side panel: discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel.
+- UI-02 inspector toggle button moved to the top of the side panel.
+- UI-03 tools toolbar relocated from beside the file explorer to a small vertical toolbar on the right side of the canvas.
+- UI-04 the former "Inspector" panel section is renamed to "Typesetting".
+- UI-05 a new "Edit" panel section houses curves, crop, rotate, resize, levels — the image ops already delivered in Phases 5/6, reorganized into a panel section rather than scattered across menus/dialogs.
+- Internal PySide6 refactor touching `gui/main_window.py`, `gui/tools_panel.py`, the `gui/inspector` panel (Phases 4/7), and the canvas toolbar wiring (Phase 6 D-10 checkable-actions group). It does NOT remove existing functionality.
+- Explicitly NOT in scope: new image-edit operations (the ops already exist from Phases 5/6 — this only reorganizes their entry points), MT integration (TRAN-01 — v2).
+
+**Requirements:** UI-01, UI-02, UI-03, UI-04, UI-05
+**Depends on:** Phase 8 (the user explicitly sequenced the masker first, so the new masker affordances land in the final reworked layout)
+**Success Criteria** (what must be TRUE):
+
+  1. The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
+  2. The inspector toggle button sits at the top of the side panel
+  3. The tools toolbar is a small vertical toolbar on the right side of the canvas, relocated from beside the file explorer
+  4. The former "Inspector" panel section is labeled "Typesetting"
+  5. A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) previously scattered across menus/dialogs
+
+**Plans:** TBD
+**UI hint**: yes
+
 ---
-*Roadmap created: 2026-07-11*
+*Roadmap created: 2026-07-11; v1.2 Phases 8–9 appended: 2026-08-13*
