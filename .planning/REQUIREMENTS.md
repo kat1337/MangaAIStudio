@@ -37,6 +37,24 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **FLOW-02**: User can undo/redo image (inpainting) and mask (painting) operations via separate stacks, each with redo
 - [x] **FLOW-03**: User can batch-process a chapter folder through the cleaning pipeline (detect → clean → save) with a progress indicator
 
+## v1.2 Requirements
+
+Requirements for milestone v1.2 (Masker & Selective Inpaint + UI Rework). Each maps to a roadmap phase. Activates deferred cleaning-track seams documented in earlier phases (`01-UAT.md` dilation, Phase 3 decision D-15 selective per-box inpaint) and the deferred `06-UAT.md` sidebar revamp.
+
+### Masker & Selective Inpaint
+
+- [ ] **MASK-01**: User can set a mask dilation radius so auto-detected text masks are grown by N pixels, covering letter edges the conservative CTD heatmap leaves unmasked
+- [ ] **MASK-02**: User can run selective per-box inpainting that inpaints only the detected text masks *inside* boxes whose region is uniform enough (low std-deviation), preserving complex artwork regions instead of inpainting whole box regions (activates the Phase 3 D-15 seam — `PageBox.mask`/`std_dev` fields filled via the vendored `masker.py` machinery)
+- [ ] **MASK-03**: User can see per-box whether it was selectively inpainted (indicator) and override the auto-decision (force inpaint / skip)
+
+### UI Rework
+
+- [ ] **UI-01**: The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
+- [ ] **UI-02**: The inspector toggle button is moved to the top of the side panel
+- [ ] **UI-03**: The tools toolbar is relocated from beside the file explorer to a small vertical toolbar on the right side of the canvas
+- [ ] **UI-04**: The former "Inspector" panel section is renamed to "Typesetting"
+- [ ] **UI-05**: A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) currently scattered across menus/dialogs
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -51,7 +69,12 @@ Deferred to future release. Tracked but not in current roadmap.
 ### Translation
 
 - **TRAN-01**: User can connect a machine translation service/API to pre-fill translation fields for manual correction
-- **TRAN-02**: User can render translated text into the page (basic typesetting: font, size, color)
+
+<!-- TRAN-02 (render translated text into the page) was delivered in Phase 7 — moved to validated. -->
+
+### Masker
+
+- **MASK-04**: User can manually grow/shrink a painted or auto-detected mask region interactively on the canvas (a mask-editing brush variant), complementing the detection-time dilation slider (MASK-01)
 
 ### Integrations
 
@@ -97,13 +120,20 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FLOW-01 | Phase 1 | Complete |
 | FLOW-02 | Phase 1 | Complete |
 | FLOW-03 | Phase 2 | Complete |
+| MASK-01 | Phase 8 | Pending |
+| MASK-02 | Phase 8 | Pending |
+| MASK-03 | Phase 8 | Pending |
+| UI-01 | Phase 9 | Pending |
+| UI-02 | Phase 9 | Pending |
+| UI-03 | Phase 9 | Pending |
+| UI-04 | Phase 9 | Pending |
+| UI-05 | Phase 9 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 18 total
-- Mapped to phases: 18
-- Unmapped: 0 ✓
+- v1 requirements: 18 total — 18 mapped, 0 unmapped ✓
+- v1.2 requirements: 8 total — 8 mapped (Phase 8–9), 0 unmapped ✓
 
 ---
 *Requirements defined: 2026-07-11*
-*Last updated: 2026-07-11 after roadmap creation (traceability assigned)*
+*Last updated: 2026-08-13 after milestone v1.2 requirement definition*
