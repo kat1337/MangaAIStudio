@@ -8,6 +8,15 @@ A PyQt/PySide desktop application for manga scanlators and preservationists that
 
 One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
 
+## Current Milestone: v1.2 Masker & Selective Inpaint + UI Rework
+
+**Goal:** Activate the deferred cleaning-track features (mask dilation + the Phase 3 D-15 std-deviation selective per-box inpaint seam), then rework the editor's panel/toolbar layout into a modular structure with a dedicated image-edit section.
+
+**Target features:**
+- Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative heatmap misses (`01-UAT.md` deferral)
+- Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility/override — activates the Phase 3 `PageBox.mask`/`std_dev` seam via the vendored `masker.py` machinery
+- UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools) (`06-UAT.md` deferral)
+
 ## Requirements
 
 ### Validated
@@ -18,15 +27,18 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - [x] Dual-mode workflow: batch-process a whole chapter (clean + OCR), then open individual pages for per-page fixes, flipping freely — *Cleaning half validated in Phase 2 (Batch Detect / Batch Clean / Batch Detect+Clean + per-page mask persistence); OCR half pending later phases*
 - [x] Basic image operations: crop, rotate, levels/curves, resize — *Validated in Phase 5 (crop/rotate/levels/resize) + Phase 6 (full curve editor replacing the Levels dialog, PROJ-04)*
 - [x] Typeset translated text into the page with full styling controls (font selection incl. machine fonts, style, size + auto-fit, color, alignment, effects: outline/glow/shadow, vertical tategaki text, default font) with bake-to-image export — *Validated in Phase 7: Typesetting (TRAN-02)*
+- [x] Detect text boxes as editable objects and select/move/resize/delete them — *Validated in Phase 3: Text Box Detection (TEXT-01, TEXT-03)*
+- [x] Manual draw-to-OCR, edit recognized text inline, manual translation layer per box — *Validated in Phase 4: OCR Recognition & Text Editing (TEXT-02, TEXT-04, TEXT-05)*
+- [x] Save/load projects as `.mas` files (boxes, masks, text, image state — resumable like a .psd) — *Validated in Phase 5: Project Persistence (PROJ-01)*
+- [x] Export OCR/box JSON (mokuro-style `_ocr.json`) alongside pages for downstream tools — *Validated in Phase 5 (PROJ-03)*
 
 ### Active
 
-- [ ] Detect text boxes: run mokuro-style detection across a page, then add/remove/move boxes to correct it
-- [ ] Manual OCR: draw a rectangle on the page and run MangaOCR on just that region to fill a box the detector missed
-- [ ] Edit recognized text: correct OCR mistakes by typing into the box
-- [ ] Translation layer: add a manual translation as a second text layer per box (clean seam for future MT integration)
-- [ ] Save/load projects as `.mas` files (boxes, masks, text, image state — resumable like a .psd)
-- [ ] Export OCR/box JSON (mokuro-style `_ocr.json`) alongside pages for downstream tools
+<!-- v1.2 scope. Activating deferred cleaning-track features + UI rework. -->
+
+- [ ] Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative CTD heatmap misses
+- [ ] Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility and override — activates the Phase 3 `PageBox.mask`/`std_dev` seam
+- [ ] UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools)
 
 ### Out of Scope
 
@@ -107,4 +119,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-12 after Phase 7 (Typesetting, TRAN-02) completion*
+*Last updated: 2026-08-13 after milestone v1.2 start (Masker & Selective Inpaint + UI Rework)*

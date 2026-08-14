@@ -1,19 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: milestone
-current_phase: 07
-status: completed
-stopped_at: Phase 7 UI-SPEC approved
-last_updated: "2026-08-12T05:25:06.044Z"
-last_activity: 2026-08-12
-last_activity_desc: Phase 07 complete
+milestone: v1.2
+milestone_name: Masker & Selective Inpaint + UI Rework
+status: planning
+last_updated: "2026-08-14T03:57:24.038Z"
+last_activity: 2026-08-14
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 59
-  completed_plans: 59
-current_phase_name: "Typesetting (TRAN-02): render translated text into the page"
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -27,12 +24,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 ## Current Position
 
-Phase: 07
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-08-12 — Phase 07 complete
-
-Progress: [██████████] 100% (4/4 phases, 29/29 plans)
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-08-14 — Milestone v1.2 started
 
 ## Performance Metrics
 
