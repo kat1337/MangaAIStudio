@@ -6,7 +6,7 @@ Manga AI Studio unifies manga page cleaning, mask editing, text-box OCR, and tra
 
 **Mode:** mvp
 **Granularity:** standard (5 phases)
-**Coverage:** 18/18 v1 requirements mapped; 8/8 v1.2 requirements mapped (Phases 8–9) ✓
+**Coverage:** 18/18 v1 requirements mapped; 10/10 v1.2 requirements mapped (Phases 8–9) ✓
 
 ## Phases
 
@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Project Persistence, Image Ops & Export** - Save/resume .mas projects, basic image operations, export _ocr.json (completed 2026-08-08)
 - [x] **Phase 6: Refinement & Polish** - Deferred v1.1 fixes (empty-state overlay, toolbar active-tool highlight, stale hint copy, dialog typography) + full draggable curve editor replacing the Levels dialog (completed 2026-08-09)
 - [x] **Phase 7: Typesetting (TRAN-02)** - Render translated text into the page with full styling controls (font, style, size, color, alignment, effects, tategaki) (completed 2026-08-09)
-- [ ] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override
+- [ ] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + box-constrained std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override + brush-paints-under-boxes tool behavior
 - [ ] **Phase 9: UI Rework** - Modular side panel, inspector toggle at top, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section
 
 ## Phase Details
@@ -351,17 +351,19 @@ Plans:
 
 - MASK-01 mask dilation: `phases/01-cleaning-workspace/01-UAT.md` deferred follow-up — "the CTD heatmap boundary is conservative and leaves the edges of letters unmasked... a small morphological dilation post-processing step (cv2.dilate or a configurable radius in TorchCTDModel.postprocess)." A detection-time configurable radius that grows auto-detected masks so letter edges get covered; surfaced as a cleaning-profile parameter.
 - MASK-02 / MASK-03 selective per-box inpaint: Phase 3 decision D-15 (`phases/03-text-box-detection-interaction/03-CONTEXT.md`, `03-RESEARCH.md`). Goal: inpaint ONLY the detected masks inside a box when the box's std deviation is low enough (uniform-enough region), rather than masking/inpainting the whole box. The machinery is ALREADY vendored (Phase 3 vendored `panelcleaner/masker.py` + `structures.py` per D-14) and the data-model seam is open: `PageBox.mask` and `PageBox.std_dev` currently default to `None` (the D-15 seam). Functions to use: `border_std_deviation(base_image, mask_1bit, off_white_threshold, allow_color) -> (std_dev, median_color)` and `pick_best_mask(...)` in `panelcleaner/image_ops.py`. MASK-03 adds per-box visibility (an indicator showing which boxes are selectively inpainted) and override (force inpaint / skip).
+- MASK-05 box-constrained inpainting: like PanelCleaner, only mask content inside text boxes is inpainted — the clean path intersects the mask with box interiors. Exact behavior of out-of-box mask content on the existing whole-page inpaint path (ignored vs. still inpainted via legacy Inpaint action) is a discuss-phase decision.
+- MASK-06 tool behavior: when a paint tool is active, text boxes do not block painting — the brush can paint mask under box items. Phase 3 D-07 ("boxes always interactive, no new tool mode") gains a paint-tool carve-out; the exact select-vs-paint event dispatch (e.g. boxes pass-through while a paint tool is checked) is a discuss-phase decision.
 - Reused seams: cleaning/inpaint foundation (Phase 1), box model + masker vendoring (Phase 3), OCR box context (Phase 4), `.mas` persistence (Phase 5).
 - Explicitly NOT in scope: interactive mask grow/shrink brush (MASK-04 — v2), per-region LaMa params (FLOW-07 — v2).
 
-**Requirements:** MASK-01, MASK-02, MASK-03
+**Requirements:** MASK-01, MASK-02, MASK-03, MASK-05, MASK-06
 **Depends on:** Phase 1, Phase 3, Phase 4
 **Success Criteria** (what must be TRUE):
 
   1. User can set a mask dilation radius (N pixels) that grows auto-detected text masks so letter edges the conservative CTD heatmap leaves unmasked get covered
-  2. User can run selective per-box inpainting that inpaints only the detected text masks inside boxes whose region is uniform enough (low std-deviation), preserving complex artwork regions instead of inpainting whole box regions
-  3. User can see, per box, whether it was selectively inpainted via an on-canvas/inspector indicator
-  4. User can override the auto selective-inpaint decision per box — force inpaint the whole box, or skip inpainting it
+  2. User can run selective per-box inpainting that inpaints only the detected text masks inside boxes — box-constrained (nothing outside a text box is inpainted, matching PanelCleaner) and std-deviation-gated (only in uniform-enough box regions), preserving complex artwork instead of inpainting whole box regions
+  3. User can see, per box, whether it was selectively inpainted (indicator) and override the auto decision — force inpaint the whole box, or skip inpainting it
+  4. User can paint mask under text boxes — when a paint tool is active, box items do not block brush strokes in box-overlapped regions
   5. The Phase 3 D-15 seam (`PageBox.mask` / `PageBox.std_dev`) is populated by the vendored `masker.py` machinery and round-trips through `.mas` project save/load
 
 **Plans:** TBD

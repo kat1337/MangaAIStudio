@@ -20,7 +20,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 8 — Masker & Selective Inpaint (MASK-01/02/03): mask dilation radius + selective per-box inpaint (Phase 3 D-15 seam)
+**Current focus:** Phase 8 — Masker & Selective Inpaint (MASK-01/02/03/05/06): mask dilation, box-constrained selective per-box inpaint (Phase 3 D-15 seam), brush-paints-under-boxes
 
 ## Current Position
 

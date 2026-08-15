@@ -10,11 +10,13 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 ## Current Milestone: v1.2 Masker & Selective Inpaint + UI Rework
 
-**Goal:** Activate the deferred cleaning-track features (mask dilation + the Phase 3 D-15 std-deviation selective per-box inpaint seam), then rework the editor's panel/toolbar layout into a modular structure with a dedicated image-edit section.
+**Goal:** Activate the deferred cleaning-track features (mask dilation + the Phase 3 D-15 std-deviation selective per-box inpaint seam + box-constrained inpainting + tool-behavior fixes), then rework the editor's panel/toolbar layout into a modular structure with a dedicated image-edit section.
 
 **Target features:**
 - Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative heatmap misses (`01-UAT.md` deferral)
 - Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility/override — activates the Phase 3 `PageBox.mask`/`std_dev` seam via the vendored `masker.py` machinery
+- Box-constrained inpainting (PanelCleaner model): only mask content inside text boxes is inpainted
+- Tool behavior: paint tools (brush) can paint mask under text boxes — box items don't block strokes
 - UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools) (`06-UAT.md` deferral)
 
 ## Requirements
@@ -38,6 +40,8 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 - [ ] Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative CTD heatmap misses
 - [ ] Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility and override — activates the Phase 3 `PageBox.mask`/`std_dev` seam
+- [ ] Box-constrained inpainting: only mask content inside text boxes is inpainted (PanelCleaner's box-driven cleaning model)
+- [ ] Paint tools can paint mask under text boxes (box items don't block brush strokes)
 - [ ] UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools)
 
 ### Out of Scope

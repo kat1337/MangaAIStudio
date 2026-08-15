@@ -46,6 +46,8 @@ Requirements for milestone v1.2 (Masker & Selective Inpaint + UI Rework). Each m
 - [ ] **MASK-01**: User can set a mask dilation radius so auto-detected text masks are grown by N pixels, covering letter edges the conservative CTD heatmap leaves unmasked
 - [ ] **MASK-02**: User can run selective per-box inpainting that inpaints only the detected text masks *inside* boxes whose region is uniform enough (low std-deviation), preserving complex artwork regions instead of inpainting whole box regions (activates the Phase 3 D-15 seam — `PageBox.mask`/`std_dev` fields filled via the vendored `masker.py` machinery)
 - [ ] **MASK-03**: User can see per-box whether it was selectively inpainted (indicator) and override the auto-decision (force inpaint / skip)
+- [ ] **MASK-05**: Inpainting is box-constrained — like PanelCleaner, only mask content inside text boxes is inpainted; mask regions outside any text box are not inpainted on the selective clean path (exact out-of-box behavior on the whole-page path is a discuss-phase decision)
+- [ ] **MASK-06**: User can paint mask under text boxes — when a paint tool is active, box items do not block brush strokes and regions overlapped by boxes can be masked
 
 ### UI Rework
 
@@ -123,6 +125,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MASK-01 | Phase 8 | Pending |
 | MASK-02 | Phase 8 | Pending |
 | MASK-03 | Phase 8 | Pending |
+| MASK-05 | Phase 8 | Pending |
+| MASK-06 | Phase 8 | Pending |
 | UI-01 | Phase 9 | Pending |
 | UI-02 | Phase 9 | Pending |
 | UI-03 | Phase 9 | Pending |
@@ -132,7 +136,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 **Coverage:**
 
 - v1 requirements: 18 total — 18 mapped, 0 unmapped ✓
-- v1.2 requirements: 8 total — 8 mapped (Phase 8–9), 0 unmapped ✓
+- v1.2 requirements: 10 total — 10 mapped (Phase 8–9), 0 unmapped ✓
 
 ---
 *Requirements defined: 2026-07-11*
