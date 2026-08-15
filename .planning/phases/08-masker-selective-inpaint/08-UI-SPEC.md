@@ -1,7 +1,8 @@
 ---
 phase: 8
 slug: masker-selective-inpaint
-status: draft
+status: approved
+reviewed_at: 2026-08-15
 shadcn_initialized: false
 preset: none
 created: 2026-08-15
