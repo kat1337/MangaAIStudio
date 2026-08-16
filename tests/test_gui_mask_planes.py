@@ -527,7 +527,9 @@ def test_planes_round_trip_across_page_switch(qtbot, tmp_path) -> None:
     composite_a = mask_to_numpy_binary(canvas.get_mask())
     assert composite_a.any()
 
-    # A -> B -> A.
+    # A -> B -> A (the real navigation sequence: select_path flips
+    # current_path BEFORE the seam runs — the outgoing-index rule).
+    window.file_table.select_path(p2)
     window.on_page_selected(p2)
     assert not mask_to_numpy_binary(canvas.get_mask()).any(), (
         "page B starts with empty planes (no bleed from page A)"
@@ -537,6 +539,7 @@ def test_planes_round_trip_across_page_switch(qtbot, tmp_path) -> None:
     assert imf_a.mask_manual is not None, "manual plane packed into ImageFile A"
     assert imf_a.mask_erase is not None, "erase ledger packed into ImageFile A"
 
+    window.file_table.select_path(p1)
     window.on_page_selected(p1)
     np.testing.assert_array_equal(
         mask_to_numpy_binary(canvas.get_mask()), composite_a
@@ -551,3 +554,282 @@ def test_planes_round_trip_across_page_switch(qtbot, tmp_path) -> None:
     assert (stored_manual & ~stroked).any() or not np.array_equal(
         stored_manual, stroked
     ), "the persisted manual plane is a detached copy, not the live plane"
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — MASK-06 paint-under-boxes dispatch carve-out (D-15..D-18)
+# ---------------------------------------------------------------------------
+
+
+def _press(
+    canvas: EditorCanvas,
+    sx: float,
+    sy: float,
+    *,
+    alt: bool = False,
+    shift: bool = False,
+) -> QMouseEvent:
+    """A left-press at scene (sx, sy) with optional Alt/Shift modifiers."""
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    mods = Qt.KeyboardModifier.NoModifier
+    if alt:
+        mods |= Qt.KeyboardModifier.AltModifier
+    if shift:
+        mods |= Qt.KeyboardModifier.ShiftModifier
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        mods,
+    )
+
+
+def _move(canvas: EditorCanvas, sx: float, sy: float) -> QMouseEvent:
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(vp),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _release(
+    canvas: EditorCanvas, sx: float, sy: float, *, alt: bool = False, shift: bool = False
+) -> QMouseEvent:
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    mods = Qt.KeyboardModifier.NoModifier
+    if alt:
+        mods |= Qt.KeyboardModifier.AltModifier
+    if shift:
+        mods |= Qt.KeyboardModifier.ShiftModifier
+    return QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(vp),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        mods,
+    )
+
+
+def _dblclick(canvas: EditorCanvas, sx: float, sy: float) -> QMouseEvent:
+    vp = canvas.mapFromScene(QPointF(sx, sy))
+    return QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _canvas_with_box(qtbot) -> EditorCanvas:
+    """A shown 200x200 canvas at zoom 1.0 with one user box (30,30)-(90,70)."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(400, 400)
+    img = QImage(200, 200, QImage.Format.Format_RGB32)
+    img.fill(QColor(200, 200, 200))
+    canvas.set_image(QPixmap.fromImage(img))
+    canvas.set_boxes(
+        user_pageboxes=[PageBox(box=Box(30, 30, 90, 70), origin=USER)],
+        detected_pageboxes=[],
+    )
+    canvas.show()
+    canvas.viewport().show()
+    QApplication.processEvents()
+    canvas.zoom_reset()
+    return canvas
+
+
+def _box(canvas: EditorCanvas):
+    """The (single) box item on the canvas."""
+    return canvas._box_items[0]
+
+
+@pytest.mark.gui
+def test_brush_press_on_box_body_paints_not_selects(qtbot) -> None:
+    """MASK-06: Brush active, press on a box body -> the press PAINTS (the
+    box is not selected)."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.zoom_reset()
+
+    canvas.mousePressEvent(_press(canvas, 60, 50))  # box body center
+
+    assert canvas._is_painting is True, "press on a box body must paint (MASK-06)"
+    assert not _box(canvas).isSelected(), "the box must NOT be selected"
+    assert canvas._moving_box is None
+
+
+@pytest.mark.gui
+def test_brush_press_on_corner_handle_paints_not_resizes(qtbot) -> None:
+    """MASK-06/D-15: Brush active, press on a (visible) corner handle ->
+    paints, not resize."""
+    canvas = _canvas_with_box(qtbot)
+    item = _box(canvas)
+    item.setSelected(True)  # handles are visible only when selected (D-08)
+    QApplication.processEvents()
+    handle_ctr = item.handles["TR"].sceneBoundingRect().center()
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mousePressEvent(_press(canvas, handle_ctr.x(), handle_ctr.y()))
+
+    assert canvas._is_painting is True, "press on a handle must paint (D-15)"
+    assert canvas._resizing_box is None, "no resize may arm under a paint tool"
+
+
+@pytest.mark.gui
+def test_shift_click_on_box_under_brush_paints(qtbot) -> None:
+    """UI-SPEC §39 Shift row: Shift+click on a box under a paint tool PAINTS —
+    the Phase 7 Shift selection-toggle is unreachable while painting."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mousePressEvent(_press(canvas, 60, 50, shift=True))
+
+    assert canvas._is_painting is True, "Shift+click under Brush paints"
+    assert not _box(canvas).isSelected(), "no selection toggle may fire"
+
+
+@pytest.mark.gui
+def test_alt_click_on_box_selects_under_brush(qtbot) -> None:
+    """D-15: Alt+click on a box body selects it (and arms the move) while a
+    paint tool is active."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mousePressEvent(_press(canvas, 60, 50, alt=True))
+
+    item = _box(canvas)
+    assert item.isSelected(), "Alt+click must select the box (D-15)"
+    assert canvas._moving_box is item, "Alt+click arms select + move (D-15)"
+    assert canvas._is_painting is False, "Alt+click is not a paint"
+
+
+@pytest.mark.gui
+def test_alt_drag_on_box_moves_it_under_brush(qtbot) -> None:
+    """D-15: Alt+drag on a box body selects + moves it while a paint tool is
+    active (the Phase 7 group-move machinery when multi-selected)."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mousePressEvent(_press(canvas, 60, 50, alt=True))
+    canvas.mouseMoveEvent(_move(canvas, 75, 58))
+    canvas.mouseReleaseEvent(_release(canvas, 75, 58, alt=True))
+
+    moved = _box(canvas).rect().toRect()
+    assert (moved.topLeft().x(), moved.topLeft().y()) == (45, 38), (
+        f"Alt+drag must move the box by the scene delta; got {moved.topLeft()}"
+    )
+
+
+@pytest.mark.gui
+def test_alt_drag_empty_canvas_creates_box_under_brush(qtbot) -> None:
+    """D-15: Alt+drag on EMPTY canvas creates a box while a paint tool is
+    active (create stays on empty canvas only)."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+    count_before = canvas.box_count()
+
+    canvas.mousePressEvent(_press(canvas, 120, 120, alt=True))
+    assert canvas._creating_box is True
+    canvas.mouseMoveEvent(_move(canvas, 160, 150))
+    canvas.mouseReleaseEvent(_release(canvas, 160, 150, alt=True))
+
+    assert canvas.box_count() == count_before + 1
+    assert canvas._is_painting is False
+
+
+@pytest.mark.gui
+def test_alt_handle_resizes_only_when_sole_selection(qtbot) -> None:
+    """D-15 + today's gate: Alt+handle engages a resize only when the
+    handle's box is the SOLE selection; otherwise a dead press (identical to
+    today's :1063-1066 behavior)."""
+    canvas = _canvas_with_box(qtbot)
+    item = _box(canvas)
+    item.setSelected(True)  # sole selection
+    QApplication.processEvents()
+    handle_ctr = item.handles["TL"].sceneBoundingRect().center()
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mousePressEvent(_press(canvas, handle_ctr.x(), handle_ctr.y(), alt=True))
+    assert canvas._resizing_box is item, "Alt+handle resizes the sole selection"
+    assert canvas._is_painting is False
+    # Abort the started resize (release without moving).
+    canvas.mouseReleaseEvent(_release(canvas, handle_ctr.x(), handle_ctr.y(), alt=True))
+
+    # Dead press: add a second selected box, then Alt+press the handle.
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from panelcleaner.structures import Box
+
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(30, 30, 90, 70), origin=USER),
+            PageBox(box=Box(110, 110, 170, 150), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    items = canvas._box_items
+    for it in items:
+        it.setSelected(True)
+    QApplication.processEvents()
+    handle_ctr = items[0].handles["TL"].sceneBoundingRect().center()
+
+    canvas.mousePressEvent(_press(canvas, handle_ctr.x(), handle_ctr.y(), alt=True))
+    assert canvas._resizing_box is None, "multi-selection: Alt+handle is a dead press"
+    assert canvas._is_painting is False, "a dead press must not paint either"
+
+
+@pytest.mark.gui
+def test_crop_tool_press_on_box_still_selects(qtbot) -> None:
+    """D-17: the Crop tool keeps today's box behavior — a press on a box body
+    selects + arms the move (CROP is not in PAINT_TOOLS)."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.CROP)
+
+    canvas.mousePressEvent(_press(canvas, 60, 50))
+
+    item = _box(canvas)
+    assert item.isSelected(), "Crop keeps today's box selection (D-17)"
+    assert canvas._moving_box is item
+    assert canvas._is_painting is False
+
+
+@pytest.mark.gui
+def test_move_tool_press_on_box_behaves_as_today(qtbot) -> None:
+    """Move/Pan: press on a box selects + arms move; Shift+click toggles
+    membership (Phase 7 D-08) — the non-paint branch runs verbatim."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.MOVE)
+
+    canvas.mousePressEvent(_press(canvas, 60, 50))
+    assert _box(canvas).isSelected()
+    assert canvas._moving_box is _box(canvas)
+    canvas.mouseReleaseEvent(_release(canvas, 60, 50))
+
+    # Shift+click on the same box under Move: TOGGLES (deselects) — the D-08
+    # membership toggle stays reachable outside paint tools.
+    canvas.mousePressEvent(_press(canvas, 60, 50, shift=True))
+    canvas.mouseReleaseEvent(_release(canvas, 60, 50, shift=True))
+    assert not _box(canvas).isSelected(), "Shift toggle works under Move (today)"
+
+
+@pytest.mark.gui
+def test_double_click_box_under_brush_opens_inline_editor(qtbot) -> None:
+    """D-16: double-click a box opens the inline editor under ANY tool (the
+    first press may leave one undoable dot — accepted per UI-SPEC Open
+    Question 1)."""
+    canvas = _canvas_with_box(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+
+    canvas.mouseDoubleClickEvent(_dblclick(canvas, 60, 50))
+
+    assert canvas._inline_editor.is_active(), (
+        "double-click must open the inline editor under a paint tool (D-16)"
+    )
