@@ -39,14 +39,24 @@ class ProfileManager:
         return profile_path
 
     def load_profile(self, name: str) -> Profile:
-        """Load a profile from an INI ``.profile`` file.
+        """Load a profile from an INI ``.profile`` file and APPLY it.
+
+        The loaded profile is assigned to ``self.config.current_profile`` —
+        the object the MainWindow reads (main_window.py reads
+        ``profile_manager.config.current_profile``) — and returned. Without
+        the assignment a startup load (``__main__`` calls
+        ``load_profile("default")`` per plan 08-01, closing RESEARCH §4.1's
+        gap) would be a discarded return value and D-10 persistence would
+        never reach the app.
 
         ``Profile.load`` is a classmethod (config.py:1015). On any read failure
         it logs and returns a fresh default ``Profile()`` (config.py:1031-1034);
         we preserve that behavior and do not wrap it.
         """
         profile_path = self.config_dir / f"{name}.profile"
-        return Profile.load(profile_path)
+        profile = Profile.load(profile_path)
+        self.config.current_profile = profile
+        return profile
 
     def profile_to_config(self, profile: Profile) -> Config:
         """Materialize a ``Profile`` into a ``Config``.

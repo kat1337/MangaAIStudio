@@ -561,6 +561,12 @@ class MaskerConfig:
     mask_max_standard_deviation: float = 15
     mask_improvement_threshold: float = 0.1
     mask_selection_fast: bool = False
+    # Manga AI Studio addition (Phase 8, D-09/D-10 — plan 08-01): NOT an
+    # upstream PanelCleaner key. A conscious vendoring deviation per RESEARCH
+    # §4.2 option (a), like the 03-01 qualified-name rewrites. Upstream PC
+    # ignores the extra key gracefully on import (unknown options are
+    # skipped by import_from_conf).
+    mask_dilation_radius: Pixels = 2
     debug_mask_color: tuple[int, int, int, int] = (108, 30, 240, 127)
 
     def export_to_conf(
@@ -629,7 +635,12 @@ class MaskerConfig:
         # When true, the mask selection algorithm will pick the first perfect mask, if one is found early.
         # This is faster, but may not find the best mask, if a slightly bigger one would have been better.
         mask_selection_fast = {self.mask_selection_fast}
-        
+
+        # Number of pixels to grow (dilate) auto-detected masks by, so letter edges the conservative
+        # heatmap missed get covered. Hand-painted mask strokes are never dilated. Changing this
+        # re-dilates the current page immediately.
+        mask_dilation_radius = {self.mask_dilation_radius}
+
         # Color to use for the debug mask. [CLI: This is a tuple of RGBA values.]
         debug_mask_color = {','.join(map(str, self.debug_mask_color))}
         
@@ -658,6 +669,7 @@ class MaskerConfig:
         try_to_load(self, config_updater, section, int, "off_white_max_threshold")
         try_to_load(self, config_updater, section, float, "mask_improvement_threshold")
         try_to_load(self, config_updater, section, bool, "mask_selection_fast")
+        try_to_load(self, config_updater, section, Pixels, "mask_dilation_radius")
         try_to_load(self, config_updater, section, float, "mask_max_standard_deviation")
         try:
             color_tuple: tuple[int, ...] = tuple(
