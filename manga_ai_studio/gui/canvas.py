@@ -71,7 +71,11 @@ from manga_ai_studio.core.mask_editor import (
     paint_mask_rect,
     paint_mask_stroke,
 )
-from manga_ai_studio.core.mask_planes import MaskPlanesSnapshot, pack_binary
+from manga_ai_studio.core.mask_planes import (
+    MaskPlanesSnapshot,
+    pack_binary,
+    unpack_binary,
+)
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, origin_hue
 from manga_ai_studio.gui.inline_editor import InlineEditor
 
@@ -741,24 +745,31 @@ class EditorCanvas(QGraphicsView):
         self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
 
     # ------------------------------------------------------- undo application
-    def apply_undo_mask(self, mask_qimage: QImage) -> None:
-        """Restore a mask snapshot from the history (plan 06, UI-SPEC surface 8).
+    def apply_undo_mask(self, snapshot: "MaskPlanesSnapshot") -> None:
+        """Restore a plane snapshot from the history (plan 06/08-02, surface 8).
 
-        Replaces the editable ``self._mask`` with ``mask_qimage.copy()`` (the
-        ``.copy()`` detaches from the history's internal copy so subsequent
-        strokes do not mutate the history entry) and refreshes the display
-        WITHOUT emitting ``mask_modified`` — undo must NOT re-push onto the
-        stack (``test_undo_does_not_repush`` is the regression guard;
+        REDEFINED in Phase 8 (plan 08-02 Task 2): the MASK stack values are
+        now ``MaskPlanesSnapshot`` (manual/erase QImages + the packed auto
+        binary). Restores all three planes via :meth:`set_planes` (which
+        ``.copy()``-detaches every value from the history's internal copy so
+        subsequent strokes cannot mutate the entry) and recomposes — the
+        displayed composite becomes exactly the snapshot's
+        ``(manual | auto) & ~erase``. NO ``mask_modified`` emission — undo
+        must NOT re-push onto the stack (``test_undo_does_not_repush`` /
+        ``test_undo_does_not_repush_planes`` are the regression guards;
         UI-SPEC surface 8 prohibition).
         """
-        if mask_qimage is None or mask_qimage.isNull():
-            return
-        # Detach from the history's internal list so a stroke mutation of
-        # self._mask cannot corrupt the history entry.
-        self._mask = mask_qimage.copy()
-        self.mask_item.setPixmap(QPixmap.fromImage(self._mask))
-        self.mask_item.setVisible(True)
-        self._mask_visible = True
+        if not isinstance(snapshot, MaskPlanesSnapshot):
+            raise TypeError(
+                f"apply_undo_mask expects a MaskPlanesSnapshot (Phase 8 mask "
+                f"stack value), got {type(snapshot).__name__}"
+            )
+        auto_bin = (
+            unpack_binary(snapshot.auto_packed, snapshot.manual.height(), snapshot.manual.width())
+            if snapshot.auto_packed is not None
+            else None
+        )
+        self.set_planes(snapshot.manual, snapshot.erase, auto_bin)
 
     def apply_undo_image(self, x: int, y: int, patch_np: np.ndarray) -> None:
         """Composite a numpy patch into the displayed image (plan 06 undo).

@@ -72,6 +72,11 @@ from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
 )
+from manga_ai_studio.core.mask_planes import (
+    MaskPlanesSnapshot,
+    pack_binary,
+    unpack_binary,
+)
 from manga_ai_studio.core.text_style import TextStyle, default_style
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from panelcleaner.structures import Box
@@ -241,7 +246,15 @@ class MainWindow(QMainWindow):
         # state", tracked here and refreshed after each push. reset_history
         # clears it (fresh per page). None = "no prior stroke; the next stroke
         # seeds the clean baseline as its before-state".
-        self._pre_stroke_mask: QImage | None = None
+        #
+        # Phase 8 (plan 08-02): the tracked value is now the THREE-PLANE
+        # snapshot (``MaskPlanesSnapshot`` — manual + erase + auto), so undo
+        # restores whole-plane state, not just the composite. The seed rule
+        # generalizes 03-08: the first stroke's before-state is transparent
+        # manual/erase planes + the CURRENT auto plane (undoing the first
+        # stroke removes only the manual contribution — the 03-08 semantic
+        # shift, now expected behavior per RESEARCH §9).
+        self._pre_stroke_planes: MaskPlanesSnapshot | None = None
 
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
@@ -1271,7 +1284,12 @@ class MainWindow(QMainWindow):
         if pre_image is None:
             return
         pre_image = pre_image.copy()
-        pre_mask = self.canvas.get_mask().copy() if self.canvas.has_mask() else None
+        # Phase 8 (plan 08-02): the MASK component of the geometry record is
+        # the pre-op PLANES snapshot (MaskPlanesSnapshot) — the mask stack
+        # values are plane snapshots now, and apply_undo_mask restores planes.
+        pre_planes = (
+            self.canvas.planes_snapshot() if self.canvas.has_mask() else None
+        )
         pre_boxes = self.canvas.boxes_snapshot()
 
         result = transform_fn()
@@ -1280,7 +1298,7 @@ class MainWindow(QMainWindow):
         new_image, new_mask_bin, new_boxes = result
 
         self.canvas.set_image_from_numpy(new_image)
-        transformed_mask = new_mask_bin is not None and pre_mask is not None
+        transformed_mask = new_mask_bin is not None and pre_planes is not None
         transformed_boxes = new_boxes is not None
         if transformed_mask:
             # Phase 8 (plan 08-02, Rule 1 deviation): set_mask now replaces
@@ -1315,7 +1333,7 @@ class MainWindow(QMainWindow):
         self._record_geometry_op_name(op_name)
         self.history.push_geometry_state(
             pre_image,
-            mask_qimage=pre_mask if transformed_mask else None,
+            mask_qimage=pre_planes if transformed_mask else None,
             boxes=pre_boxes if transformed_boxes else None,
         )
         self.canvas.rebaseline_original()
@@ -1725,6 +1743,23 @@ class MainWindow(QMainWindow):
             # buffer (Pitfall 2 / T-02-04, regression-guarded by
             # test_mask_persistence_uses_copy).
             self.image_files[outgoing_idx].mask = self.canvas.get_mask().copy()
+            # Phase 8 (plan 08-02): pack the three live planes into the
+            # outgoing page's slots — the D-11 seam for plane state. The
+            # packed arrays are FRESH (pack_binary output), so the boundary
+            # detach is by construction (the test_box_persistence_uses_copy
+            # boundary-copy semantics carried onto the plane path). A plane
+            # with no content packs to None (a never-touched page stores
+            # nothing and later restores via the legacy composite fallback).
+            imf_out = self.image_files[outgoing_idx]
+            imf_out.auto_mask = (
+                pack_binary(self.canvas._auto_bin)
+                if self.canvas._auto_bin is not None
+                else None
+            )
+            manual_bin = mask_to_numpy_binary(self.canvas._mask_manual)
+            imf_out.mask_manual = pack_binary(manual_bin) if manual_bin.any() else None
+            erase_bin = mask_to_numpy_binary(self.canvas._mask_erase)
+            imf_out.mask_erase = pack_binary(erase_bin) if erase_bin.any() else None
 
         # Step 1b (plan 03-05): persist the OUTGOING page's canvas boxes into its
         # ImageFile.boxes (the D-11 mirror of Phase 2's mask seam). boxes_snapshot()
@@ -1777,11 +1812,11 @@ class MainWindow(QMainWindow):
                 # The path-based load resets the mask to a fresh transparent
                 # one (set_image); mirror it here so a stale overlay from the
                 # outgoing page does not linger (Step 4 restores the incoming
-                # mask when present).
-                h, w = imf.current_image.shape[:2]
-                empty = QImage(w, h, QImage.Format.Format_ARGB32)
-                empty.fill(Qt.GlobalColor.transparent)
-                self.canvas.set_mask(empty)
+                # mask when present). Phase 8: set_planes(None, None, None)
+                # ALSO wipes the three planes — the same-dims numpy load does
+                # not re-seed them, so the outgoing page's manual/erase/auto
+                # would otherwise bleed into this page's composite.
+                self.canvas.set_planes(None, None, None)
         else:
             if not self.canvas.set_image_from_path(path):
                 # UI-SPEC §Copywriting "file unreadable" dialog.
@@ -1803,10 +1838,51 @@ class MainWindow(QMainWindow):
             and self.image_files[incoming_idx].mask is not None
             and not self.image_files[incoming_idx].mask.isNull()
         ):
-            # The boundary .copy() is belt-and-suspenders (set_mask also copies
-            # at canvas.py:305); it is what test_mask_persistence_uses_copy
-            # asserts on for the INCOMING direction.
-            self.canvas.set_mask(self.image_files[incoming_idx].mask.copy())
+            imf_in = self.image_files[incoming_idx]
+            if imf_in.has_mask_planes():
+                # Phase 8 (plan 08-02): restore the three planes, unpacked
+                # against the page dims (the canvas was seeded at them in
+                # Step 3). set_planes .copy()-detaches every value; the
+                # unpacked arrays are fresh by construction.
+                page_mask = self.canvas.get_mask()
+                h, w = page_mask.height(), page_mask.width()
+                manual_bin = (
+                    unpack_binary(imf_in.mask_manual, h, w)
+                    if imf_in.mask_manual is not None
+                    else None
+                )
+                erase_bin = (
+                    unpack_binary(imf_in.mask_erase, h, w)
+                    if imf_in.mask_erase is not None
+                    else None
+                )
+                auto_bin = (
+                    unpack_binary(imf_in.auto_mask, h, w)
+                    if imf_in.auto_mask is not None
+                    else None
+                )
+                self.canvas.set_planes(
+                    numpy_binary_to_mask_qimage(manual_bin)
+                    if manual_bin is not None
+                    else None,
+                    numpy_binary_to_mask_qimage(erase_bin)
+                    if erase_bin is not None
+                    else None,
+                    auto_bin,
+                )
+            else:
+                # Legacy fallback (pre-Phase-8 page / no plane data): the
+                # persisted composite lands in the AUTO plane — documented
+                # provenance loss (manual vs. detected origin is not
+                # recoverable from a flat mask). Wipe the outgoing page's
+                # lingering planes first — set_mask replaces only the auto
+                # plane now, and a same-dims numpy Step-3 load does not
+                # re-seed them.
+                self.canvas.set_planes(None, None, None)
+                # The boundary .copy() is belt-and-suspenders (set_mask also
+                # copies internally); it is what test_mask_persistence_uses_copy
+                # asserts on for the INCOMING direction.
+                self.canvas.set_mask(imf_in.mask.copy())
 
         # Step 4b (plan 03-05): restore the INCOMING page's persisted boxes onto
         # the canvas (the D-11 mirror of Phase 2's mask restore). set_boxes
@@ -2027,6 +2103,21 @@ class MainWindow(QMainWindow):
             return
         if self.canvas.has_mask():
             self.image_files[idx].mask = self.canvas.get_mask().copy()
+            # Phase 8 (plan 08-02): the same plane flush as on_page_selected
+            # Step 1 — the CURRENT page's live planes are packed into its
+            # ImageFile slots (in-memory only; the .mas container write for
+            # the four plane keys is owned by plan 08-07 Task 3, the plan
+            # that owns the matching load-side wiring).
+            imf = self.image_files[idx]
+            imf.auto_mask = (
+                pack_binary(self.canvas._auto_bin)
+                if self.canvas._auto_bin is not None
+                else None
+            )
+            manual_bin = mask_to_numpy_binary(self.canvas._mask_manual)
+            imf.mask_manual = pack_binary(manual_bin) if manual_bin.any() else None
+            erase_bin = mask_to_numpy_binary(self.canvas._mask_erase)
+            imf.mask_erase = pack_binary(erase_bin) if erase_bin.any() else None
         self.image_files[idx].boxes = self.canvas.boxes_snapshot()
         image_np = self.canvas.get_image_numpy()
         if image_np is not None:
@@ -2456,19 +2547,56 @@ class MainWindow(QMainWindow):
 
         The load-side mirror of the D-11 seam: the embedded ``current_image``
         goes in via ``set_image_from_numpy`` (no re-decode — the D-05
-        current-image contract), the mask via ``set_mask`` (empty transparent
-        when the page has none — the stale overlay must not linger),
-        and the boxes via ``set_boxes`` split by origin, with the
-        ``_suppress_boxes_push`` guard (WR-05: a pure restore must not push).
+        current-image contract), the mask via the plane restore (Phase 8:
+        ``set_planes`` when the page carries plane data, else the legacy
+        composite->auto-plane fallback; empty planes + composite when the page
+        has none — the stale overlay must not linger), and the boxes via
+        ``set_boxes`` split by origin, with the ``_suppress_boxes_push`` guard
+        (WR-05: a pure restore must not push).
         """
         self.canvas.set_image_from_numpy(imf.current_image.copy())
-        if imf.mask is not None and not imf.mask.isNull():
+        if imf.has_mask_planes():
+            # Phase 8 (plan 08-02): restore the three planes when the page
+            # carries plane data (the on_page_selected Step-4 mirror for the
+            # project-open path; plan 08-07's load side populates the slots).
+            page_mask = self.canvas.get_mask()
+            h, w = page_mask.height(), page_mask.width()
+            manual_bin = (
+                unpack_binary(imf.mask_manual, h, w)
+                if imf.mask_manual is not None
+                else None
+            )
+            erase_bin = (
+                unpack_binary(imf.mask_erase, h, w)
+                if imf.mask_erase is not None
+                else None
+            )
+            auto_bin = (
+                unpack_binary(imf.auto_mask, h, w)
+                if imf.auto_mask is not None
+                else None
+            )
+            self.canvas.set_planes(
+                numpy_binary_to_mask_qimage(manual_bin)
+                if manual_bin is not None
+                else None,
+                numpy_binary_to_mask_qimage(erase_bin)
+                if erase_bin is not None
+                else None,
+                auto_bin,
+            )
+        elif imf.mask is not None and not imf.mask.isNull():
+            # Legacy fallback: the persisted composite lands in the auto
+            # plane (documented provenance loss). The plane wipe first is
+            # REQUIRED here — set_image_from_numpy does not re-seed planes on
+            # a same-dims switch, so the previously displayed page's planes
+            # would bleed into this one's composite.
+            self.canvas.set_planes(None, None, None)
             self.canvas.set_mask(imf.mask.copy())
         else:
-            h, w = imf.current_image.shape[:2]
-            empty = QImage(w, h, QImage.Format.Format_ARGB32)
-            empty.fill(Qt.GlobalColor.transparent)
-            self.canvas.set_mask(empty)
+            # No mask at all — wipe planes + composite (the stale-overlay
+            # guard; mirrors on_page_selected Step 3's empty branch).
+            self.canvas.set_planes(None, None, None)
         user_pbs = [pb for pb in (imf.boxes or []) if pb.origin == USER]
         detected_pbs = [pb for pb in (imf.boxes or []) if pb.origin == DETECTED]
         self._suppress_boxes_push = True
@@ -2828,63 +2956,70 @@ class MainWindow(QMainWindow):
         page boundaries (UI-SPEC surface 8; MangaCleaner_GPU
         main_window.py:347 pattern — ``self.history = HistoryManager(...)`` on
         file open). Also refreshes the undo/redo button enable state. Clears
-        the per-page mask-baseline-seeded sentinel (plan 03-08) so the first
-        stroke of the new page re-seeds its clean baseline.
+        the per-page mask-baseline-seeded sentinel (plan 03-08, planes since
+        08-02) so the first stroke of the new page re-seeds its clean
+        baseline.
         """
         self.history = HistoryManager(limit=20)
-        self._pre_stroke_mask = None
+        self._pre_stroke_planes = None
         self._update_undo_redo_actions()
 
-    def _on_mask_modified(self) -> None:
-        """Mask push hook: a stroke committed -> push the PRE-stroke state.
+    def _clean_plane_seed(self) -> MaskPlanesSnapshot:
+        """The first-stroke before-state: transparent manual/erase + CURRENT auto.
 
-        ``push_mask_state`` ``.copy()``-detaches internally (Pitfall 2), so
-        passing the live ``canvas.get_mask()`` here is safe. The hook is the
-        ONLY mask push path; ``on_undo`` applies mask snapshots via
-        ``canvas.apply_undo_mask`` (no re-emission).
+        The plan 03-08 clean-baseline rule generalized to planes (08-02): a
+        fresh page's first stroke pushes against "no manual work yet, whatever
+        the detection left" — undoing it removes only the stroke's manual
+        contribution and leaves the auto plane untouched.
+        """
+        current = self.canvas.get_mask()
+        assert current is not None  # guarded by has_mask() at the call site
+        manual = QImage(current.size(), QImage.Format.Format_ARGB32)
+        manual.fill(Qt.GlobalColor.transparent)
+        erase = QImage(current.size(), QImage.Format.Format_ARGB32)
+        erase.fill(Qt.GlobalColor.transparent)
+        return MaskPlanesSnapshot(
+            manual=manual,
+            erase=erase,
+            auto_packed=(
+                pack_binary(self.canvas._auto_bin)
+                if self.canvas._auto_bin is not None
+                else None
+            ),
+        )
+
+    def _on_mask_modified(self) -> None:
+        """Mask push hook: a stroke committed -> push the PRE-stroke PLANES.
+
+        ``push_mask_state`` ``.copy()``-detaches internally (Pitfall 2 —
+        ``MaskPlanesSnapshot.copy()`` detaches all three planes), so passing
+        the live snapshot here is safe. The hook is the ONLY mask push path;
+        ``on_undo`` applies plane snapshots via ``canvas.apply_undo_mask``
+        (no re-emission).
 
         Plan 03-08 (FLOW-02 regression / UAT test 3 addendum): the push
-        convention is the mask BEFORE-state (the state to restore to on undo),
-        mirroring the IMAGE side's pre-edit push contract (each
-        ``push_image_action`` "records the PRE-edit region so undo restores
-        it") and plan 03-07's BOXES before-state discipline. The pre-fix code
-        pushed the AFTER-state (``canvas.get_mask()`` post-stroke), which made
-        ``pop_mask_undo`` return the after-state itself — a no-op that left the
-        stroke on the canvas and, after an inpaint interleaving, made the brush
-        appear "stuck" on the 2nd Ctrl+Z.
+        convention is the BEFORE-state (the state to restore to on undo),
+        mirroring the IMAGE side's pre-edit push contract and plan 03-07's
+        BOXES before-state discipline. The before-state of stroke N is the
+        plane state as it was BEFORE stroke N began = the after-state of
+        stroke N-1, tracked in ``self._pre_stroke_planes`` (this hook fires
+        AFTER the stroke is painted, so the before-state cannot be read from
+        the live canvas). For the FIRST stroke of a per-page session the
+        before-state is the clean seed (``_clean_plane_seed`` — transparent
+        manual/erase + the CURRENT auto). After pushing, the tracker is
+        refreshed to the current (post-stroke) plane snapshot.
 
-        The before-state of stroke N is the mask as it was BEFORE stroke N
-        began = the after-state of stroke N-1. Because this hook fires AFTER
-        the stroke is painted (canvas ``_end_paint`` paints then emits), the
-        before-state cannot be read from ``canvas.get_mask()`` (that is the
-        post-stroke state); instead it is reconstructed as the previous
-        stroke's after-state, tracked in ``self._pre_stroke_mask``. For the
-        FIRST stroke of a per-page session there is no previous after-state,
-        so the before-state is a clean/empty mask of the current size/format
-        (the user's mental model: "undo my brush work -> clean canvas"). After
-        pushing the before-state, ``_pre_stroke_mask`` is refreshed to the
-        current (post-stroke) mask so the next stroke's before-state is this
-        stroke's after-state.
-
-        Result: mask stack after stroke 1 = [clean]; undo pops clean -> stroke
-        gone. After stroke 2 = [clean, after_1]; undo pops after_1 -> stroke 2
-        gone; undo pops clean -> stroke 1 gone. This is exactly parallel to how
-        plan 03-07 lets the first box edit push against the detection baseline.
+        Result: mask stack after stroke 1 = [seed]; undo pops seed -> only the
+        stroke's manual contribution disappears (the auto plane survives —
+        the 03-08 semantic shift, now the plane model's contract). After
+        stroke 2 = [seed, planes_1]; one Ctrl+Z per stroke, redo reverses.
         """
         if self.history is None or not self.canvas.has_mask():
             return
-        current = self.canvas.get_mask()
-        if self._pre_stroke_mask is None:
-            # First stroke of the per-page session: the before-state is a clean
-            # baseline (the canvas as it was before any stroke). Same size/
-            # format as the live mask so apply_undo_mask can swap it in.
-            before = QImage(current.size(), current.format())
-            before.fill(Qt.GlobalColor.transparent)
-        else:
-            before = self._pre_stroke_mask
+        before = self._pre_stroke_planes or self._clean_plane_seed()
         self.history.push_mask_state(before)
         # Track this stroke's after-state as the next stroke's before-state.
-        self._pre_stroke_mask = current.copy()
+        self._pre_stroke_planes = self.canvas.planes_snapshot()
         self._update_undo_redo_actions()
 
     def _on_boxes_modified(self, before_snapshot) -> None:
@@ -3435,7 +3570,12 @@ class MainWindow(QMainWindow):
         """
         if self._current_page_index() is None:
             return None, None, []
-        current_mask = self.canvas.get_mask() if self.canvas.has_mask() else None
+        # Phase 8 (plan 08-02): the mask component is the live PLANES snapshot
+        # (None-safe when no page) — pop_mask_undo stashes it via its
+        # duck-typed .copy() so redo reverses the whole-plane state.
+        current_mask = (
+            self.canvas.planes_snapshot() if self.canvas.has_mask() else None
+        )
         # image: only meaningful if the canvas has one; pop_image_undo slices
         # current_img[y:y+h, x:x+w] so a real array is required when image is
         # the popped candidate. Pass None when no image is loaded — the unified

@@ -12,8 +12,15 @@ PATTERNS.md §Shared Pattern 1 + 5).
 Three logical stacks (Phase 1 contracted 2 — MASK + IMAGE; Phase 3 D-10 adds
 the 3rd BOXES stack; STATE.md "two logical stacks not four" extended to "three
 not seven" — BOXES is ONE stack, op-type lives inside each record's metadata):
-- MASK stack: full ``QImage`` snapshots of the editable mask, one per completed
-  stroke (the ``canvas.mask_modified`` signal from plan 04 is the push hook).
+- MASK stack: one snapshot per completed stroke (the ``canvas.mask_modified``
+  signal from plan 04 is the push hook). Phase 8 (plan 08-02) WIDENS the value
+  type from a flat mask ``QImage`` to ``MaskPlanesSnapshot``
+  (``core/mask_planes.py`` — manual/erase QImages + the packbits-packed auto
+  binary). The stack mechanics are UNCHANGED: values are duck-typed
+  ``.copy()`` objects (the snapshot's ``copy()`` detaches all three planes),
+  so ``push_mask_state`` / ``pop_mask_undo`` / ``pop_mask_redo`` and the
+  unified timeline operate exactly as in Phase 3 — the module keeps handling
+  the values opaquely and never inspects plane contents.
 - IMAGE stack: ``(x, y, patch)`` tuples where ``patch`` is the numpy array of
   the inpainted region (plan 05's ``_on_inpaint_finished`` already calls
   ``push_image_action``).

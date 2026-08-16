@@ -73,6 +73,14 @@ def _detected_box(x1: int = 35, y1: int = 8, x2: int = 55, y2: int = 40) -> Page
     return PageBox(box=Box(x1, y1, x2, y2), origin=DETECTED, payload=object())
 
 
+def _tiny_grayscale_mask() -> QImage:
+    """The Phase-1 shape of a detection mask (8x8 grayscale) — set_mask fits
+    it onto the page grid; kept as the historical seeding shape."""
+    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
+    mask.fill(0)
+    return mask
+
+
 # ===========================================================================
 # Task 1: Per-page box persistence (D-11 mirror of Phase 2 mask seam)
 # ===========================================================================
@@ -240,16 +248,16 @@ def test_unified_undo_pops_across_stacks(qtbot, tmp_path) -> None:
 
     Push a mask edit, then a boxes snapshot (later stamp -> popped first);
     undo twice and confirm the ops reverse in order (the latest-first pop).
+
+    Phase 8 (plan 08-02): the MASK stack values are MaskPlanesSnapshot now,
+    so the "mask edit" pushes the canvas's live plane snapshot (a bare QImage
+    is rejected by apply_undo_mask — the stack value type widened).
     """
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
 
-    from PySide6.QtGui import QImage
-
-    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
-    mask.fill(0)
-    window.canvas.set_mask(mask)
-    window.history.push_mask_state(mask)  # stamp 1 (mask edit)
+    window.canvas.set_mask(_tiny_grayscale_mask())
+    window.history.push_mask_state(window.canvas.planes_snapshot())  # stamp 1 (mask edit)
     window.history.push_boxes_state([_user_box(1, 1, 5, 5)])  # stamp 2 (boxes)
 
     # The unified can_undo() reflects both pushes.
@@ -266,16 +274,16 @@ def test_unified_undo_pops_across_stacks(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_unified_redo_after_undo(qtbot, tmp_path) -> None:
-    """Ctrl+Shift+Z redoes a unified undo (the redo path across stacks)."""
+    """Ctrl+Shift+Z redoes a unified undo (the redo path across stacks).
+
+    Phase 8 (plan 08-02): the pushed mask value is the plane snapshot (the
+    MASK stack value type widened from a flat QImage).
+    """
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
 
-    from PySide6.QtGui import QImage
-
-    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
-    mask.fill(0)
-    window.canvas.set_mask(mask)
-    window.history.push_mask_state(mask)
+    window.canvas.set_mask(_tiny_grayscale_mask())
+    window.history.push_mask_state(window.canvas.planes_snapshot())
 
     window.on_undo()
     assert window.history.can_redo()
@@ -377,16 +385,15 @@ def test_toolbar_has_two_undo_buttons(qtbot, tmp_path) -> None:
 def test_undo_redo_status_feedback(qtbot, tmp_path) -> None:
     """After an undo, the status bar shows a transient 'Undo: {op}' message
     (UI-SPEC §Copywriting — the which-stack-was-popped indication).
+
+    Phase 8 (plan 08-02): the pushed mask value is the plane snapshot (the
+    MASK stack value type widened from a flat QImage).
     """
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
 
-    from PySide6.QtGui import QImage
-
-    mask = QImage(8, 8, QImage.Format.Format_Grayscale8)
-    mask.fill(0)
-    window.canvas.set_mask(mask)
-    window.history.push_mask_state(mask)
+    window.canvas.set_mask(_tiny_grayscale_mask())
+    window.history.push_mask_state(window.canvas.planes_snapshot())
 
     window.on_undo()
     text = window.status_bar_left.text()

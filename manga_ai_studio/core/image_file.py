@@ -92,6 +92,23 @@ class ImageFile:
     mask: QImage | None = None
     boxes: list["PageBox"] | None = None
     dirty: bool = False
+    # Phase 8 (plan 08-02) — the three-plane mask state, PACKED via
+    # core/mask_planes.pack_binary (1-D uint8, ~H*W/8 bytes each; numpy, no
+    # Qt — keeps the worker path Qt-free per RESEARCH Pitfall 13-12).
+    # Populated by the D-11 seam (on_page_selected outgoing flush +
+    # _snapshot_current_page) so planes survive page switches; the .mas
+    # container write is owned by plan 08-07 Task 3.
+    #   auto_mask      — the derived auto binary (raw_detected_mask retains
+    #                    the pre-dilation detection for live re-dilate (D-08;
+    #                    populated by plan 08-03's detection seam)).
+    #   mask_manual    — the manual-stroke plane binary.
+    #   mask_erase     — the erase-ledger plane binary.
+    # ``None`` = no plane content persisted for this page (legacy/pre-Phase-8
+    # pages — the seam falls back to the flat ``mask`` composite).
+    raw_detected_mask: np.ndarray | None = None
+    auto_mask: np.ndarray | None = None
+    mask_manual: np.ndarray | None = None
+    mask_erase: np.ndarray | None = None
     # D-06 original-availability flag (set at .mas load via verify_original;
     # True for normal image/folder open — the source loaded from that path).
     original_verified: bool = False
@@ -139,6 +156,22 @@ class ImageFile:
         from manga_ai_studio.core.mask_editor import mask_to_numpy_binary
 
         return bool(mask_to_numpy_binary(self.mask).any())
+
+    def has_mask_planes(self) -> bool:
+        """Return whether any three-plane mask state is persisted (plan 08-02).
+
+        True iff ``auto_mask`` / ``mask_manual`` / ``mask_erase`` carries
+        packed data. The D-11 seam's incoming-restore step switches on this:
+        plane data restores via ``canvas.set_planes``; a page without it
+        (pre-Phase-8 / legacy) falls back to the flat ``mask`` composite via
+        ``canvas.set_mask`` (documented provenance loss — the composite lands
+        in the auto plane).
+        """
+        return (
+            self.auto_mask is not None
+            or self.mask_manual is not None
+            or self.mask_erase is not None
+        )
 
     def has_boxes(self) -> bool:
         """Return whether this page has any text boxes (mirrors the trivial
