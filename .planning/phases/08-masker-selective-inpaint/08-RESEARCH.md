@@ -341,18 +341,28 @@ if box_layer visible and left:
 
 ---
 
-## 14. Open Questions (for the planner)
+## 14. Open Questions (RESOLVED — planner dispositions at plan revision 1)
 
 1. **Q1 — Full `pick_best_mask` vs gate-only** (§1.4 Fork A/B): D-06 exposes growth/selection params, implying Fork A; Fork B is simpler and makes several D-06 controls no-ops. Recommend Fork A (params real, machinery finally used) with the dilation radius applied to the precise mask before growth.
+   *(RESOLVED — Fork A: 08-03 Task 3 runs the full gate-lifted fit (`attrs.evolve(masker_conf, mask_max_standard_deviation=1e9)`), so every D-06 control is real; best_mask + honest std_dev always stored.)*
 2. **Q2 — Dilation composition:** dilate raw heatmap then ∩ boxes, or ∩ boxes then dilate? (Dilate-then-∩ discards growth beyond the box edge — probably desired: the box certifies the region; recommend ∩-then-dilate but clamp visually at box edges? Actually ∩-then-dilate can bleed past the box border by `radius` px — decide whether auto content may exit its box.) Also: does the MASK-01 radius apply in mask-only mode (D-03)? (Recommend yes — it's the 01-UAT origin story.)
+   *(RESOLVED — dilate-then-∩, so auto content can never exit its box: 08-03 Task 3 (`grow_mask` then `mask_intersection` with the box union — MASK-05 literal); radius applies in mask-only mode too: 08-07 Task 1 mode-OFF path via `dilate_auto_mask`.)*
 3. **Q3 — Field name + tri-state encoding** for the override (e.g. `inpaint_override: Optional[Literal["always","never"]]`, None=Auto) and whether it lives on PageBox (rides BOXES snapshots + `.mas`) — recommend yes.
+   *(RESOLVED — `PageBox.inpaint_override: Optional[str] = None` (None/"always"/"never") on PageBox, riding BOXES snapshots and .mas; `manual_override` stays the Phase 4 reading-order pin: 08-01 Task 1.)*
 4. **Q4 — std_dev recomputation on box move/resize:** recompute-on-release (recommend) vs stale-state demotion; and whether a *user-drawn* box triggers a fit at creation time (all boxes certify — natural reading; recommend fitting user boxes too, at create-commit and on move-release).
+   *(RESOLVED — recompute-on-release only, never per-mousemove: 08-07 Task 2 (`_refit_changed_boxes` in `_on_boxes_modified`, commit-time debounce); all boxes certify incl. user-drawn at create-commit: 08-03 Task 3 (union of ALL boxes) + 08-07 Task 2 (new-box branch).)*
 5. **Q5 — Per-box mask on move:** translate the stored mask vs refit against the new region (recommend refit — translation over artwork is wrong).
+   *(RESOLVED — refit against the new region: 08-07 Task 2 (`_refit_changed_boxes` re-runs `derive_page_mask_state` restricted to geometry-changed boxes).)*
 6. **Q6 — `.mas` persistence of the raw heatmap** (§6.4) and the per-box mask container format (§6.3).
+   *(RESOLVED — raw + three planes persist as optional np.packbits container entries (rawmask/automask/manualmask/erasemask.bin), per-box mask as base64 PNG (box-cropped mode "1"), no version bump: 08-04 Tasks 1-2; the save-loop wiring that writes them: 08-07 Task 3.)*
 7. **Q7 — Geometry-op policy for the new fields** (§6.5): invalidate vs transform (and whether to fix the pre-existing `style` drop in the same touch — scope call, likely a separate micro-fix).
+   *(RESOLVED — invalidate mask/std_dev, carry inpaint_override AND fix the pre-existing `style` drop in the same constructors we are already editing: 08-01 Task 3.)*
 8. **Q8 — Gate semantics on the mask layer:** confirm the reading that gate-failed/Never boxes contribute NOTHING to the mask layer (so an unchanged LaMa call naturally skips them) rather than the gate filtering inside the inpainter (D-02 settles this — but the *border-state vs mask-display* relationship should be stated explicitly in the UI spec).
+   *(RESOLVED — gate-failed/Never boxes contribute nothing to the layer via `compose_auto_binary` (pure threshold/override recomposition): 08-03 Task 3; the border-state vs mask equivalence is stated explicitly in 08-UI-SPEC §Color reading rule 4.)*
 9. **Q9 — Detect Boxes toggle persistence home** (QSettings view-state vs profile INI; recommend QSettings/view-state — it's a mode, not a quality param).
+   *(RESOLVED — QSettings view-state, key "detectBoxesMode" (default True); the Tools-menu action is removed, `action_detect_boxes_mode` kept as hidden state holder: 08-05 Task 2.)*
 10. **Q10 — Dirty-flag semantics** for detection/re-dilate (settings changes that alter page output — do they mark the session dirty?).
+    *(RESOLVED — detection marks the session dirty explicitly (recompose emits nothing): 08-07 Task 1; radius/threshold settings changes push no history and do NOT dirty (non-undoable preferences per §9, persisted to the profile INI): 08-07 Task 3.)*
 
 ---
 
