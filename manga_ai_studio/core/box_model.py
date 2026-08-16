@@ -64,12 +64,13 @@ class PageBox:
             replace detected ones.
         payload: The source ``TextBlock`` for Phase 4/5 OCR/export. ``None``
             for user boxes (they carry no TextBlock until OCR runs).
-        mask: D-15 seam (DEFERRED). Per-box mask, populated by a LATER inpaint
-            phase via ``image_ops.pick_best_mask``. **``None`` in Phase 3** —
-            the seam is open, not closed.
-        std_dev: D-15 seam (DEFERRED). Per-box border standard-deviation,
-            populated by a later phase via ``image_ops.border_std_deviation``.
-            **``None`` in Phase 3** — the seam is open, not closed.
+        mask: D-15 seam. Per-box mask — a box-cropped mode-"1" PIL image,
+            POPULATED by Phase 8 (``derive_page_mask_state``, plan 08-03,
+            via the vendored masker machinery). ``None`` until a per-box fit
+            runs (fresh/legacy boxes).
+        std_dev: D-15 seam. Per-box border standard-deviation, POPULATED by
+            Phase 8's per-box fit (the honest measured value; the gate is
+            applied downstream). ``None`` until a fit runs.
         edited: Phase 4 (D-04 re-OCR gate). ``True`` once recognized text is
             manually edited; ``False`` after an OCR write. Peer field, NOT
             derived (derived-from-diff is fragile if OCR reproduces an edit).
@@ -83,17 +84,21 @@ class PageBox:
             defaults (fresh/legacy boxes). NEVER mutated in place: every
             style change assigns a fresh instance via ``dataclasses.replace``
             (RESEARCH Pitfall 1). ``copy()`` detaches it (Pitfall 8).
+        inpaint_override: Phase 8 (D-14 tri-state encoding). Per-box inpaint
+            decision: ``None`` = Auto (the std-dev gate decides), ``"always"``
+            = force inpaint, ``"never"`` = skip. NOT ``manual_override`` —
+            that name is TAKEN by the Phase 4 reading-order pin above.
 
-    D-15 seam note: ``mask`` and ``std_dev`` are ``None`` in Phase 3 by
-    design. A later selective-inpaint phase fills them per box against the
-    page image + mask, with no rework to this dataclass or its consumers.
+    D-15 seam note: ``mask`` and ``std_dev`` default to ``None``; Phase 8
+    (plan 08-03) POPULATES them per box against the page image + mask, with
+    no rework to this dataclass or its consumers.
     """
 
     box: Box
     origin: str
     payload: Optional[object] = None
-    mask: Optional[object] = None  # D-15 seam: per-box mask (DEFERRED — later phase)
-    std_dev: Optional[float] = None  # D-15 seam: per-box std-dev (DEFERRED)
+    mask: Optional[object] = None  # D-15 seam: per-box box-cropped mode-"1" mask (Phase 8 populates)
+    std_dev: Optional[float] = None  # D-15 seam: per-box border std-dev (Phase 8 populates)
     # Phase 4 peer fields (NOT derived — they survive undo + page-switch when
     # carried by boxes_snapshot; RESEARCH Pitfall 1).
     edited: bool = False  # D-04 re-OCR gate
@@ -103,6 +108,11 @@ class PageBox:
     # the TextStyle defaults. Composes (D-14 — the vendored Box/TextBlock
     # stay untouched); copy() detaches it (Pitfall 8).
     style: Optional[TextStyle] = None
+    # Phase 8 (D-14 tri-state encoding): per-box inpaint decision. None =
+    # Auto (std-dev gate decides), "always" = force inpaint, "never" = skip.
+    # NOT manual_override — that name is TAKEN by the Phase 4 reading-order
+    # pin above (RESEARCH Q3).
+    inpaint_override: Optional[str] = None
 
     # --------------------------------------------------------- text setters
     def _ensure_payload(self) -> None:
@@ -173,23 +183,76 @@ class PageBox:
             t = "".join(str(s) for s in t).strip()
         return bool(t)
 
+    # ------------------------------------------------- inpaint state (Phase 8)
+    def _has_auto_mask_content(self) -> bool:
+        """Return ``True`` iff the box carries non-empty AUTO mask content.
+
+        ``self.mask`` is a box-cropped mode-"1" PIL image (the plan 08-03
+        storage convention: content = the non-zero pixels), so ``getbbox()``
+        is the emptiness probe — the same check the vendored
+        ``pick_best_mask`` applies to a precise mask (panelcleaner
+        image_ops.py). An all-zero (empty) mask reports ``getbbox() is
+        None`` and fails this check.
+        """
+        return self.mask is not None and self.mask.getbbox() is not None
+
+    def inpaint_state(self, threshold: float) -> str:
+        """Derive the border-state contract state (08-UI-SPEC §Color).
+
+        A pure function of own fields + ``threshold`` (the
+        ``has_recognized_text`` shape — headless-testable, no UI logic).
+        Returns exactly one of:
+
+        - ``"forced"``: ``inpaint_override == "always"`` — the user asserted
+          "clean this no matter what" (std_dev/mask are irrelevant).
+        - ``"never"``: ``inpaint_override == "never"`` — the user demoted the
+          box ("C will not touch this").
+        - ``"will_inpaint"``: Auto AND ``std_dev`` is not None AND
+          ``std_dev <= threshold`` AND the box has auto mask content — the
+          gate passes.
+        - ``"gate_skipped"``: everything else (gate fails, no fit data yet,
+          or no auto mask content — a noise box / no detected text inside).
+
+        This is the SINGLE derivation site: ``BoxItem.set_inpaint_state``
+        (plan 08-06) and ``refresh_box_inpaint_states`` (plan 08-07) consume
+        it; the logic is not duplicated elsewhere.
+        """
+        if self.inpaint_override == "always":
+            return "forced"
+        if self.inpaint_override == "never":
+            return "never"
+        if (
+            self.std_dev is not None
+            and self.std_dev <= threshold
+            and self._has_auto_mask_content()
+        ):
+            return "will_inpaint"
+        return "gate_skipped"
+
     # ------------------------------------------------------------ undo seam
     def copy(self) -> "PageBox":
-        """Return a NEW ``PageBox`` with detached payload AND style (Pitfall 8).
+        """Return a NEW ``PageBox`` with detached payload, style AND mask
+        (Pitfall 8).
 
         Uses ``dataclasses.replace`` to clone the dataclass with
         ``copy.copy`` (shallow) of the payload and the style. Shallow-copy is
         sufficient because Phase 4 only mutates ``.text`` / ``.translation``
         (top-level attributes) on the payload (RESEARCH Assumption A3) and
         Phase 7 NEVER mutates a ``TextStyle`` in place (every change assigns
-        a fresh instance via ``dataclasses.replace``). The vendored ``Box``
-        is ``@frozen`` so sharing it by reference is safe (D-10) — it is NOT
-        copied. This detachment is what makes ``boxes_snapshot()`` + the
-        BOXES undo stack restore the snapshot-time text AND style instead of
-        the live (post-edit) ones.
+        a fresh instance via ``dataclasses.replace``). The Phase 8 per-box
+        ``mask`` is a MUTABLE PIL image, so it is detached too — without
+        that, a BOXES undo would restore post-edit masks (the 04-05 lesson
+        applied to the new field). The vendored ``Box`` is ``@frozen`` so
+        sharing it by reference is safe (D-10) — it is NOT copied. This
+        detachment is what makes ``boxes_snapshot()`` + the BOXES undo stack
+        restore the snapshot-time text, style, AND mask instead of the live
+        (post-edit) ones.
         """
         return replace(
-            self, payload=_copy.copy(self.payload), style=_copy.copy(self.style)
+            self,
+            payload=_copy.copy(self.payload),
+            style=_copy.copy(self.style),
+            mask=_copy.copy(self.mask) if self.mask is not None else None,
         )
 
 
