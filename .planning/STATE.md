@@ -2,17 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
-current_phase: 8
-status: planning
-stopped_at: Phase 8 planned — 9 plans in 5 waves, verification passed
-last_updated: "2026-08-16T05:11:45.206Z"
-last_activity: 2026-08-13
-last_activity_desc: v1.2 roadmap created
+current_phase: 08
+current_phase_name: masker-selective-inpaint
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-08-16T18:02:00.736Z"
+last_activity: 2026-08-16
+last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 68
-  completed_plans: 59
+  completed_plans: 60
   percent: 78
 ---
 
@@ -23,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-11)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 8 — Masker & Selective Inpaint (MASK-01/02/03/05/06): mask dilation, box-constrained selective per-box inpaint (Phase 3 D-15 seam), brush-paints-under-boxes
+**Current focus:** Phase 08 — masker-selective-inpaint
 
 ## Current Position
 
-Phase: Phase 8 — Masker & Selective Inpaint (not started)
-Plan: —
-Status: Roadmap defined (Phases 8–9); ready to plan Phase 8
-Last activity: 2026-08-13 — v1.2 roadmap created
+Phase: 08 (masker-selective-inpaint) — EXECUTING
+Plan: 2 of 9
+Status: Ready to execute
+Last activity: 2026-08-16 — Phase 08 execution started
 
 ## Performance Metrics
 
@@ -115,6 +116,7 @@ Last activity: 2026-08-13 — v1.2 roadmap created
 | Phase 06 P06 | 14 | 2 tasks | 3 files |
 | Phase 06 P07 | 6 min | 2 tasks | 2 files |
 | Phase 06 P08 | 11 min | 2 tasks | 2 files |
+| Phase 08 P01 | 11 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -262,6 +264,10 @@ Recent decisions affecting current work:
 - [Phase 06]: WR-01 fix: the (0,0) full-frame gate, not recorded-name presence, scopes the op-name override — push_geometry_state stores geometry records as (0, 0, patch) (history_manager.py:435), so (x, y) == (0, 0) identifies the geometry-record shape; a stale _last_geometry_op_name must never leak into ordinary bbox inpaint undos — Single-entry image pops are ambiguous between a curves pop and an inpaint pop; the patch origin is the only reliable discriminator
 - [Phase 06]: Ungroup, don't re-wire: the window actions keep their triggered->set_active_tool connections and stay checkable; the group-membership lines are removed and set_active_tool gains an explicit window-action sync loop BEFORE the existing toolbar loop - the group's exclusivity is no longer load-bearing for the toolbar — WR-02 fix: a 12-action mirrored exclusive group fought itself on dock clicks; the panel group holds exactly its own six actions, and set_active_tool drives the window actions explicitly
 - [Phase 06]: No toggled connections on window actions (RESEARCH Pitfall 1): the panel already connects toggled at tools_panel.py:150; a double connection would double-emit tool_changed — Preserves the single tool_changed emission per selection across all entry paths
+- [Phase 08]: inpaint_state(threshold) on PageBox is the SINGLE border-state derivation site (forced/never/will_inpaint/gate_skipped); empty auto-mask = getbbox() is None on the box-cropped mode-'1' PIL mask (content = non-zero pixels) — the plan's 'all-white' parenthetical contradicted real PIL semantics and was corrected — 08-06 BoxItem and 08-07 refresh consume one derivation; getbbox matches the vendored pick_best_mask emptiness probe and the 08-03 storage convention
+- [Phase 08]: ProfileManager.load_profile now APPLIES the loaded profile to config.current_profile (MainWindow's read path) — Rule 2 fix; without it the plan's __main__ startup load_profile('default') call was a discarded return value — Closes RESEARCH 4.1 startup gap so D-10 persistence reaches the app at launch
+- [Phase 08]: Geometry ops (rotate/crop/resize) carry inpaint_override + style on ALL SIX PageBox constructor sites (payload + payload-None) and DELIBERATELY invalidate per-box mask/std_dev (RESEARCH 6.5 option b) — also closes the live Phase 7 latent style drop — Override is user intent and cheap to carry; a rotated std-dev/border relation is stale; the explicit field lists silently drop unnamed fields (Pitfall 13-6)
+- [Phase 08]: MaskerConfig.mask_dilation_radius: Pixels = 2 is a marked Manga AI Studio addition to the vendored config (RESEARCH 4.2 option a); export comments double as the canonical tooltip text (D-06/D-12); missing INI key falls back to default 2 via try_to_load — Keeps all masker params in one object the batch worker receives in one piece; upstream PC ignores the extra key
 
 ### Roadmap Evolution
 
@@ -295,8 +301,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-16T05:11:45.195Z
-Stopped at: Phase 8 planned — 9 plans in 5 waves, verification passed
-Resume file: .planning/phases/08-masker-selective-inpaint/08-01-PLAN.md
+Last session: 2026-08-16T18:02:00.719Z
+Stopped at: Completed 08-01-PLAN.md
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
