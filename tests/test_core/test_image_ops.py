@@ -606,3 +606,101 @@ def test_curve_lut_duplicate_x_last_wins() -> None:
     (64,40), so lut[64] == 200."""
     lut = image_ops.curve_lut([(64, 40), (64, 200), (0, 0), (255, 255)])
     assert lut[64] == 200
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 geometry-op field policy (plan 08-01 Task 3) — carry
+# inpaint_override + style, invalidate mask/std_dev (RESEARCH §6.5 Pitfall 13,
+# option b)
+#
+# Every geometry rebuild site (rotate transform_box_payload, crop _clip_box,
+# resize resize_boxes) constructs PageBox with an EXPLICIT field list — any
+# field not named there is silently dropped. Phase 8 policy: the override is
+# user intent and cheap to carry; style is carried too (closing the live
+# Phase 7 latent drop in the same constructors); mask/std_dev are DELIBERATELY
+# invalidated — a rotated std-dev/border relation is stale, and the refit
+# happens on the next fit trigger.
+# ---------------------------------------------------------------------------
+
+
+def _phase8_box(with_payload: bool) -> PageBox:
+    """A Phase-8-loaded PageBox: override + style + a mask with content +
+    std_dev, with or without a TextBlock payload (both constructor paths in
+    each transform rebuild must carry/invalidate the same fields)."""
+    from manga_ai_studio.core.text_style import TextStyle
+
+    m = Image.new("1", (4, 3), 0)
+    m.putpixel((1, 1), 1)  # auto mask content (getbbox() is not None)
+    return PageBox(
+        box=Box(1, 1, 5, 4),
+        origin=DETECTED if with_payload else USER,
+        payload=(
+            TextBlock(xyxy=[1, 1, 5, 4], text="txt") if with_payload else None
+        ),
+        mask=m,
+        std_dev=9.5,
+        inpaint_override="never",
+        style=TextStyle(font_family="X"),
+    )
+
+
+def _apply_geometry_transform(name: str, pb: PageBox) -> PageBox:
+    """Apply the named box-level geometry transform on a 4x6 (H,W) page and
+    return the single rebuilt PageBox (crop rect covers the whole page so
+    the box is kept; resize halves the dims)."""
+    if name == "rotate":
+        (out,) = image_ops.rotate_boxes([pb], w=6, h=4, k=1)
+        return out
+    if name == "crop":
+        kept, dropped = image_ops.crop_boxes([pb], x=0, y=0, w=6, h=4)
+        assert dropped == 0
+        assert len(kept) == 1
+        return kept[0]
+    if name == "resize":
+        (out,) = image_ops.resize_boxes([pb], w=6, h=4, new_w=3, new_h=2)
+        return out
+    raise ValueError(f"unknown transform {name!r}")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["rotate", "crop", "resize"])
+@pytest.mark.parametrize("with_payload", [True, False], ids=["payload", "no-payload"])
+def test_geometry_transforms_carry_inpaint_override_and_style(
+    name: str, with_payload: bool
+) -> None:
+    """A PageBox with ``inpaint_override="never"`` and
+    ``style=TextStyle(font_family="X")`` survives rotate/crop/resize with both
+    values intact — on BOTH constructor paths (payload present and the
+    payload-None user box). The override is user intent and cheap to carry
+    (RESEARCH §6.5 option b); style is the Phase 7 latent-drop fix riding the
+    same edit."""
+    pb = _phase8_box(with_payload)
+    out = _apply_geometry_transform(name, pb)
+
+    assert out.inpaint_override == "never"
+    assert out.style is not None
+    assert out.style.font_family == "X"
+    # The original is untouched (Pitfall 3).
+    assert pb.inpaint_override == "never"
+    assert pb.style is not None and pb.style.font_family == "X"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["rotate", "crop", "resize"])
+@pytest.mark.parametrize("with_payload", [True, False], ids=["payload", "no-payload"])
+def test_geometry_transforms_invalidate_mask_and_std_dev(
+    name: str, with_payload: bool
+) -> None:
+    """A PageBox with a mask (PIL "1" with content) and ``std_dev=9.5`` comes
+    out of every transform with ``mask is None`` and ``std_dev is None`` —
+    deliberate invalidation: a rotated/scaled std-dev/border relation is
+    stale, and the refit happens on the next fit trigger (Phase 8 policy,
+    RESEARCH §6.5 option b)."""
+    pb = _phase8_box(with_payload)
+    assert pb.mask is not None  # precondition: the input carries a mask
+    assert pb.std_dev == 9.5
+
+    out = _apply_geometry_transform(name, pb)
+
+    assert out.mask is None
+    assert out.std_dev is None
