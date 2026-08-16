@@ -16,6 +16,12 @@ Data invariants (CONTEXT D-15/D-17/D-18; RESEARCH Pitfall 2/3):
 - Geometry transforms (rotate/crop/resize) carry the mask AND every box's
   bbox AND ``TextBlock.lines`` quad polygons along with the page image
   (D-15/D-17); levels is geometry-free — pixels only, mask/boxes untouched.
+- Phase 8 per-box field policy (RESEARCH §6.5 Pitfall 13, option b): every
+  geometry rebuild CARRIES ``inpaint_override`` and ``style`` onto the new
+  PageBox (user intent / typesetting — the explicit constructor field lists
+  would otherwise silently drop them) and DELIBERATELY INVALIDATES the
+  per-box ``mask``/``std_dev`` (a rotated/scaled std-dev/border relation is
+  stale; the refit happens on the next fit trigger).
 - Every transform returns ``.copy()``-detached arrays (Pitfall 2).
 - Every box transform builds a NEW ``PageBox`` with a fresh ``TextBlock``
   and a fresh ``lines`` list; the inputs — the vendored ``@frozen`` ``Box``
@@ -133,14 +139,25 @@ def transform_box_payload(pagebox: PageBox, w: int, h: int, k: int) -> PageBox:
     ``font_size``/``text``/``translation`` are copied (text may be a str OR a
     list — whichever it is, it is copied, never joined); the Phase 4 peer
     fields ``edited``/``bubble_no``/``manual_override`` ride along unchanged.
-    A payload-None box produces a payload-None PageBox with the transformed
-    box. The input PageBox and its payload are NEVER mutated — the fresh
-    objects are undo-snapshot-safe (Pitfall 3).
+    Phase 8 field policy (RESEARCH §6.5 option b): ``inpaint_override`` and
+    ``style`` are carried (user intent / typesetting — cheap to preserve),
+    while the per-box ``mask``/``std_dev`` are DELIBERATELY invalidated — a
+    rotated std-dev/border relation is stale, and the refit happens on the
+    next fit trigger. A payload-None box produces a payload-None PageBox with
+    the transformed box. The input PageBox and its payload are NEVER mutated
+    — the fresh objects are undo-snapshot-safe (Pitfall 3).
     """
     new_box = transform_box(pagebox.box, w, h, k)
     payload = pagebox.payload
     if payload is None:
-        return PageBox(box=new_box, origin=pagebox.origin)
+        return PageBox(
+            box=new_box,
+            origin=pagebox.origin,
+            inpaint_override=pagebox.inpaint_override,
+            style=pagebox.style,
+            mask=None,
+            std_dev=None,
+        )
     text = payload.text
     if isinstance(text, list):
         text = list(text)
@@ -160,6 +177,15 @@ def transform_box_payload(pagebox: PageBox, w: int, h: int, k: int) -> PageBox:
         edited=pagebox.edited,
         bubble_no=pagebox.bubble_no,
         manual_override=pagebox.manual_override,
+        # Phase 8 field policy (RESEARCH §6.5 option b): the override is user
+        # intent and cheap to carry; style is carried too (closing the live
+        # Phase 7 latent drop); mask/std_dev are DELIBERATELY invalidated — a
+        # rotated std-dev/border relation is stale, the refit happens on the
+        # next fit trigger.
+        inpaint_override=pagebox.inpaint_override,
+        style=pagebox.style,
+        mask=None,
+        std_dev=None,
     )
 
 
@@ -244,8 +270,10 @@ def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | Non
     payload exists) in POST-crop page coordinates: the bbox and every line
     quad are translated by ``(-x, -y)`` and the quads are clamped to
     ``[0, w] x [0, h]``. Line quads that clip to nothing are removed. The
-    input PageBox/payload/lines are NEVER mutated (Pitfall 3); the D-15 seam
-    (``mask``/``std_dev``) stays ``None``.
+    input PageBox/payload/lines are NEVER mutated (Pitfall 3). Phase 8 field
+    policy (RESEARCH §6.5 option b): ``inpaint_override`` and ``style`` are
+    carried; the per-box ``mask``/``std_dev`` are deliberately invalidated
+    (``None`` — a cropped std-dev/border relation is stale).
     """
     bx1, by1, bx2, by2 = pagebox.box.as_tuple
     nx1 = max(bx1, x)
@@ -259,7 +287,14 @@ def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | Non
     new_box = Box(tx1, ty1, tx2, ty2)
     payload = pagebox.payload
     if payload is None:
-        return PageBox(box=new_box, origin=pagebox.origin)
+        return PageBox(
+            box=new_box,
+            origin=pagebox.origin,
+            inpaint_override=pagebox.inpaint_override,
+            style=pagebox.style,
+            mask=None,
+            std_dev=None,
+        )
     new_lines = []
     for quad in payload.lines:
         clipped = _clip_quad(quad, x, y, w, h)
@@ -287,6 +322,12 @@ def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | Non
         edited=pagebox.edited,
         bubble_no=pagebox.bubble_no,
         manual_override=pagebox.manual_override,
+        # Phase 8 field policy (RESEARCH §6.5 option b): carry override +
+        # style, deliberately invalidate mask/std_dev (stale after crop).
+        inpaint_override=pagebox.inpaint_override,
+        style=pagebox.style,
+        mask=None,
+        std_dev=None,
     )
 
 
@@ -393,7 +434,16 @@ def resize_boxes(
         new_box = Box(min(nx1, nx2), min(ny1, ny2), max(nx1, nx2), max(ny1, ny2))
         payload = pb.payload
         if payload is None:
-            out.append(PageBox(box=new_box, origin=pb.origin))
+            out.append(
+                PageBox(
+                    box=new_box,
+                    origin=pb.origin,
+                    inpaint_override=pb.inpaint_override,
+                    style=pb.style,
+                    mask=None,
+                    std_dev=None,
+                )
+            )
             continue
         new_lines = [
             [list(_scale_point(px, py)) for px, py in quad] for quad in payload.lines
@@ -418,6 +468,13 @@ def resize_boxes(
                 edited=pb.edited,
                 bubble_no=pb.bubble_no,
                 manual_override=pb.manual_override,
+                # Phase 8 field policy (RESEARCH §6.5 option b): carry
+                # override + style, deliberately invalidate mask/std_dev
+                # (stale after resize).
+                inpaint_override=pb.inpaint_override,
+                style=pb.style,
+                mask=None,
+                std_dev=None,
             )
         )
     return out
