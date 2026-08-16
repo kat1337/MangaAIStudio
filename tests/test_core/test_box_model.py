@@ -378,3 +378,152 @@ def test_pagebox_copy_preserves_fields() -> None:
     assert clone.payload.text == "txt"
     assert clone.payload.translation == "tr"
     assert clone.payload is not pb.payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — inpaint_override field + inpaint_state() + copy() mask
+# detachment (plan 08-01 Task 1, MASK-01/MASK-02 foundations)
+#
+# These tests pin the per-box override + state-derivation model: the
+# tri-state ``inpaint_override`` (None=Auto, "always", "never"; NOT
+# ``manual_override`` — that name is TAKEN by the Phase 4 reading-order pin),
+# the pure ``inpaint_state(threshold)`` derivation that BoxItem (08-06) and
+# the MainWindow refresh (08-07) consume as the SINGLE derivation site, and
+# the ``copy()`` mask detachment (Pitfall 8: a PIL Image is mutable — without
+# detachment a BOXES undo would restore post-edit masks). Headless: PIL only,
+# no Qt.
+# ---------------------------------------------------------------------------
+
+
+def _mask_with_content():
+    """A mode-"1" PIL mask with auto content (one non-zero pixel).
+
+    Per the 08-03 storage convention the per-box mask is a box-cropped
+    mode-"1" image whose CONTENT is the non-zero pixels; ``getbbox()`` is the
+    vendored emptiness probe (panelcleaner/image_ops.py pick_best_mask uses
+    the same check). The EMPTY counterpart is the all-zero image, whose
+    ``getbbox()`` is ``None`` (verified PIL semantics: an all-white mode-"1"
+    image reports the FULL box, so "empty" is the all-zero construction).
+    """
+    from PIL import Image
+
+    m = Image.new("1", (4, 4), 0)
+    m.putpixel((1, 1), 1)
+    return m
+
+
+@pytest.mark.unit
+def test_pagebox_inpaint_override_default_and_roundtrip() -> None:
+    """A fresh PageBox has ``inpaint_override`` None (Auto); assigning
+    "always"/"never" round-trips. The field name is ``inpaint_override``
+    (RESEARCH Q3) — ``manual_override`` stays the Phase 4 reading-order pin
+    and must NOT be reused."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    assert pb.inpaint_override is None
+
+    pb.inpaint_override = "always"
+    assert pb.inpaint_override == "always"
+    pb.inpaint_override = "never"
+    assert pb.inpaint_override == "never"
+    # The Phase 4 pin is a distinct bool field, untouched by the new field.
+    assert pb.manual_override is False
+
+
+@pytest.mark.unit
+def test_inpaint_state_matrix() -> None:
+    """The border-state contract (08-UI-SPEC §Color) as a pure function of
+    override + std_dev + mask content: "forced" / "never" / "will_inpaint" /
+    "gate_skipped" are the ONLY return values. Matrix rows:
+
+    - override "always" -> "forced" (regardless of std_dev, even None)
+    - override "never"  -> "never"  (regardless of std_dev, even None)
+    - Auto + std_dev <= threshold + mask content -> "will_inpaint"
+    - Auto + std_dev > threshold                -> "gate_skipped"
+    - Auto + std_dev None                       -> "gate_skipped"
+    - Auto + std_dev set + mask None            -> "gate_skipped"
+    - Auto + std_dev set + empty mask           -> "gate_skipped"
+    """
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    def make(override=None, std_dev=None, mask=None) -> PageBox:
+        return PageBox(
+            box=Box(1, 2, 3, 4), origin=DETECTED, inpaint_override=override,
+            mask=mask, std_dev=std_dev,
+        )
+
+    content_mask = _mask_with_content()
+    from PIL import Image
+
+    empty_mask = Image.new("1", (4, 4), 0)  # all-zero -> getbbox() is None
+    assert empty_mask.getbbox() is None  # precondition of the empty row
+
+    threshold = 15.0
+
+    # Override rows — the user decision replaces the gate entirely.
+    assert make("always").inpaint_state(threshold) == "forced"
+    assert make("always", std_dev=99.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "forced"
+    assert make("never").inpaint_state(threshold) == "never"
+    assert make("never", std_dev=1.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "never"
+
+    # Auto rows — the std-dev gate + auto mask content decide.
+    assert make(None, std_dev=8.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "will_inpaint"
+    assert make(None, std_dev=20.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "gate_skipped"
+    assert make(None, std_dev=None, mask=content_mask).inpaint_state(
+        threshold
+    ) == "gate_skipped"
+    assert make(None, std_dev=8.0, mask=None).inpaint_state(
+        threshold
+    ) == "gate_skipped"
+    assert make(None, std_dev=8.0, mask=empty_mask).inpaint_state(
+        threshold
+    ) == "gate_skipped"
+
+    # The four strings are the ONLY return values (the matrix above covers
+    # every branch; this asserts the closed set directly).
+    observed = {
+        make("always").inpaint_state(threshold),
+        make("never").inpaint_state(threshold),
+        make(None, std_dev=8.0, mask=content_mask).inpaint_state(threshold),
+        make(None, std_dev=20.0, mask=content_mask).inpaint_state(threshold),
+    }
+    assert observed == {"forced", "never", "will_inpaint", "gate_skipped"}
+
+
+@pytest.mark.unit
+def test_pagebox_copy_detaches_mask_and_preserves_seam_fields() -> None:
+    """Pitfall 8 regression guard: ``copy()`` returns a PageBox whose PIL
+    mask is a DIFFERENT object — mutating the original mask leaves the copy
+    unaffected (a BOXES undo must restore the snapshot-time mask, not the
+    live post-edit one). ``std_dev`` and ``inpaint_override`` are immutable
+    scalars and are carried through unchanged."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from panelcleaner.structures import Box
+
+    pb = PageBox(box=Box(1, 2, 3, 4), origin=DETECTED)
+    pb.mask = _mask_with_content()
+    pb.std_dev = 9.5
+    pb.inpaint_override = "never"
+
+    clone = pb.copy()
+
+    assert clone.mask is not pb.mask  # detached PIL Image
+    assert clone.std_dev == 9.5
+    assert clone.inpaint_override == "never"
+    # Mutating the ORIGINAL mask must not touch the copy's mask.
+    pb.mask.putpixel((3, 3), 1)
+    assert clone.mask.getpixel((3, 3)) == 0
+    # Replacing the original's mask outright also leaves the copy unaffected.
+    pb.mask = None
+    assert clone.mask is not None
