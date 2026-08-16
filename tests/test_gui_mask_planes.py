@@ -346,3 +346,208 @@ def test_planes_snapshot_round_trips_through_set_planes(qtbot) -> None:
         mask_to_numpy_binary(canvas.get_mask()),
         (manual_bin | auto_bin) & ~erase_bin,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — plane-aware MASK undo + D-11 per-page persistence
+# ---------------------------------------------------------------------------
+
+
+def _make_window(qtbot, tmp_path):
+    """A MainWindow wired to a ProfileManager in tmp_path (test_history shape)."""
+    from manga_ai_studio.config.profile_manager import ProfileManager
+    from manga_ai_studio.gui.main_window import MainWindow
+
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    return window
+
+
+def _open_page(window, tmp_path, size: int = 48):
+    """Open a solid-white page so the canvas has an image + seeded planes."""
+    img_path = tmp_path / "page.png"
+    img = QImage(size, size, QImage.Format.Format_RGB32)
+    img.fill(QColor(255, 255, 255))
+    img.save(str(img_path))
+    window._open_single_image(img_path)
+    return img_path
+
+
+@pytest.mark.gui
+def test_undo_removes_stroke_keeps_auto_and_redo_restores(qtbot, tmp_path) -> None:
+    """The 03-08 semantic shift, now the plane model's contract: undo removes
+    the stroke's MANUAL contribution but the auto content stays; redo
+    restores the stroke."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    auto_bin = _rect_bin(48, 48, 30, 30, 40, 40)
+    canvas.set_auto_binary(auto_bin)  # the (silent) detection baseline
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+
+    _drive_brush_stroke(canvas, 8, 12, 24, 12)
+
+    composite_before = mask_to_numpy_binary(canvas.get_mask())
+    assert composite_before[12, 16] == 255, "fixture: the stroke painted"
+    assert composite_before[35, 35] == 255, "fixture: auto content present"
+
+    window.on_undo()
+    after_undo = mask_to_numpy_binary(canvas.get_mask())
+    assert after_undo[12, 16] == 0, "the stroke's manual contribution is removed"
+    assert after_undo[35, 35] == 255, "the auto content stays"
+    assert canvas._auto_bin is not None
+    np.testing.assert_array_equal(canvas._auto_bin, auto_bin)
+
+    window.on_redo()
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), composite_before
+    )
+
+
+@pytest.mark.gui
+def test_first_stroke_seeds_clean_baseline_auto_untouched(qtbot, tmp_path) -> None:
+    """The first stroke of a page seeds a clean baseline (transparent
+    manual/erase + the CURRENT auto) — undoing it leaves the auto plane
+    exactly as it was (the 03-08 seeded-baseline rule, generalized)."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    auto_bin = _rect_bin(48, 48, 5, 5, 15, 15)
+    canvas.set_auto_binary(auto_bin)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+
+    _drive_brush_stroke(canvas, 30, 30, 40, 30)  # the FIRST stroke
+    assert mask_to_numpy_binary(canvas.get_mask())[30, 35] == 255
+
+    window.on_undo()
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), auto_bin
+    ), "undoing the first stroke leaves only the auto plane (untouched)"
+    assert canvas._auto_bin is not None
+    np.testing.assert_array_equal(canvas._auto_bin, auto_bin)
+    assert not window.history.can_undo_mask()
+
+
+@pytest.mark.gui
+def test_undo_does_not_repush_planes(qtbot, tmp_path) -> None:
+    """The test_undo_does_not_repush contract, kept green on the plane path:
+    apply_undo_mask does NOT emit mask_modified."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _drive_brush_stroke(canvas, 10, 10, 25, 10)
+    assert window.history.can_undo_mask()
+
+    with qtbot.assertNotEmitted(canvas.mask_modified):
+        window.on_undo()
+    assert not window.history.can_undo_mask()
+    assert window.history.can_redo_mask()
+
+
+@pytest.mark.gui
+def test_undo_erase_stroke_returns_erased_pixels(qtbot, tmp_path) -> None:
+    """Undoing an erase stroke restores the ledger's before-state — the
+    erased pixels return."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    auto_bin = _rect_bin(48, 48, 10, 10, 40, 40)
+    canvas.set_auto_binary(auto_bin)
+    canvas.set_tool(ToolMode.ERASER)
+    canvas.set_brush_size(8)
+
+    _drive_brush_stroke(canvas, 20, 20, 32, 20)
+    erased = mask_to_numpy_binary(canvas.get_mask())
+    assert erased[20, 26] == 0, "fixture: pixels were erased"
+    assert erased[15, 35] == 255, "fixture: other auto content survived"
+
+    window.on_undo()
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), auto_bin
+    ), "undo restores the ledger before-state: erased pixels return"
+
+
+@pytest.mark.gui
+def test_undo_clear_mask_restores_all_three_planes(qtbot, tmp_path) -> None:
+    """clear_mask pushes the full pre-clear planes as the before-state —
+    undo restores manual + erase + auto together."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    auto_bin = _rect_bin(48, 48, 30, 30, 42, 42)
+    canvas.set_auto_binary(auto_bin)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _drive_brush_stroke(canvas, 8, 12, 24, 12)  # manual content (stroke 1)
+    canvas.set_tool(ToolMode.ERASER)
+    _drive_brush_stroke(canvas, 34, 36, 40, 36)  # ledger content (stroke 2)
+    before_clear = mask_to_numpy_binary(canvas.get_mask())
+    assert before_clear[12, 16] == 255 and before_clear[36, 37] == 0
+
+    canvas.clear_mask()
+    assert not mask_to_numpy_binary(canvas.get_mask()).any()
+
+    window.on_undo()
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), before_clear
+    ), "undo restores the full pre-clear planes (manual + erase + auto)"
+    assert canvas._auto_bin is not None
+    np.testing.assert_array_equal(canvas._auto_bin, auto_bin)
+
+
+@pytest.mark.gui
+def test_planes_round_trip_across_page_switch(qtbot, tmp_path) -> None:
+    """D-11 seam: page A's planes round-trip to page B and back via
+    on_page_selected — the composite is identical after the round trip, and
+    the persisted ImageFile plane slots are detached copies (mutating the
+    live canvas after the switch never reaches them)."""
+    window = _make_window(qtbot, tmp_path)
+    size = 48
+    p1 = tmp_path / "page1.png"
+    p2 = tmp_path / "page2.png"
+    for p, fill in ((p1, QColor(255, 255, 255)), (p2, QColor(210, 210, 210))):
+        img = QImage(size, size, QImage.Format.Format_RGB32)
+        img.fill(fill)
+        img.save(str(p))
+    window._set_pages([p1, p2])
+    canvas = window.canvas
+
+    auto_bin = _rect_bin(size, size, 30, 30, 42, 42)
+    canvas.set_auto_binary(auto_bin)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _drive_brush_stroke(canvas, 8, 12, 24, 12)
+    canvas.set_tool(ToolMode.ERASER)
+    _drive_brush_stroke(canvas, 34, 36, 40, 36)
+    composite_a = mask_to_numpy_binary(canvas.get_mask())
+    assert composite_a.any()
+
+    # A -> B -> A.
+    window.on_page_selected(p2)
+    assert not mask_to_numpy_binary(canvas.get_mask()).any(), (
+        "page B starts with empty planes (no bleed from page A)"
+    )
+    imf_a = window.image_files[0]
+    assert imf_a.auto_mask is not None, "auto plane packed into ImageFile A"
+    assert imf_a.mask_manual is not None, "manual plane packed into ImageFile A"
+    assert imf_a.mask_erase is not None, "erase ledger packed into ImageFile A"
+
+    window.on_page_selected(p1)
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), composite_a
+    ), "the composite survives the page round trip unchanged"
+
+    # Boundary-copy semantics on the plane path: repainting on page A must
+    # never reach the packed slots captured at the switch.
+    canvas.set_tool(ToolMode.BRUSH)
+    _drive_brush_stroke(canvas, 5, 5, 12, 5)
+    stored_manual = unpack_binary(imf_a.mask_manual, size, size)
+    stroked = mask_to_numpy_binary(canvas._mask_manual)
+    assert (stored_manual & ~stroked).any() or not np.array_equal(
+        stored_manual, stroked
+    ), "the persisted manual plane is a detached copy, not the live plane"
