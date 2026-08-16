@@ -1250,9 +1250,11 @@ class MainWindow(QMainWindow):
         4.          ``transform_fn()`` -> ``(new_image, new_mask_bin, new_boxes)``:
            the op's pure math (core/image_ops). A None mask/boxes means the op
            does NOT touch that layer (curves is geometry-free, D-15).
-        5. Write back: ``set_image_from_numpy`` (the setter copies), ``set_mask``
-           via ``numpy_binary_to_mask_qimage`` when the op transformed an
-           existing mask, and ``set_boxes`` (split by origin) UNDER the
+        5. Write back: ``set_image_from_numpy`` (the setter copies), the mask
+           planes rebuilt from the transformed composite via
+           ``canvas.set_planes`` when the op transformed an existing mask
+           (plan 08-02 — the composite becomes the auto plane), and
+           ``set_boxes`` (split by origin) UNDER the
            ``_suppress_boxes_push`` guard — the geometry undo entry is the ONLY
            record (one press per op, never two).
         6. Push ONE geometry undo entry (plan 05-04) and re-baseline Show
@@ -1281,7 +1283,16 @@ class MainWindow(QMainWindow):
         transformed_mask = new_mask_bin is not None and pre_mask is not None
         transformed_boxes = new_boxes is not None
         if transformed_mask:
-            self.canvas.set_mask(numpy_binary_to_mask_qimage(new_mask_bin))
+            # Phase 8 (plan 08-02, Rule 1 deviation): set_mask now replaces
+            # the AUTO plane only, so the transformed composite can no longer
+            # be routed through it — stale same-dims manual/erase planes
+            # would corrupt the recompose (a rotate-180's stale ledger would
+            # erase the wrong pixels). Rebuild ALL planes from the
+            # transformed composite: manual/erase transparent, auto = the
+            # composite (provenance collapses into the auto plane — the
+            # 08-01 geometry-invalidation stance applied at the canvas level;
+            # the displayed composite is pixel-identical to Phase 5).
+            self.canvas.set_planes(None, None, new_mask_bin)
         if transformed_boxes:
             user_pbs = [pb for pb in new_boxes if pb.origin == USER]
             detected_pbs = [pb for pb in new_boxes if pb.origin == DETECTED]

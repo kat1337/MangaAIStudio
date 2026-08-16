@@ -34,7 +34,7 @@ from weakref import ref as _weakref
 import numpy as np
 
 from PySide6 import Shiboken
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -65,10 +65,13 @@ from manga_ai_studio.core.mask_editor import (
     MASK_PAINT_COLOR,
     ToolMode,
     clamp_brush_size,
+    mask_to_numpy_binary,
+    numpy_binary_to_mask_qimage,
     paint_mask_lasso,
     paint_mask_rect,
     paint_mask_stroke,
 )
+from manga_ai_studio.core.mask_planes import MaskPlanesSnapshot, pack_binary
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, origin_hue
 from manga_ai_studio.gui.inline_editor import InlineEditor
 
@@ -347,6 +350,16 @@ class EditorCanvas(QGraphicsView):
         self.brush_size = DEFAULT_BRUSH_SIZE
         self.is_eraser_modifier = False
         self._mask: QImage | None = None  # set in set_image / set_mask
+        # Phase 8 (plan 08-02, RESEARCH §2.2 Option B): the three planes the
+        # composite ``_mask`` is recomposed from — manual strokes, the erase
+        # ledger, and the derived auto binary. Initialized page-sized in
+        # set_image; reset in clear. ``_mask`` stays the displayed/LaMa/
+        # persisted composite so every existing consumer (get_mask /
+        # has_mask / has_mask_content / mask_to_numpy_binary(get_mask()))
+        # is untouched.
+        self._mask_manual: QImage | None = None
+        self._mask_erase: QImage | None = None
+        self._auto_bin: np.ndarray | None = None
         self._is_painting = False
         self._last_pt = QPointF()
         self._start_pt = QPointF()
@@ -396,6 +409,16 @@ class EditorCanvas(QGraphicsView):
         self.mask_item.setVisible(True)
         self._mask_visible = True
 
+        # Phase 8 (plan 08-02): a new page = fresh planes (manual/erase
+        # transparent at the page size, no auto content).
+        manual = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        manual.fill(Qt.GlobalColor.transparent)
+        self._mask_manual = manual
+        erase = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        erase.fill(Qt.GlobalColor.transparent)
+        self._mask_erase = erase
+        self._auto_bin = None
+
         # A new page clears the inpaint preview history (plan 05 UI-SPEC surface 7).
         self._original_image_numpy = None
         self._inpainted_qimage = None
@@ -438,6 +461,10 @@ class EditorCanvas(QGraphicsView):
         self.zoom_factor = 1.0
         self._mask_visible = False
         self._mask = None
+        # Phase 8: no page -> no planes (set_image re-seeds page-sized ones).
+        self._mask_manual = None
+        self._mask_erase = None
+        self._auto_bin = None
         self._original_image_numpy = None
         self._inpainted_qimage = None
         self._showing_original = False
@@ -447,19 +474,26 @@ class EditorCanvas(QGraphicsView):
 
     # ------------------------------------------------------------- mask layer
     def set_mask(self, mask_qimage: QImage) -> None:
-        """Composite a detection mask onto the mask overlay layer.
+        """Route a detection mask into the AUTO plane (Phase 8, UI-SPEC A10).
 
-        The mask ``QImage`` is a grayscale or binary heatmap (H, W) from the
-        detection adapter. This method tints the non-zero regions with the
-        UI-SPEC mask overlay color ``rgba(255, 0, 0, 0.63)``
-        (``QColor(255, 0, 0, 160)`` — 160/255 ~= 0.63) and shows the mask_item
-        (UI-SPEC §Color mask overlay token).
+        NEW CONTRACT (plan 08-02): the incoming mask ``QImage`` (a grayscale
+        or binary heatmap from the detection adapter) is thresholded (any
+        pixel with a non-zero red channel — BGRA byte order) and replaces
+        ONLY the derived auto plane via :meth:`set_auto_binary`. Re-detection
+        no longer clobbers the canvas: manual strokes and the erase ledger
+        SURVIVE (a re-detect replaces the auto plane only; RESEARCH §2.4 /
+        UI-SPEC A10 "Your hand-painted strokes are kept"). The displayed
+        composite is recomposed as ``(manual | auto) & ~erase``.
+
+        Phase 1 behavior note: ``set_mask`` stays signal-silent (detection is
+        a non-undoable baseline — Pitfall 13-1) and still shows the
+        ``mask_item`` (the rgba(255, 0, 0, 0.63) overlay token).
 
         QImage buffer discipline (RESEARCH Pitfall 2, PATTERNS.md §Shared
         Pattern 5): ``mask_qimage.copy()`` defensively detaches any numpy
-        buffer the producer attached before reaching this method, and the
-        output tinted array is ``QImage.copy()``-detached before it becomes a
-        pixmap, so the pixel data outlives both source arrays.
+        buffer the producer attached before reaching this method; the
+        recomposed composite is ``QImage.copy()``-detached inside
+        :func:`numpy_binary_to_mask_qimage`.
         """
         # Defensive copy — detach any numpy/shared buffer (RESEARCH Pitfall 2).
         mask_qimage = mask_qimage.copy()
@@ -478,22 +512,163 @@ class EditorCanvas(QGraphicsView):
         # For a grayscale-converted ARGB32 source the R/G/B channels are equal;
         # treat any pixel with a non-zero red channel as a mask pixel.
         mask_pixels = arr[:, :, 2] > 0  # R channel (BGRA byte order)
+        auto_bin = np.where(mask_pixels, np.uint8(255), np.uint8(0))
 
-        # Build the tinted overlay array directly (fast on large pages).
-        # Qt ARGB32 on little-endian stores pixels in BGRA byte order, so the
-        # array indices are [B, G, R, A]. Red overlay = B=0, G=0, R=255, A=160.
-        out = np.zeros((h, w, 4), dtype=np.uint8)
-        out[mask_pixels] = [0, 0, 255, 160]  # BGRA: red @ alpha 160/255~=0.63
-        # Attach to a QImage and copy-detach so the array may be GC'd.
-        tinted = QImage(out.data, w, h, w * 4, QImage.Format.Format_ARGB32)
-        tinted = tinted.copy()
-        # Store as the editable mask (plan 04): subsequent brush/eraser strokes
-        # compose onto this same QImage in place (RESEARCH Pitfall 4 — mutate,
-        # do not reallocate per mouse-move).
-        self._mask = tinted
-        self.mask_item.setPixmap(QPixmap.fromImage(tinted))
+        # Phase 8: the thresholded heatmap IS the auto plane (the tinting the
+        # Phase 1 body did inline is exactly what recompose_mask does for
+        # every plane change — numpy_binary_to_mask_qimage). The planes are
+        # page-sized, so a non-page-sized incoming mask (Phase 1 accepted any
+        # size; callers/tests pass smaller heatmaps) is fitted onto the page
+        # grid top-left anchored — the same anchoring the Phase 1 pixmap
+        # displayed at (QGraphicsPixmapItem at the scene origin).
+        if self._mask_manual is not None and not self._mask_manual.isNull():
+            page_h = self._mask_manual.height()
+            page_w = self._mask_manual.width()
+            if (h, w) != (page_h, page_w):
+                fitted = np.zeros((page_h, page_w), dtype=np.uint8)
+                rows, cols = min(h, page_h), min(w, page_w)
+                fitted[0:rows, 0:cols] = auto_bin[0:rows, 0:cols]
+                auto_bin = fitted
+        self.set_auto_binary(auto_bin)
+        # Preserve the Phase 1 display side-effect: an incoming detection
+        # mask shows the overlay (recompose itself is visibility-neutral).
         self.mask_item.setVisible(True)
         self._mask_visible = True
+
+    def set_auto_binary(self, bin_arr: np.ndarray | None) -> None:
+        """Replace the DERIVED auto plane with ``bin_arr`` and recompose.
+
+        ``bin_arr`` is an ``(H, W)`` uint8 array (any non-zero value is
+        content; the stored copy is normalized to 0/255). ``None`` means "no
+        auto content". Stored via ``.copy()`` (Pitfall 2 — the caller's
+        array may be a view into a worker result buffer). Signal-silent
+        (detection / re-dilate / radius change are non-undoable settings —
+        RESEARCH §9).
+        """
+        if bin_arr is not None:
+            if bin_arr.ndim != 2 or bin_arr.dtype != np.uint8:
+                raise ValueError(
+                    f"expected (H,W) uint8 binary, got shape={bin_arr.shape} "
+                    f"dtype={bin_arr.dtype}"
+                )
+            bin_arr = np.where(bin_arr > 0, np.uint8(255), np.uint8(0)).copy()
+            # A mask whose dims disagree with the page would broadcast-misalign
+            # the recompose (silent corruption) — fail loudly instead.
+            if self._mask_manual is not None and bin_arr.shape != (
+                self._mask_manual.height(),
+                self._mask_manual.width(),
+            ):
+                raise ValueError(
+                    f"auto binary shape {bin_arr.shape} does not match the "
+                    f"page size "
+                    f"({self._mask_manual.height()}, {self._mask_manual.width()})"
+                )
+        self._auto_bin = bin_arr
+        self.recompose_mask()
+
+    def recompose_mask(self) -> None:
+        """Rebuild the composite ``_mask`` from the three planes (plan 08-02).
+
+        ``composite = (manual_bin | auto_bin) & ~erase_bin`` — rendered via
+        :func:`numpy_binary_to_mask_qimage` (the tinted rgba(255,0,0,0.63)
+        overlay, ``.copy()``-detached) and refreshed through the
+        :meth:`update_mask_display` path. Signal-SILENT (Pitfall 13-1 —
+        detection/re-dilate/restore recompositions are non-undoable and must
+        not re-push onto the history stack).
+
+        Call sites (Pitfall 13-14 — NEVER from mouseMoveEvent; live feedback
+        during a stroke paints the display composite directly and the commit
+        recomposes): stroke commit (``_end_paint``), plane changes
+        (``set_auto_binary`` / ``set_planes`` / ``clear_mask``), and undo
+        restores (``apply_undo_mask``).
+        """
+        if self._mask_manual is None or self._mask_manual.isNull():
+            # No page (or no page-sized planes) — nothing to recompose.
+            return
+        h = self._mask_manual.height()
+        w = self._mask_manual.width()
+        manual_bin = mask_to_numpy_binary(self._mask_manual)
+        erase_bin = mask_to_numpy_binary(self._mask_erase)
+        auto_bin = (
+            self._auto_bin
+            if self._auto_bin is not None
+            else np.zeros((h, w), dtype=np.uint8)
+        )
+        composite = (manual_bin | auto_bin) & ~erase_bin
+        self._mask = numpy_binary_to_mask_qimage(composite)
+        self.update_mask_display()
+
+    def planes_snapshot(self) -> MaskPlanesSnapshot:
+        """Return a detached snapshot of the live three planes (plan 08-02).
+
+        The manual/erase QImages are ``.copy()``-detached and the auto plane
+        is ``pack_binary``-packed (~H*W/8 bytes). Consumed by the MainWindow
+        mask push hook (the MASK stack value type) and the D-11 persistence
+        seam. Raises RuntimeError when no page is loaded (callers guard on
+        page presence — ``_current_undo_state`` / ``_on_mask_modified``).
+        """
+        if self._mask_manual is None or self._mask_manual.isNull():
+            raise RuntimeError("planes_snapshot requires a loaded page")
+        return MaskPlanesSnapshot(
+            manual=self._mask_manual.copy(),
+            erase=self._mask_erase.copy(),
+            auto_packed=(
+                pack_binary(self._auto_bin) if self._auto_bin is not None else None
+            ),
+        )
+
+    def set_planes(
+        self,
+        manual_qimage: QImage | None,
+        erase_qimage: QImage | None,
+        auto_bin: np.ndarray | None,
+    ) -> None:
+        """Restore the three planes and recompose (plan 08-02 Task 2 seam).
+
+        The undo-restore / page-restore counterpart of
+        :meth:`planes_snapshot`. ``.copy()``-detaches every incoming plane
+        (Pitfall 2 — history and ImageFile values must not alias the live
+        canvas). A ``None``/null manual or erase QImage is replaced with a
+        fresh transparent plane at the restore size — derived from the
+        incoming planes in priority order (manual, erase, auto_bin shape),
+        falling back to the CURRENT page size; this lets a geometry-op
+        write-back rebuild the planes at CHANGED dims by passing null
+        QImages plus the new-dims auto binary. Signal-silent (a pure
+        restore).
+        """
+        if (
+            (manual_qimage is None or manual_qimage.isNull())
+            and (erase_qimage is None or erase_qimage.isNull())
+            and auto_bin is None
+            and (self._mask_manual is None or self._mask_manual.isNull())
+        ):
+            # Nothing to restore and no page — nothing to do (callers
+            # restore after set_image has seeded the page-sized planes).
+            return
+        # Derive the restore size: an incoming plane wins (a restore may
+        # carry dims that differ from the current page — geometry undo).
+        if manual_qimage is not None and not manual_qimage.isNull():
+            size = manual_qimage.size()
+        elif erase_qimage is not None and not erase_qimage.isNull():
+            size = erase_qimage.size()
+        elif auto_bin is not None:
+            size = QSize(int(auto_bin.shape[1]), int(auto_bin.shape[0]))
+        else:
+            size = self._mask_manual.size()
+        if manual_qimage is None or manual_qimage.isNull():
+            manual_qimage = QImage(size, QImage.Format.Format_ARGB32)
+            manual_qimage.fill(Qt.GlobalColor.transparent)
+        if erase_qimage is None or erase_qimage.isNull():
+            erase_qimage = QImage(size, QImage.Format.Format_ARGB32)
+            erase_qimage.fill(Qt.GlobalColor.transparent)
+        self._mask_manual = manual_qimage.copy()
+        self._mask_erase = erase_qimage.copy()
+        self._auto_bin = (
+            np.where(auto_bin > 0, np.uint8(255), np.uint8(0)).copy()
+            if auto_bin is not None
+            else None
+        )
+        self.recompose_mask()
 
     def toggle_mask_overlay(self) -> None:
         """Flip the mask overlay visibility (View -> Toggle Mask Overlay, M)."""
@@ -525,15 +700,21 @@ class EditorCanvas(QGraphicsView):
         return bool((arr[:, :, 3] > 0).any())
 
     def clear_mask(self) -> None:
-        """Clear the editable mask to transparent (Edit -> Clear Mask, plan 04).
+        """Clear ALL mask planes to empty (Edit -> Clear Mask, plan 04/08-02).
 
-        Mutates ``self._mask`` in place and refreshes the display (no new QImage
-        is allocated — RESEARCH Pitfall 4).
+        Phase 8: the manual plane and the erase ledger are filled transparent
+        and the auto plane is dropped (``None``), then the composite is
+        recomposed — clear_mask empties the WHOLE mask, not just strokes.
+        Keeps the single ``mask_modified`` emission (one undo entry).
         """
         if self._mask is None or self._mask.isNull():
             return
-        self._mask.fill(Qt.GlobalColor.transparent)
-        self.update_mask_display()
+        if self._mask_manual is not None and not self._mask_manual.isNull():
+            self._mask_manual.fill(Qt.GlobalColor.transparent)
+        if self._mask_erase is not None and not self._mask_erase.isNull():
+            self._mask_erase.fill(Qt.GlobalColor.transparent)
+        self._auto_bin = None
+        self.recompose_mask()
         self.mask_modified.emit()
 
     def get_mask(self) -> QImage | None:
@@ -775,6 +956,25 @@ class EditorCanvas(QGraphicsView):
                 full_rgb = current
 
         h, w = full_rgb.shape[:2]
+        # Phase 8 (plan 08-02): the planes are page-sized state. When the
+        # displayed image is REPLACED at different dims (a geometry op
+        # write-back or undo of one — the same-page inpaint/levels paths keep
+        # their dims and their planes), stale old-grid planes would
+        # broadcast-misalign the next recompose; re-seed them transparent at
+        # the new size. Same-dims page switches are handled by the D-11 seam
+        # (plan 08-02 Task 2 packs/restores planes per page explicitly).
+        if (
+            self._mask_manual is None
+            or self._mask_manual.isNull()
+            or (self._mask_manual.height(), self._mask_manual.width()) != (h, w)
+        ):
+            manual = QImage(w, h, QImage.Format.Format_ARGB32)
+            manual.fill(Qt.GlobalColor.transparent)
+            self._mask_manual = manual
+            erase = QImage(w, h, QImage.Format.Format_ARGB32)
+            erase.fill(Qt.GlobalColor.transparent)
+            self._mask_erase = erase
+            self._auto_bin = None
         qimg = QImage(full_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
         # CRITICAL: .copy() detaches the QImage from the numpy buffer before
         # storage. Without this the QImage points at a buffer that GCs and
@@ -1272,6 +1472,25 @@ class EditorCanvas(QGraphicsView):
         """
         return QPointF(self.mapToScene(event.position().toPoint()))
 
+    def _active_stroke_plane(self, eraser: bool) -> QImage | None:
+        """Return the plane the current stroke dual-writes into (plan 08-02).
+
+        Pitfall 13-11: an erase stroke must ALSO write the erase ledger or
+        its effect is lost on the next recompose. Paint tools (BRUSH/
+        RECTANGLE/LASSO) accumulate on the MANUAL plane; the eraser (and
+        Brush+Shift) accumulates on the ERASE ledger. The plane call itself
+        always paints with normal composition (eraser=False) — the ledger
+        MARKS erased pixels in red; only the display composite
+        ``self._mask`` keeps the CompositionMode_Clear eraser semantics.
+        """
+        return self._mask_erase if eraser else self._mask_manual
+
+    def _dual_write_stroke(self, p1: QPointF, p2: QPointF, eraser: bool) -> None:
+        """Write a brush segment onto the active plane (eraser=False paint)."""
+        plane = self._active_stroke_plane(eraser)
+        if plane is not None and not plane.isNull():
+            paint_mask_stroke(plane, p1, p2, self.brush_size, False)
+
     def _begin_paint(self, event) -> None:
         """Start a stroke/rect/lasso on left-press (UI-SPEC surface 6)."""
         self._is_painting = True
@@ -1286,6 +1505,9 @@ class EditorCanvas(QGraphicsView):
             # A click paints a single dot: stroke from the point to itself
             # (RoundCap fills the cap disc).
             paint_mask_stroke(self._mask, start, start, self.brush_size, eraser)
+            # Dual-write (plan 08-02): the stroke also lands on the active
+            # plane (manual / erase ledger) with normal composition.
+            self._dual_write_stroke(start, start, eraser)
             self.update_mask_display()
 
     def _advance_paint(self, curr: QPointF) -> None:
@@ -1293,6 +1515,7 @@ class EditorCanvas(QGraphicsView):
         eraser = self._effective_eraser()
         if self.current_tool in (ToolMode.BRUSH, ToolMode.ERASER):
             paint_mask_stroke(self._mask, self._last_pt, curr, self.brush_size, eraser)
+            self._dual_write_stroke(self._last_pt, curr, eraser)
             self._last_pt = curr
             self.update_mask_display()
         elif self.current_tool == ToolMode.RECTANGLE:
@@ -1309,13 +1532,24 @@ class EditorCanvas(QGraphicsView):
         eraser = self._effective_eraser()
         if self.current_tool == ToolMode.RECTANGLE:
             paint_mask_rect(self._mask, self._start_pt, curr, eraser)
+            plane = self._active_stroke_plane(eraser)
+            if plane is not None and not plane.isNull():
+                paint_mask_rect(plane, self._start_pt, curr, False)
             self.update_mask_display()
         elif self.current_tool == ToolMode.LASSO:
             self._lasso_path.closeSubpath()
             paint_mask_lasso(self._mask, self._lasso_path, eraser)
+            plane = self._active_stroke_plane(eraser)
+            if plane is not None and not plane.isNull():
+                paint_mask_lasso(plane, self._lasso_path, False)
             self.update_mask_display()
         self._is_painting = False
         self.preview_item.setPath(QPainterPath())  # clear the dashed preview
+        # Recompose from the planes BEFORE the single stroke-commit emission
+        # (plan 08-02) — the display composite becomes exactly
+        # (manual | auto) & ~erase; the live-painted composite above was only
+        # mid-stroke feedback. One emission per stroke is preserved.
+        self.recompose_mask()
         # Single emission per completed stroke — the plan-06 history hook.
         self.mask_modified.emit()
 
