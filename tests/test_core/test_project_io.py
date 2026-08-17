@@ -25,6 +25,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from manga_ai_studio.core.box_model import PageBox, USER
+from manga_ai_studio.core.mask_planes import pack_binary, unpack_binary
 from manga_ai_studio.core.project_io import (
     _MAGIC,
     ProjectFormatError,
@@ -393,6 +394,199 @@ def test_per_box_mask_garbage_rejected() -> None:
     # valid base64 but not a PNG
     with pytest.raises(ProjectFormatError):
         json_to_pagebox({**base, "mask": base64.b64encode(b"not a png").decode("ascii")})
+
+
+@pytest.mark.unit
+def test_build_page_entries_writes_optional_plane_entries() -> None:
+    """build_page_entries with raw/auto/manual/erase binaries writes the four
+    optional plane entries; without them a legacy-shaped state writes none."""
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+
+    def _binary(y0, y1, x0, x1):
+        arr = np.zeros((20, 30), dtype=np.uint8)
+        arr[y0:y1, x0:x1] = 255
+        return arr
+
+    raw = _binary(1, 5, 2, 9)
+    auto = _binary(3, 8, 4, 12)
+    manual = _binary(5, 11, 6, 15)
+    erase = _binary(7, 13, 8, 18)
+
+    entries = build_page_entries(
+        {
+            "boxes": [],
+            "image_rgb": image,
+            "mask_bin": None,
+            "raw_binary": raw,
+            "auto_binary": auto,
+            "manual_binary": manual,
+            "erase_binary": erase,
+        }
+    )
+    for name in (
+        "rawmask.bin",
+        "automask.bin",
+        "manualmask.bin",
+        "erasemask.bin",
+    ):
+        assert name in entries
+    assert entries["rawmask.bin"] == pack_binary(raw).tobytes()
+    assert entries["automask.bin"] == pack_binary(auto).tobytes()
+    assert entries["manualmask.bin"] == pack_binary(manual).tobytes()
+    assert entries["erasemask.bin"] == pack_binary(erase).tobytes()
+
+    # legacy-shaped state (no plane binaries) writes none of the four.
+    legacy = build_page_entries({"boxes": [], "image_rgb": image, "mask_bin": None})
+    for name in (
+        "rawmask.bin",
+        "automask.bin",
+        "manualmask.bin",
+        "erasemask.bin",
+    ):
+        assert name not in legacy
+
+
+@pytest.mark.unit
+def test_parse_page_entries_plane_round_trip(tmp_path: Path) -> None:
+    """parse_page_entries on a container WITH the four entries returns the
+    four packed arrays whose unpacked content matches what was packed; a
+    container WITHOUT them returns None for all four (legacy project)."""
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+
+    def _binary(y0, y1, x0, x1):
+        arr = np.zeros((20, 30), dtype=np.uint8)
+        arr[y0:y1, x0:x1] = 255
+        return arr
+
+    raw = _binary(1, 5, 2, 9)
+    auto = _binary(3, 8, 4, 12)
+    manual = _binary(5, 11, 6, 15)
+    erase = _binary(7, 13, 8, 18)
+
+    entries = build_page_entries(
+        {
+            "boxes": [],
+            "image_rgb": image,
+            "mask_bin": None,
+            "raw_binary": raw,
+            "auto_binary": auto,
+            "manual_binary": manual,
+            "erase_binary": erase,
+        }
+    )
+    page_file = tmp_path / "page_001.mas"
+    save_page_file(page_file, entries)
+    parsed = parse_page_entries(load_page_file(page_file))
+
+    for key, expected in (
+        ("raw_packed", raw),
+        ("auto_packed", auto),
+        ("manual_packed", manual),
+        ("erase_packed", erase),
+    ):
+        packed = parsed[key]
+        assert packed is not None
+        assert unpack_binary(packed, 20, 30).tolist() == expected.tolist()
+
+    # Legacy container without the entries -> None for all four.
+    legacy_entries = build_page_entries(
+        {"boxes": [], "image_rgb": image, "mask_bin": None}
+    )
+    legacy_file = tmp_path / "legacy.mas"
+    save_page_file(legacy_file, legacy_entries)
+    parsed_legacy = parse_page_entries(load_page_file(legacy_file))
+    assert parsed_legacy["raw_packed"] is None
+    assert parsed_legacy["auto_packed"] is None
+    assert parsed_legacy["manual_packed"] is None
+    assert parsed_legacy["erase_packed"] is None
+
+
+@pytest.mark.unit
+def test_crafted_plane_blob_length_rejected(tmp_path: Path) -> None:
+    """A crafted rawmask.bin whose byte length does not equal ceil(h*w/8) for
+    the declared dims raises ProjectFormatError (T-08-07) — a short/long
+    blob is a format error, never a mis-shaped array."""
+    image = np.zeros((20, 30, 3), dtype=np.uint8)  # ceil(600/8) == 75 bytes
+    entries = build_page_entries(
+        {"boxes": [], "image_rgb": image, "mask_bin": None}
+    )
+    entries["rawmask.bin"] = bytes(74)  # one byte short
+    page_file = tmp_path / "crafted.mas"
+    save_page_file(page_file, entries)
+    with pytest.raises(ProjectFormatError):
+        parse_page_entries(load_page_file(page_file))
+
+    entries2 = build_page_entries(
+        {"boxes": [], "image_rgb": image, "mask_bin": None}
+    )
+    entries2["rawmask.bin"] = bytes(76)  # one byte long
+    page_file2 = tmp_path / "crafted2.mas"
+    save_page_file(page_file2, entries2)
+    with pytest.raises(ProjectFormatError):
+        parse_page_entries(load_page_file(page_file2))
+
+
+@pytest.mark.unit
+def test_page_entries_full_round_trip_with_seam_and_planes(tmp_path: Path) -> None:
+    """The plan's end-to-end save -> load round-trip: a page with boxes
+    (mask/std_dev/inpaint_override) AND the four plane binaries rebuilds
+    everything equal — the D-15 seam closes through persistence."""
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+
+    mask = Image.new("1", (20, 10), 0)
+    ImageDraw.Draw(mask).rectangle([2, 2, 18, 8], fill=1)
+    pb = PageBox(
+        box=Box(5, 5, 25, 15),  # box-cropped mask dims (20, 10)
+        origin=USER,
+        payload=None,
+        std_dev=12.3,
+        inpaint_override="never",
+        mask=mask,
+    )
+
+    def _binary(y0, y1, x0, x1):
+        arr = np.zeros((20, 30), dtype=np.uint8)
+        arr[y0:y1, x0:x1] = 255
+        return arr
+
+    raw = _binary(1, 5, 2, 9)
+    auto = _binary(3, 8, 4, 12)
+    manual = _binary(5, 11, 6, 15)
+    erase = _binary(7, 13, 8, 18)
+
+    entries = build_page_entries(
+        {
+            "boxes": [pb],
+            "image_rgb": image,
+            "mask_bin": None,
+            "raw_binary": raw,
+            "auto_binary": auto,
+            "manual_binary": manual,
+            "erase_binary": erase,
+        }
+    )
+    page_file = tmp_path / "page_001.mas"
+    save_page_file(page_file, entries)
+    parsed = parse_page_entries(load_page_file(page_file))
+
+    # Boxes rebuild with every Phase 8 seam field equal.
+    boxes = [json_to_pagebox(bd) for bd in parsed["meta"]["boxes"]]
+    assert len(boxes) == 1
+    out = boxes[0]
+    assert out.std_dev == 12.3
+    assert out.inpaint_override == "never"
+    assert out.mask is not None
+    assert out.mask.size == (20, 10)
+    assert np.array_equal(np.array(out.mask), np.array(mask))
+
+    # Planes rebuild equal.
+    for key, expected in (
+        ("raw_packed", raw),
+        ("auto_packed", auto),
+        ("manual_packed", manual),
+        ("erase_packed", erase),
+    ):
+        assert unpack_binary(parsed[key], 20, 30).tolist() == expected.tolist()
 
 
 @pytest.mark.unit
