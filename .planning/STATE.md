@@ -5,15 +5,15 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
-stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-08-17T18:49:58.511Z"
+stopped_at: Completed 08-05-PLAN.md
+last_updated: "2026-08-17T19:07:39.572Z"
 last_activity: 2026-08-16
 last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 68
-  completed_plans: 63
+  completed_plans: 64
   percent: 78
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 5 of 9
+Plan: 6 of 9
 Status: Ready to execute
 Last activity: 2026-08-16 — Phase 08 execution started
 
@@ -120,6 +120,7 @@ Last activity: 2026-08-16 — Phase 08 execution started
 | Phase 08 P02 | 6h 1min | 3 tasks | 7 files |
 | Phase 08 P03 | 42 min | 3 tasks | 3 files |
 | Phase 08 P04 | 12min | 2 tasks | 2 files |
+| Phase 08 P05 | 45min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -283,6 +284,10 @@ Recent decisions affecting current work:
 - [Phase ?]: 08-04: Per-box mask serializes as base64 PNG of the box-cropped mode-'1' image (RESEARCH 6.3 a) — PNG packbits keep mask small; T-08-06 size cross-check bounds crafted mask to box dims
 - [Phase ?]: 08-04: Plane binaries persist as pack_binary 1-bit blobs (~H*W/8 per page) in optional .mas entries — Loader re-dilates rawmask.bin on radius change without re-detecting; hand strokes never lost to recomposition
 - [Phase ?]: 08-04: Plane blob length validation uses ceil(h*w/8) against the meta-declared image dims — Planes are page-sized; validate_meta forces mask.bin dims to equal image dims, mirroring the mask.bin length cross-check (T-08-07)
+- [Phase 08]: 08-05: Detect Boxes persists as QSettings view-state 'detectBoxesMode' (A7), NOT the profile INI; action_detect_boxes_mode is kept alive as the state holder (its isChecked() is still read by the detection seam) and removed from the Tools menu (A8) — the dock checkbox is the single user-facing control
+- [Phase 08]: 08-05: masker_values() returns a MaskerConfig-field-keyed dict so MainWindow's _on_masker_params_changed setattrs directly onto profile.masker — one handler + one save for the seven shared-fate next-detect fit params
+- [Phase 08]: 08-05: The two LIVE handlers (_on_dilation_changed / _on_std_dev_threshold_changed) persist ONLY in this plan with an explicit 08-07 extension-point comment — live re-dilate / gate-re-derive ride the seam plan (08-07)
+- [Phase 08]: 08-05: The ToolsPanel detection-settings section wraps the whole body in a vertical-only QScrollArea (A11) — the dock never clips at 1024x720; the radius slider/spinbox pair is one contracted row whose two widgets are both Tab-reachable (test enumerates 11 widgets = 10 rows)
 
 ### Roadmap Evolution
 
@@ -316,8 +321,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T18:49:58.496Z
-Stopped at: Completed 08-03-PLAN.md
+Last session: 2026-08-17T19:07:39.557Z
+Stopped at: Completed 08-05-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
