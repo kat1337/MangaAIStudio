@@ -20,6 +20,11 @@ UI-SPEC surface 6 contracts:
 Signals:
     - ``tool_changed(ToolMode)`` — emitted when an exclusive tool is checked.
     - ``brush_size_changed(int)`` — emitted when the brush size changes.
+    - ``detect_boxes_changed(bool)`` — Detect Boxes toggle flipped (D-05).
+    - ``dilation_changed(int)`` — dilation radius changed (D-06, LIVE).
+    - ``std_dev_threshold_changed(float)`` — gate threshold changed (D-12, LIVE).
+    - ``masker_params_changed()`` — any of the seven next-detect fit params
+      changed (they share one persist + apply-next-detect fate; UI-SPEC §36).
 """
 
 from __future__ import annotations
@@ -27,8 +32,13 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
     QSpinBox,
     QSlider,
     QToolButton,
@@ -80,6 +90,36 @@ QSpinBox {
     padding: 1px 4px;
     color: #e8e8ea;
 }
+QDoubleSpinBox {
+    background: #2d2d33;
+    border: 1px solid #3a3a42;
+    border-radius: 2px;
+    padding: 1px 4px;
+    color: #e8e8ea;
+}
+QCheckBox {
+    color: #e8e8ea;
+    spacing: 6px;
+}
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+}
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+QScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+#_detection_divider {
+    background: #3a3a42;
+}
+#_detection_section_header {
+    color: #9a9aa2;
+    font-weight: 600;
+    font-size: 12px;
+}
 """
 
 
@@ -91,15 +131,44 @@ class ToolsPanel(QWidget):
     tool_changed = Signal(object)
     # Emitted when the brush size changes (slider or spinbox).
     brush_size_changed = Signal(int)
+    # Phase 8 detection-settings section (plan 08-05, UI-SPEC surface 36).
+    detect_boxes_changed = Signal(bool)
+    dilation_changed = Signal(int)
+    std_dev_threshold_changed = Signal(float)
+    masker_params_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("tools_panel")
 
+        # Panel shell: a vertical-only QScrollArea wrap (UI-SPEC §36 A11 —
+        # "the dock never clips at 1024x720", A11 in the Resolved Assumptions).
+        # The tool row + brush row stay pinned at the top of the scroll
+        # content; the detection-settings section below them scrolls out of
+        # view instead of being clipped on short windows.
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.body_scroll = QScrollArea(self)
+        self.body_scroll.setObjectName("tools_body_scroll")
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.body_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        # Frame-less: the scroll area must not draw chrome around the panel.
+        self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        body = QWidget()
+        self.body_layout = QVBoxLayout(body)
         # sm (8px) contents margins + sm spacing (UI-SPEC §Spacing).
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        self.body_layout.setContentsMargins(8, 8, 8, 8)
+        self.body_layout.setSpacing(8)
+        self.body_scroll.setWidget(body)
+        root.addWidget(self.body_scroll)
 
         # ---- Tool row: 6 exclusive checkable QToolButtons ----
         self.tool_group = QActionGroup(self)
@@ -111,16 +180,28 @@ class ToolsPanel(QWidget):
             "Move/Pan", "Move/Pan tool (V)", ToolMode.MOVE, checked=True
         )
         self.action_brush = self._make_tool_action(
-            "Brush", "Brush tool (B)", ToolMode.BRUSH
+            "Brush",
+            "Brush tool (B) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.BRUSH,
         )
         self.action_rectangle = self._make_tool_action(
-            "Rectangle", "Rectangle tool (R)", ToolMode.RECTANGLE
+            "Rectangle",
+            "Rectangle tool (R) — paints under text boxes; hold Alt to select"
+            " or move a box.",
+            ToolMode.RECTANGLE,
         )
         self.action_lasso = self._make_tool_action(
-            "Lasso", "Lasso tool (L)", ToolMode.LASSO
+            "Lasso",
+            "Lasso tool (L) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.LASSO,
         )
         self.action_eraser = self._make_tool_action(
-            "Eraser", "Eraser tool (E)", ToolMode.ERASER
+            "Eraser",
+            "Eraser tool (E) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.ERASER,
         )
         # The 6th tool (D-11, plan 05-07): Crop defines a crop rect via an
         # armed drag (Enter applies, Esc cancels — UI-SPEC §Copywriting crop
@@ -170,11 +251,11 @@ class ToolsPanel(QWidget):
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             self.tool_buttons.append(btn)
             tool_row.addWidget(btn)
-        root.addLayout(tool_row)
+        self.body_layout.addLayout(tool_row)
 
         # ---- Brush size: label + slider + spinbox ----
         self.brush_label = QLabel(f"Brush size: {DEFAULT_BRUSH_SIZE} px")
-        root.addWidget(self.brush_label)
+        self.body_layout.addWidget(self.brush_label)
 
         brush_row = QHBoxLayout()
         brush_row.setSpacing(4)  # xs (4px) slider<->spinbox gap (UI-SPEC §Spacing)
@@ -197,9 +278,13 @@ class ToolsPanel(QWidget):
 
         brush_row.addWidget(self.brush_slider, 1)
         brush_row.addWidget(self.brush_spinbox)
-        root.addLayout(brush_row)
+        self.body_layout.addLayout(brush_row)
 
-        root.addStretch(1)
+        self.body_layout.addStretch(1)
+
+        # ---- Detection settings section (Phase 8, UI-SPEC surface 36) ----
+        self._build_detection_settings_section()
+
         self.setStyleSheet(_TOOLS_QSS)
 
     # ------------------------------------------------------------- tool row
@@ -296,3 +381,247 @@ class ToolsPanel(QWidget):
         self.brush_slider.blockSignals(was_s)
         self.brush_spinbox.blockSignals(was_sb)
         self.brush_label.setText(f"Brush size: {value} px")
+
+    # ------------------------------------- detection settings (Phase 8)
+    def _build_detection_settings_section(self) -> None:
+        """Build the "Detection settings" section (UI-SPEC surface 36, D-05/D-06).
+
+        Layout: 1px ``#3a3a42`` divider, 12px Semibold muted header (the Phase
+        7 Style-header precedent), then ``QFormLayout`` rows (spacing 6px) with
+        the relocated Detect Boxes toggle + the nine masker parameters. The two
+        LIVE controls (dilation radius, std-dev threshold) emit their own
+        signals; the seven fit params share one ``masker_params_changed`` fate.
+        Tooltips are verbatim from the 08-UI-SPEC Copywriting table (which
+        adapts the vendored ``MaskerConfig`` INI comments and appends the
+        live/next-detect clauses — A12).
+        """
+        body = self.body_layout
+
+        # 1px #3a3a42 divider above the header (UI-SPEC §36 section gap).
+        divider = QFrame(self)
+        divider.setObjectName("_detection_divider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFixedHeight(1)
+        body.addWidget(divider)
+
+        section_header = QLabel("Detection settings")
+        section_header.setObjectName("_detection_section_header")
+        body.addWidget(section_header)
+
+        form = QFormLayout()
+        form.setVerticalSpacing(6)  # the Inspector form rhythm (UI-SPEC §36)
+        body.addLayout(form)
+
+        # 1. Detect Boxes (D-05) — relocated from the Tools menu (A8); the dock
+        # checkbox is the single user-facing control. Default checked (A1).
+        self.detect_checkbox = QCheckBox("Detect Boxes", self)
+        self.detect_checkbox.setChecked(True)
+        self.detect_checkbox.setToolTip(
+            "When on, Detect Text creates editable text boxes and keeps only"
+            " detected text inside them in the mask. Off: the full heatmap"
+            " goes into the mask (original behavior)."
+        )
+        self.detect_checkbox.toggled.connect(self.detect_boxes_changed)
+        form.addRow(self.detect_checkbox)
+
+        # 2. Dilation radius (D-06/D-09) — slider + spinbox mirror (the brush-row
+        # blockSignals pattern, :275-288). LIVE: re-dilates the current page.
+        radius_tip = (
+            "Grow auto-detected masks by this many pixels so the edges of"
+            " letters are covered (default 2). Applies to detected masks"
+            " only — hand-painted strokes are never dilated. Changing it"
+            " re-dilates the current page immediately."
+        )
+        self.dilation_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.dilation_slider.setMinimum(0)
+        self.dilation_slider.setMaximum(10)
+        self.dilation_slider.setValue(2)
+        self.dilation_slider.setToolTip(radius_tip)
+        self.dilation_spinbox = QSpinBox(self)
+        self.dilation_spinbox.setMinimum(0)
+        self.dilation_spinbox.setMaximum(10)
+        self.dilation_spinbox.setValue(2)
+        self.dilation_spinbox.setSuffix(" px")
+        self.dilation_spinbox.setToolTip(radius_tip)
+        self.dilation_slider.valueChanged.connect(self._on_dilation_slider_changed)
+        self.dilation_spinbox.valueChanged.connect(self._on_dilation_spinbox_changed)
+        radius_row = QHBoxLayout()
+        radius_row.setSpacing(4)  # xs (4px) slider<->spinbox gap
+        radius_row.addWidget(self.dilation_slider, 1)
+        radius_row.addWidget(self.dilation_spinbox)
+        form.addRow("Dilation radius", radius_row)
+
+        # 3. Std-dev threshold (D-06/D-12) — LIVE: border colors update live.
+        self.std_dev_threshold_spin = QDoubleSpinBox(self)
+        self.std_dev_threshold_spin.setMinimum(0)
+        self.std_dev_threshold_spin.setMaximum(100)
+        self.std_dev_threshold_spin.setSingleStep(0.5)
+        self.std_dev_threshold_spin.setDecimals(1)
+        self.std_dev_threshold_spin.setValue(15)
+        self.std_dev_threshold_spin.setToolTip(
+            "The maximum color variation along a mask's edge for it to count"
+            " as sitting in a solid region. Boxes above this are skipped"
+            " (dashed border). 0 allows only perfect masks — recommended for"
+            " very high resolution images. Border colors update live."
+        )
+        self.std_dev_threshold_spin.valueChanged.connect(
+            self.std_dev_threshold_changed
+        )
+        form.addRow("Std-dev threshold", self.std_dev_threshold_spin)
+
+        # 4-10. The seven next-detect fit params (D-06) — they share ONE
+        # persist + apply-next-detect fate (one signal, UI-SPEC §36).
+        self.growth_step_spin = QSpinBox(self)
+        self.growth_step_spin.setRange(0, 20)
+        self.growth_step_spin.setValue(2)
+        self.growth_step_spin.setSuffix(" px")
+        self.growth_step_spin.setToolTip(
+            "Number of pixels to grow candidate masks by each step. Smaller"
+            " values are more accurate but slower. Applies on the next Detect"
+            " Text."
+        )
+        self.growth_step_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Growth step", self.growth_step_spin)
+
+        self.growth_steps_spin = QSpinBox(self)
+        self.growth_steps_spin.setRange(0, 50)
+        self.growth_steps_spin.setValue(11)
+        self.growth_steps_spin.setToolTip(
+            "Number of growth steps to try. Higher values try more, larger"
+            " masks, limited by the box size. Applies on the next Detect Text."
+        )
+        self.growth_steps_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Growth steps", self.growth_steps_spin)
+
+        self.min_thickness_spin = QSpinBox(self)
+        self.min_thickness_spin.setRange(0, 50)
+        self.min_thickness_spin.setValue(4)
+        self.min_thickness_spin.setSuffix(" px")
+        self.min_thickness_spin.setToolTip(
+            "Minimum mask thickness — prevents very thin masks around text that"
+            " only has an outline. Applies on the next Detect Text."
+        )
+        self.min_thickness_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Min thickness", self.min_thickness_spin)
+
+        self.off_white_spin = QSpinBox(self)
+        self.off_white_spin.setRange(0, 255)
+        self.off_white_spin.setValue(240)
+        self.off_white_spin.setToolTip(
+            "Pixels along a mask edge lighter than this are treated as pure"
+            " white, so slightly off-white bubble backgrounds don't count as"
+            " color variation. 0 (black) to 255 (pure white). Applies on the"
+            " next Detect Text."
+        )
+        self.off_white_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Off-white threshold", self.off_white_spin)
+
+        self.improvement_spin = QDoubleSpinBox(self)
+        self.improvement_spin.setRange(0, 1)
+        self.improvement_spin.setSingleStep(0.01)
+        self.improvement_spin.setDecimals(2)
+        self.improvement_spin.setValue(0.10)
+        self.improvement_spin.setToolTip(
+            "How much a larger candidate mask must improve the edge variation"
+            " to be preferred. Higher values favor smaller masks. Applies on"
+            " the next Detect Text."
+        )
+        self.improvement_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Improvement threshold", self.improvement_spin)
+
+        self.allow_colored_check = QCheckBox("Allow colored masks", self)
+        self.allow_colored_check.setChecked(True)  # vendored default
+        self.allow_colored_check.setToolTip(
+            "Let masks sit on any solid color, not only white, black, or gray."
+            " Applies on the next Detect Text."
+        )
+        self.allow_colored_check.toggled.connect(self._on_fit_param_changed)
+        form.addRow(self.allow_colored_check)
+
+        self.fast_selection_check = QCheckBox("Fast mask selection", self)
+        self.fast_selection_check.setChecked(False)  # vendored default
+        self.fast_selection_check.setToolTip(
+            "Pick the first good-enough mask instead of always searching for"
+            " the best one. Faster, but may miss a slightly better fit."
+            " Applies on the next Detect Text."
+        )
+        self.fast_selection_check.toggled.connect(self._on_fit_param_changed)
+        form.addRow(self.fast_selection_check)
+
+    # The radius mirror emits ONE dilation_changed per user change — the mirror
+    # write uses blockSignals (the brush-row :275-288 pattern).
+    def _on_dilation_slider_changed(self, value: int) -> None:
+        was = self.dilation_spinbox.blockSignals(True)
+        self.dilation_spinbox.setValue(value)
+        self.dilation_spinbox.blockSignals(was)
+        self.dilation_changed.emit(value)
+
+    def _on_dilation_spinbox_changed(self, value: int) -> None:
+        was = self.dilation_slider.blockSignals(True)
+        self.dilation_slider.setValue(value)
+        self.dilation_slider.blockSignals(was)
+        self.dilation_changed.emit(value)
+
+    def _on_fit_param_changed(self, *args) -> None:
+        """Any of the seven next-detect controls changed — one shared signal."""
+        self.masker_params_changed.emit()
+
+    def masker_values(self) -> dict:
+        """Read the seven next-detect fit params as a profile-field-keyed dict.
+
+        Keys match ``MaskerConfig`` field names so MainWindow's
+        ``_on_masker_params_changed`` can ``setattr`` them onto
+        ``profile.masker`` directly (plan 08-05).
+        """
+        return {
+            "mask_growth_step_pixels": self.growth_step_spin.value(),
+            "mask_growth_steps": self.growth_steps_spin.value(),
+            "min_mask_thickness": self.min_thickness_spin.value(),
+            "off_white_max_threshold": self.off_white_spin.value(),
+            "mask_improvement_threshold": self.improvement_spin.value(),
+            "allow_colored_masks": self.allow_colored_check.isChecked(),
+            "mask_selection_fast": self.fast_selection_check.isChecked(),
+        }
+
+    def set_masker_values(self, masker_conf, detect_boxes: bool) -> None:
+        """Programmatically populate the section from a MaskerConfig (D-10).
+
+        Runs with blockSignals so a startup/load population never re-emits
+        (the ``set_brush_size`` :290-298 precedent) — MainWindow loads the
+        persisted profile values at startup via this method without a
+        save-back. Values are range-clamped at the widget level (T-08-09:
+        invalid values are unreachable).
+        """
+        widgets = [
+            self.dilation_slider,
+            self.dilation_spinbox,
+            self.std_dev_threshold_spin,
+            self.growth_step_spin,
+            self.growth_steps_spin,
+            self.min_thickness_spin,
+            self.off_white_spin,
+            self.improvement_spin,
+            self.allow_colored_check,
+            self.fast_selection_check,
+            self.detect_checkbox,
+        ]
+        prev = [w.blockSignals(True) for w in widgets]
+        try:
+            self.dilation_slider.setValue(masker_conf.mask_dilation_radius)
+            self.dilation_spinbox.setValue(masker_conf.mask_dilation_radius)
+            self.std_dev_threshold_spin.setValue(
+                masker_conf.mask_max_standard_deviation
+            )
+            self.growth_step_spin.setValue(masker_conf.mask_growth_step_pixels)
+            self.growth_steps_spin.setValue(masker_conf.mask_growth_steps)
+            self.min_thickness_spin.setValue(masker_conf.min_mask_thickness)
+            self.off_white_spin.setValue(masker_conf.off_white_max_threshold)
+            self.improvement_spin.setValue(
+                masker_conf.mask_improvement_threshold
+            )
+            self.allow_colored_check.setChecked(masker_conf.allow_colored_masks)
+            self.fast_selection_check.setChecked(masker_conf.mask_selection_fast)
+            self.detect_checkbox.setChecked(detect_boxes)
+        finally:
+            for widget, was in zip(widgets, prev):
+                widget.blockSignals(was)
