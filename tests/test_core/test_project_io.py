@@ -109,7 +109,8 @@ def test_pagebox_json_round_trip() -> None:
     assert len(p.lines) == 2
     for expected, actual in zip(payload.lines, p.lines):
         assert actual == expected  # element-wise equality
-    # D-15 seam: mask/std_dev are never serialized, always None on load.
+    # Phase 8 (plan 08-04): this pagebox has NO seam fields set, so the
+    # optional keys serialize as null and restore as None.
     assert out.mask is None
     assert out.std_dev is None
 

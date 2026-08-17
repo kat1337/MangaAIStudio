@@ -19,9 +19,11 @@ is bounded by ``MAX_ENTRY_DECOMPRESSED`` (T-05-01 memlimit mitigation).
 
 The PageBox mapping hand-picks the serializable fields (RESEARCH Common
 Operation 1) — it never calls ``TextBlock.to_dict()`` (Anti-Pattern 1:
-deep-copies numpy arrays, not JSON-serializable). The D-15 seam is
-preserved: ``PageBox.mask`` / ``std_dev`` are NEVER written and always
-``None`` after load.
+deep-copies numpy arrays, not JSON-serializable). Phase 8 (plan 08-04)
+CLOSES the D-15 seam: ``PageBox.mask`` / ``std_dev`` and the per-page mask
+planes now serialize as OPTIONAL keys/entries (no ``_FORMAT_VERSION`` bump
+— the Phase 7 optional-key pattern), so legacy Phase 5/7 files load with
+all new fields defaulting to None/absent.
 
 Licensing: Manga AI Studio is a derivative of PanelCleaner (GPL v3); this
 module is our own GPL v3 code and must carry that attribution in all
@@ -30,15 +32,19 @@ distributions.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import lzma
 import os
 import struct
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+from PIL import Image, UnidentifiedImageError
 
 from manga_ai_studio.core.image_io import save_image_bytes
 
@@ -179,13 +185,35 @@ def load_page_file(path: Path) -> dict[str, bytes]:
 
 # ---------------------------------------------------------------- PageBox map
 
+def _pagebox_mask_to_json(mask) -> str | None:
+    """Encode a box-cropped mode-"1" PIL mask to base64 PNG ASCII (or None).
+
+    ``save_image_bytes`` (image_io) expects RGB pages, so the per-box mask —
+    a box-cropped mode-"1" PIL image (plan 08-03 storage convention) — is
+    encoded via PIL directly here, PNG in-memory, base64'd into an ASCII str.
+    A mostly-empty text-box mask compresses to a few hundred bytes
+    (RESEARCH §6.3 option a — the planner-chosen format).
+    """
+    if mask is None:
+        return None
+    buf = BytesIO()
+    mask.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def pagebox_to_json(pb) -> dict:
-    """Project a ``PageBox`` to JSON-safe plain data (D-15 seam preserved).
+    """Project a ``PageBox`` to JSON-safe plain data (D-15 seam now closed).
 
     Hand-picks the serializable fields per RESEARCH Common Operation 1 and
-    NEVER writes ``mask`` / ``std_dev`` (the D-15 seam stays ``None``
-    through save/load) and never calls ``TextBlock.to_dict()``
-    (Anti-Pattern 1 — deep-copies numpy arrays, not JSON-serializable).
+    never calls ``TextBlock.to_dict()`` (Anti-Pattern 1 — deep-copies numpy
+    arrays, not JSON-serializable).
+
+    Phase 8 (plan 08-04) SUPERSEDES the original "NEVER writes mask/std_dev"
+    contract: the D-15 seam fields now serialize — ``std_dev`` (float or
+    null), ``inpaint_override`` (one of ``{"always", "never"}`` or null), and
+    ``mask`` (the box-cropped mode-"1" PIL image as base64 PNG, or null).
+    All three are OPTIONAL load keys (Phase 7 optional-key precedent) so
+    legacy Phase 5/7 files still load with defaults.
     """
     payload = pb.payload
     return {
@@ -195,6 +223,10 @@ def pagebox_to_json(pb) -> dict:
         "bubble_no": pb.bubble_no,
         "manual_override": pb.manual_override,
         "style": pb.style.to_dict() if pb.style is not None else None,  # D-07
+        # Phase 8 (plan 08-04) — the D-15 seam fields close through save/load.
+        "std_dev": pb.std_dev,  # float | null (None = not yet fitted)
+        "inpaint_override": pb.inpaint_override,  # "always" | "never" | null
+        "mask": _pagebox_mask_to_json(pb.mask),  # base64 PNG | null
         "payload": None if payload is None else {
             "xyxy": list(payload.xyxy),
             "lines": payload.lines,  # list of 4-point quads
@@ -213,8 +245,19 @@ def json_to_pagebox(d: dict):
     Every numeric field is int()-coerced (box_model V5 ``textblock_to_box``
     discipline); a fresh vendored ``Box`` is always constructed — never
     mutated, it is ``@frozen``. Unknown keys are ignored; missing required
-    keys raise ProjectFormatError. ``mask`` / ``std_dev`` are always
-    ``None`` (D-15 seam).
+    keys raise ProjectFormatError.
+
+    Phase 8 (plan 08-04): the D-15 seam fields are OPTIONAL load keys (the
+    Phase 7 optional-key precedent — legacy Phase 5/7 .mas files predate
+    them). Absent/None restore ``std_dev=None`` / ``inpaint_override=None`` /
+    ``mask=None``; GARBAGE values are rejected structurally:
+    ``std_dev`` float-coerces (TypeError/ValueError -> ProjectFormatError),
+    ``inpaint_override`` must be ``None`` or one of ``{"always", "never"}``
+    (the format-version rejection stance, T-08-08), and ``mask`` decodes
+    base64 -> PNG with a decoded-size cross-check against the box dims and a
+    full try/except wrap (T-08-06 — no raw binascii/PIL exception escapes
+    the loader, the T-05-01 pattern; PIL's MAX_IMAGE_PIXELS bomb guard stays
+    active).
     """
     from manga_ai_studio.core.box_model import PageBox
     from manga_ai_studio.core.text_style import TextStyle
@@ -239,9 +282,35 @@ def json_to_pagebox(d: dict):
     # through TextStyle.from_dict (the V5 boundary), never raw.
     style = TextStyle.from_dict(d.get("style"))
 
+    # Phase 8 (plan 08-04): std_dev — optional float with the V5 coercion
+    # discipline. Absent/None -> None; a non-numeric value is structural
+    # garbage (T-08-08).
+    std_dev = None
+    if d.get("std_dev") is not None:
+        try:
+            std_dev = float(d["std_dev"])
+        except (TypeError, ValueError) as exc:
+            raise ProjectFormatError("std_dev must be a number") from exc
+
+    # Phase 8 (plan 08-04): inpaint_override — the D-14 tri-state enum.
+    # Absent/None = Auto; any OTHER value is structural garbage (stricter
+    # than the format-version stance, matching it).
+    override_raw = d.get("inpaint_override")
+    if override_raw is not None and override_raw not in ("always", "never"):
+        raise ProjectFormatError(
+            f"inpaint_override must be one of 'always'/'never' or null, "
+            f"got {override_raw!r}"
+        )
+
     if len(box_vals) != 4:
         raise ProjectFormatError("box must have exactly 4 coordinates")
     box = Box(*(_coerce_int(v, "box coordinate") for v in box_vals))
+
+    # Phase 8 (plan 08-04): per-box mask — base64 PNG -> box-cropped mode-"1"
+    # PIL image, size-cross-checked and fully wrapped (T-08-06).
+    mask = None
+    if d.get("mask") is not None:
+        mask = _pagebox_mask_from_json(d["mask"], box)
 
     payload = None
     if payload_raw is not None:
@@ -277,7 +346,48 @@ def json_to_pagebox(d: dict):
         bubble_no=None if bubble_no is None else _coerce_int(bubble_no, "bubble_no"),
         manual_override=bool(manual_override),
         style=style,  # D-07 — always a TextStyle (defaults when absent/None)
+        # Phase 8 (plan 08-04) — the D-15 seam fields restore.
+        std_dev=std_dev,
+        inpaint_override=override_raw,
+        mask=mask,
     )
+
+
+def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image:
+    """Decode a base64 PNG per-box mask, size-cross-checked and hardened.
+
+    ASVS V5 / T-08-06: the base64 decode + ``Image.open`` are fully wrapped —
+    ``binascii.Error`` / ``TypeError`` / ``ValueError`` / ``OSError`` /
+    PIL ``UnidentifiedImageError`` / ``DecompressionBombError`` all re-raise
+    as ProjectFormatError, so no raw library exception escapes the loader
+    (the T-05-01 pattern). PIL's default ``MAX_IMAGE_PIXELS``
+    decompression-bomb guard stays ACTIVE (not raised or disabled here; its
+    ``DecompressionBombError`` surfaces as ProjectFormatError); the explicit
+    decoded-size cross-check against the declared box dims additionally
+    bounds the decoded image to the box, whose coords are themselves clamped
+    by the V5 box build.
+    """
+    try:
+        png_bytes = base64.b64decode(mask_value)
+        with Image.open(BytesIO(png_bytes)) as opened:
+            decoded = opened.copy()  # .copy() after open — buffer lifetime
+    except (
+        binascii.Error,
+        TypeError,
+        ValueError,
+        OSError,
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+    ) as exc:
+        raise ProjectFormatError(f"invalid per-box mask: {exc}") from exc
+    box_w = box.x2 - box.x1
+    box_h = box.y2 - box.y1
+    if decoded.size != (box_w, box_h):
+        raise ProjectFormatError(
+            f"per-box mask size {decoded.size} does not match the box dims "
+            f"{box_w}x{box_h}"
+        )
+    return decoded.convert("1", dither=Image.NONE)
 
 
 # --------------------------------------------------- page assembly + chapter
