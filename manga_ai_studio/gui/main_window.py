@@ -61,10 +61,9 @@ from manga_ai_studio.core import image_ops, project_io
 from manga_ai_studio.core.box_model import (
     DETECTED,
     USER,
-    PageBox,
-    textblock_to_box,
 )
 from manga_ai_studio.core.detection_boxes import (
+    build_detected_pageboxes,
     derive_page_mask_state,
     dilate_auto_mask,
 )
@@ -83,7 +82,6 @@ from manga_ai_studio.core.mask_planes import (
 )
 from manga_ai_studio.core.text_style import TextStyle, default_style
 from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
-from panelcleaner.structures import Box
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
@@ -3196,6 +3194,85 @@ class MainWindow(QMainWindow):
         # 07-05 (D-10): a group move/style commit reloads the Mixed state.
         self._on_canvas_selection_changed()
 
+        # Plan 08-07 (D-12, predictive): recompute-on-commit. This hook fires
+        # on box move/resize/CREATE release (never per mousemove — the canvas
+        # emits boxes_modified once per committed drag, RESEARCH §8
+        # debouncing); re-fit the geometry-changed boxes against the retained
+        # raw detection binary so their std-dev + border state re-derive and
+        # the auto plane recomposes. Skipped when no geometry changed
+        # (Inspector/OCR/text/style commits emit boxes_modified too) and when
+        # there is no retained raw mask (T-08-13).
+        self._refit_changed_boxes(before_snapshot)
+
+    def _refit_changed_boxes(self, before_snapshot) -> None:
+        """Re-fit the geometry-changed boxes and recompose the auto plane.
+
+        Plan 08-07 Task 2 (D-12 recompute-on-release): the move/resize/create
+        commit path. Compare each before-snapshot PageBox's ``box.as_tuple``
+        to the CURRENT canvas geometry (``boxes_snapshot()`` materializes the
+        live rects via ``BoxItem.current_box`` — a moved box's ``pagebox.box``
+        stays birth-geometry, so the current tuple comes from the snapshot,
+        never the stale attribute); a current tuple absent from the before
+        snapshot is a moved/resized OR newly created box. Re-runs the per-box
+        fit against the RETAINED raw detection binary
+        (``ImageFile.raw_detected_mask`` — never a new model call; D-08) so
+        the box's std-dev re-measures at its new location, writes the fresh
+        fits back onto the LIVE pageboxes, recomposes the auto plane from ALL
+        stored fits, and refreshes every border.
+
+        Guards (T-08-13 DoS mitigation):
+        - ``_suppress_boxes_push`` -> restores never refit;
+        - no retained raw mask (never detected) -> silent no-op;
+        - no geometrically changed/new boxes -> no refit (Inspector/OCR/text/
+          style commits ride the same signal without refitting);
+        - a stale-dims raw blob (post-geometry-op pages invalidate per-box
+          masks; T-08-02 backstop) -> silent no-op, never a reshape crash.
+        """
+        if self._suppress_boxes_push:
+            return
+        idx = self._current_page_index()
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        imf = self.image_files[idx]
+        if imf.raw_detected_mask is None:
+            return
+        image_rgb = self.canvas.get_image_numpy()
+        if image_rgb is None:
+            return
+        current = self.canvas.boxes_snapshot()  # CURRENT geometry, detached
+        before_tuples = [pb.box.as_tuple for pb in (before_snapshot or [])]
+        if not any(pb.box.as_tuple not in before_tuples for pb in current):
+            return  # no moved/resized/created box — nothing to refit
+
+        h, w = image_rgb.shape[:2]
+        if len(imf.raw_detected_mask) != (h * w + 7) // 8:
+            logger.debug(
+                "Refit skipped: retained raw mask dims no longer match the "
+                "page (stale after a geometry op?)"
+            )
+            return
+        raw = unpack_binary(imf.raw_detected_mask, h, w)
+        profile = self.profile_manager.config.current_profile
+        # derive_page_mask_state is IDEMPOTENT per page: passing the full
+        # snapshot re-fits every box deterministically (unchanged boxes
+        # re-derive the same values — the plan's accepted contraction of
+        # "fits only the changed boxes"). The fits land on the SNAPSHOT
+        # PageBoxes; write them back onto the live items (same order — both
+        # streams iterate _box_items) so the border refresh + the next
+        # compose read fresh values.
+        derivation = derive_page_mask_state(
+            image_rgb,
+            raw,
+            current,
+            profile.masker,
+            int(profile.masker.mask_dilation_radius),
+        )
+        for live_item, fitted in zip(self.canvas._box_items, current):
+            live_item.pagebox.mask = fitted.mask
+            live_item.pagebox.std_dev = fitted.std_dev
+        self.canvas.set_auto_binary(derivation.auto_binary)
+        self.refresh_box_inpaint_states()
+
     # ----------------------------------------------------- plan 04-04 Inspector
     def _on_canvas_selection_changed(self) -> None:
         """Inspector selection-follower (D-08/D-10): load the selection.
@@ -4241,99 +4318,65 @@ class MainWindow(QMainWindow):
     def _build_detected_boxes(self, blk_list) -> None:
         """Build detected PageBoxes from the model's blk_list (TEXT-01, plan 03-04).
 
-        Implements the D-03 re-detect rule (replace detected, keep user), the
-        D-04 confirm gate (fire before replacing detected boxes), and the V5
-        input-validation control (model xyxy is bounds-clamped against the
-        image rect and zero-area boxes are dropped — T-03-06).
+        Implements the D-03 re-detect rule (replace detected, keep user) and
+        the V5 input-validation control (model xyxy is bounds-clamped against
+        the image rect and zero-area boxes are dropped — T-03-06). The D-04
+        confirm gate is HOISTED to ``_on_detection_finished`` (plan 08-07
+        Task 1 — the gate must run BEFORE any mask/box mutation, so it lives
+        in the handler, not inside this builder).
 
         Sequence:
-        1. D-04 gate: if >= 1 DETECTED box already exists, ask the user before
-           replacing (mirrors _confirm_replace_mask). Cancel aborts (no build).
-        2. V5 build: for each TextBlock, coerce to int via textblock_to_box,
-           then bounds-clamp x1/x2 to [0, img_w] and y1/y2 to [0, img_h]. Drop
-           any box with non-positive area after clamping (model output is
-           untrusted — T-03-06).
-        3. D-03 merge: collect the existing USER boxes from the canvas
+        1. V5 build: delegate to ``build_detected_pageboxes`` (plan 08-03 —
+           the EXACT extraction of this loop; both the interactive handler
+           and the 08-09 batch loop share one implementation).
+        2. D-03 merge: collect the existing USER boxes from the canvas
            (they survive re-detect), then rebuild the layer via set_boxes with
            the user boxes + the fresh detected boxes.
-        4. Auto-show the box overlay (the boxes the user asked for are visible).
-        5. D-10 baseline (plan 03-07, UAT test 3): detection is a NON-undoable
+        3. Auto-show the box overlay (the boxes the user asked for are visible).
+        4. D-10 baseline (plan 03-07, UAT test 3): detection is a NON-undoable
            seeding event — it establishes the live box layer WITHOUT pushing a
            boxes undo entry. The first real user box edit pushes its before-
            snapshot against this baseline (mirrors how the initial mask presence
            from a detect is not individually undoable, only strokes are).
         """
-        # Step 1 — D-04 confirm gate. Fires only when >= 1 DETECTED box exists
-        # (a user-only layer is not a "replace detected" scenario). The mask
-        # replace gate (detect_text) already ran before the worker started.
-        detected_now, _user_now = self.canvas.box_origin_counts()
-        if detected_now >= 1:
-            if not self._confirm_replace_boxes():
-                return  # Cancel — no replace (D-04)
-
-        # Step 2 — V5 build. Bounds-clamp against the current image rect. Model
-        # xyxy is UNTRUSTED (T-03-06): a negative/out-of-image/inverted xyxy is
-        # clamped or dropped, never allowed to corrupt the canvas or crash Qt.
+        # Step 1 — V5 build via the 08-03 core (bounds-clamp against the
+        # current image rect; model xyxy is UNTRUSTED — T-03-06). G-07-3:
+        # detected boxes are born with the saved default family (an empty
+        # read -> None -> the renderer's TextStyle() defaults apply).
         pixmap = self.canvas.image_item.pixmap()
         img_w = pixmap.width()
         img_h = pixmap.height()
-        # G-07-3: detected boxes are born with the saved default family —
-        # an empty read -> None -> the renderer's TextStyle() defaults apply
-        # (the same empty-family contract as the user-box provider).
-        default_family = self._default_font_family()
-        detected_pageboxes: list[PageBox] = []
-        for blk in blk_list:
-            box = textblock_to_box(blk)  # int coercion (plan 03-01, pure)
-            clamped = Box(
-                min(max(box.x1, 0), img_w),
-                min(max(box.y1, 0), img_h),
-                min(max(box.x2, 0), img_w),
-                min(max(box.y2, 0), img_h),
-            )
-            # V5 drop: non-positive area after clamping -> drop, never trust.
-            if clamped.x2 <= clamped.x1 or clamped.y2 <= clamped.y1:
-                logger.debug(
-                    f"dropped zero-area detected box "
-                    f"({box.as_tuple} -> {clamped.as_tuple} after clamp)"
-                )
-                continue
-            # payload = the TextBlock, preserved untouched for Phase 4/5 OCR
-            # + Phase 5 export (CONTEXT). origin DETECTED so re-detect can
-            # replace it (D-03).
-            detected_pageboxes.append(
-                PageBox(
-                    box=clamped,
-                    origin=DETECTED,
-                    payload=blk,
-                    style=default_style(default_family) if default_family else None,
-                )
-            )
+        detected_pageboxes = build_detected_pageboxes(
+            blk_list, img_w, img_h, self._default_font_family()
+        )
 
-        # Step 3 — D-03: keep USER boxes, replace detected. boxes_snapshot()
-        # materializes fresh PageBoxes (Pitfall 3 detachment) so the rebuild
-        # does not alias live BoxItems.
+        # Step 2 — D-03: keep USER boxes, replace detected. boxes_snapshot()
+        # materializes fresh PageBoxes (Pitfall 3 detachment) and — since
+        # plan 08-07 Task 1 — CARRIES the per-box D-15 seam fields
+        # (mask/std_dev/inpaint_override), so a user box's inpaint decision
+        # survives the re-detect layer rebuild.
         #
         # The snapshot captured here is used ONLY to derive the USER boxes that
-        # survive the re-detect (D-03). It is NOT pushed to history (see Step 5):
+        # survive the re-detect (D-03). It is NOT pushed to history (see Step 4):
         # detection establishes a NON-undoable baseline (plan 03-07, UAT test 3).
         pre_detection_snapshot = self.canvas.boxes_snapshot()
         user_pageboxes = [pb for pb in pre_detection_snapshot if pb.origin == USER]
         #
         # WR-05 guard: set_boxes emits boxes_modified, which (after the CR-01
         # fix) would push a snapshot via _on_boxes_modified. Detection must seed
-        # NO boxes undo entry (Step 5), so the Step 3 emission is suppressed.
+        # NO boxes undo entry (Step 4), so the Step 2 emission is suppressed.
         self._suppress_boxes_push = True
         try:
             self.canvas.set_boxes(user_pageboxes, detected_pageboxes)
         finally:
             self._suppress_boxes_push = False
 
-        # Step 4 — auto-show the overlay on first detect (UI-SPEC surface 10).
+        # Step 3 — auto-show the overlay on first detect (UI-SPEC surface 10).
         # setChecked fires the toggled signal -> set_box_overlay_visible(True).
         if not self.action_toggle_box_overlay.isChecked():
             self.action_toggle_box_overlay.setChecked(True)
 
-        # Step 5 — D-10 baseline (plan 03-07, UAT test 3): detection is a
+        # Step 4 — D-10 baseline (plan 03-07, UAT test 3): detection is a
         # NON-undoable seeding event. It establishes the live box layer as the
         # implicit baseline; the FIRST real user box edit then pushes its
         # before-snapshot against that baseline (WR-04's delta-checks ensure
@@ -4445,8 +4488,8 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Detect Text")
         box.setText(
-            "Replace the auto-detected mask with a new detection? Your"
-            " hand-painted strokes are kept."
+            "Replace the auto-detected mask with a new detection? "
+            "Your hand-painted strokes are kept."
         )
         cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         replace_btn = box.addButton("Replace Mask", QMessageBox.ButtonRole.AcceptRole)

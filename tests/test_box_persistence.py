@@ -338,8 +338,14 @@ def test_mask_undo_actions_and_methods_removed(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_orphaned_strings_fixed(qtbot, tmp_path) -> None:
-    """The two Phase 1 confirm-dialog strings that referenced the now-removed
-    Alt+Z mask-undo shortcut are fixed to Ctrl+Z (UI-SPEC Copywriting PLANNER TODO).
+    """The confirm-dialog strings stay current with the UI-SPEC copy.
+
+    The two Phase 1 confirm-dialog strings that referenced the now-removed
+    Alt+Z mask-undo shortcut are fixed to Ctrl+Z (UI-SPEC Copywriting
+    PLANNER TODO). Phase 8 (plan 08-07, A10) REWORDS the Replace Mask gate:
+    the stale "undo is available via Ctrl+Z" sentence is GONE — detection is
+    a non-undoable baseline and re-detect replaces only the auto plane — and
+    the A10 body ("Your hand-painted strokes are kept.") is the contract.
     """
     window = _make_window(qtbot, tmp_path)
     import inspect
@@ -355,8 +361,13 @@ def test_orphaned_strings_fixed(qtbot, tmp_path) -> None:
     assert "Alt+Z" not in replace_src, (
         f"_confirm_replace_mask body still references Alt+Z: {replace_src!r}"
     )
-    assert "undo is available via Ctrl+Z" in replace_src, (
-        f"_confirm_replace_mask body must say 'undo is available via Ctrl+Z' (UI-SPEC): {replace_src!r}"
+    assert "Your hand-painted strokes are kept." in replace_src, (
+        f"_confirm_replace_mask body must carry the A10 copy (plan 08-07): {replace_src!r}"
+    )
+    assert "undo is available via Ctrl+Z" not in replace_src, (
+        "the A10 reword DROPS the stale undo sentence — detection is a "
+        "non-undoable baseline and re-detect touches only the auto plane "
+        f"(plan 08-07 UI-SPEC A10): {replace_src!r}"
     )
 
 

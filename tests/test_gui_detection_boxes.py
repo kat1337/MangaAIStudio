@@ -673,3 +673,172 @@ def test_redetect_replaces_detected_keeps_user_state(qtbot, tmp_path) -> None:
     assert detected_pbs[0].box.as_tuple == (40, 40, 55, 48)
     assert detected_pbs[0].inpaint_override is None
     assert detected_pbs[0].mask is not None, "new detected box must be fitted"
+
+
+# ===========================================================================
+# Plan 08-07 Task 2 — refit on move-commit + per-box snapshot carry
+# ===========================================================================
+
+
+def _window_with_custom_page(qtbot, tmp_path: Path, page_np) -> MainWindow:
+    """A ``_window_with_page``-shaped harness over a caller-built page array.
+
+    The page is written as RGB PNG, loaded onto the canvas, AND registered in
+    the data model (image_files + FileTable current row) so the 08-07 seam's
+    ImageFile writes (raw retention, dirty) land on a real ImageFile.
+    """
+    from manga_ai_studio.core.image_file import ImageFile
+
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    from PIL import Image as PILImage
+
+    page_png = tmp_path / "page.png"
+    PILImage.fromarray(page_np).save(page_png)
+    assert window.canvas.set_image_from_path(page_png) is True
+    window.image_files = [ImageFile(path=page_png)]
+    window.file_table.set_pages([page_png])
+    window.file_table.select_path(page_png)
+    window._last_page_index = 0
+    return window
+
+
+def _mouse_event_factory(window):
+    """Viewport-coord QMouseEvent builders (the test_gui_boxes ``_press_at``
+    shape — mapFromScene into the event's local pos)."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    def make(etype, sx, sy, button, buttons):
+        vp = window.canvas.mapFromScene(QPointF(sx, sy))
+        return QMouseEvent(
+            etype, QPointF(vp), button, buttons, Qt.KeyboardModifier.NoModifier
+        )
+
+    return make
+
+
+@pytest.mark.gui
+def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
+    """D-12 recompute-on-release: moving a DETECTED box and releasing re-runs
+    the per-box fit — the std_dev re-measures at the new location (0 on the
+    uniform region, > threshold on the noisy half) and the border state
+    re-derives (solid will-inpaint -> dashed gate-skipped)."""
+    from manga_ai_studio.core.mask_editor import ToolMode
+
+    from PySide6.QtCore import QCoreApplication
+
+    h, w = 80, 120
+    page = np.full((h, w, 3), 200, dtype=np.uint8)
+    rng = np.random.default_rng(42)
+    page[:, 60:] = rng.integers(0, 256, size=(h, 60, 3), dtype=np.uint8)
+    window = _window_with_custom_page(qtbot, tmp_path, page)
+    window.resize(500, 400)
+    window.show()
+    window.canvas.viewport().show()
+    QCoreApplication.processEvents()
+    window.action_detect_boxes_mode.setChecked(True)
+    window.set_active_tool(ToolMode.MOVE)
+
+    # Heatmap content inside BOTH the start box (uniform region) and the
+    # target box (noisy region) so the moved box has cut content to fit.
+    heat = np.zeros((h, w), dtype=np.uint8)
+    heat[10:30, 10:30] = 255
+    heat[10:30, 90:110] = 255
+    window._on_detection_finished(
+        {"mask": heat, "blocks": [_blk(5, 5, 35, 35)]}
+    )
+    item = window.canvas._box_items[0]
+    assert item.current_box().as_tuple == (5, 5, 35, 35)
+    profile = window.profile_manager.config.current_profile
+    threshold = float(profile.masker.mask_max_standard_deviation)
+    assert item.pagebox.std_dev is not None
+    assert item.pagebox.std_dev <= threshold, "uniform region passes the gate"
+    assert item.pagebox.inpaint_state(threshold) == "will_inpaint"
+    assert item.pen().style() == Qt.PenStyle.SolidLine
+
+    # Move the box onto the noisy half via the REAL canvas event chain.
+    make = _mouse_event_factory(window)
+    from PySide6.QtCore import QEvent
+    window.canvas.mousePressEvent(
+        make(QEvent.Type.MouseButtonPress, 20, 20, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    )
+    window.canvas.mouseMoveEvent(
+        make(QEvent.Type.MouseMove, 100, 20, Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    )
+    window.canvas.mouseReleaseEvent(
+        make(QEvent.Type.MouseButtonRelease, 100, 20, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+    )
+    QCoreApplication.processEvents()
+
+    moved = window.canvas._box_items[0]
+    assert moved.current_box().as_tuple == (85, 5, 115, 35), "the box moved"
+    assert window.history.can_undo_boxes(), "the move committed a BOXES push"
+    # The refit re-measured the border over the noisy region.
+    assert moved.pagebox.std_dev is not None
+    assert moved.pagebox.std_dev > threshold, (
+        "moving onto the noisy region must re-measure std ABOVE the gate "
+        "(D-12 recompute-on-release)"
+    )
+    assert moved.pagebox.inpaint_state(threshold) == "gate_skipped"
+    assert moved.pen().style() == Qt.PenStyle.CustomDashLine
+
+
+@pytest.mark.gui
+def test_boxes_undo_restores_per_box_mask_and_std_dev(qtbot, tmp_path) -> None:
+    """A BOXES undo after an override-free detect+move round-trip restores
+    the per-box mask/std_dev — the extended boxes_snapshot carries the D-15
+    seam fields through the undo restore (Pitfall 8 field-drop guard)."""
+    from manga_ai_studio.core.mask_editor import ToolMode
+
+    from PySide6.QtCore import QCoreApplication
+
+    h, w = 80, 120
+    page = np.full((h, w, 3), 200, dtype=np.uint8)
+    rng = np.random.default_rng(42)
+    page[:, 60:] = rng.integers(0, 256, size=(h, 60, 3), dtype=np.uint8)
+    window = _window_with_custom_page(qtbot, tmp_path, page)
+    window.resize(500, 400)
+    window.show()
+    window.canvas.viewport().show()
+    QCoreApplication.processEvents()
+    window.action_detect_boxes_mode.setChecked(True)
+    window.set_active_tool(ToolMode.MOVE)
+
+    heat = np.zeros((h, w), dtype=np.uint8)
+    heat[10:30, 10:30] = 255
+    heat[10:30, 90:110] = 255
+    window._on_detection_finished(
+        {"mask": heat, "blocks": [_blk(5, 5, 35, 35)]}
+    )
+    item = window.canvas._box_items[0]
+    pre = (
+        item.current_box().as_tuple,
+        item.pagebox.std_dev,
+        item.pagebox.mask is not None,
+    )
+    assert pre[2], "the detected box carries a fitted mask"
+
+    make = _mouse_event_factory(window)
+    from PySide6.QtCore import QEvent
+    window.canvas.mousePressEvent(
+        make(QEvent.Type.MouseButtonPress, 20, 20, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    )
+    window.canvas.mouseMoveEvent(
+        make(QEvent.Type.MouseMove, 100, 20, Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    )
+    window.canvas.mouseReleaseEvent(
+        make(QEvent.Type.MouseButtonRelease, 100, 20, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+    )
+    QCoreApplication.processEvents()
+    assert window.canvas._box_items[0].current_box().as_tuple == (85, 5, 115, 35)
+
+    # One Ctrl+Z restores the pre-move box WITH its per-box mask/std_dev.
+    window.on_undo()
+    restored = window.canvas._box_items[0]
+    assert restored.current_box().as_tuple == pre[0], "geometry restored"
+    assert restored.pagebox.std_dev == pre[1], (
+        "std_dev must round-trip through the BOXES undo (snapshot carry)"
+    )
+    assert restored.pagebox.mask is not None
