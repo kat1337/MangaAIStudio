@@ -5,15 +5,15 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-08-16T18:02:00.736Z"
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-08-17T00:06:11.149Z"
 last_activity: 2026-08-16
 last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 68
-  completed_plans: 60
+  completed_plans: 61
   percent: 78
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-08-16 — Phase 08 execution started
 
@@ -117,6 +117,7 @@ Last activity: 2026-08-16 — Phase 08 execution started
 | Phase 06 P07 | 6 min | 2 tasks | 2 files |
 | Phase 06 P08 | 11 min | 2 tasks | 2 files |
 | Phase 08 P01 | 11 min | 3 tasks | 8 files |
+| Phase 08 P02 | 6h 1min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -268,6 +269,10 @@ Recent decisions affecting current work:
 - [Phase 08]: ProfileManager.load_profile now APPLIES the loaded profile to config.current_profile (MainWindow's read path) — Rule 2 fix; without it the plan's __main__ startup load_profile('default') call was a discarded return value — Closes RESEARCH 4.1 startup gap so D-10 persistence reaches the app at launch
 - [Phase 08]: Geometry ops (rotate/crop/resize) carry inpaint_override + style on ALL SIX PageBox constructor sites (payload + payload-None) and DELIBERATELY invalidate per-box mask/std_dev (RESEARCH 6.5 option b) — also closes the live Phase 7 latent style drop — Override is user intent and cheap to carry; a rotated std-dev/border relation is stale; the explicit field lists silently drop unnamed fields (Pitfall 13-6)
 - [Phase 08]: MaskerConfig.mask_dilation_radius: Pixels = 2 is a marked Manga AI Studio addition to the vendored config (RESEARCH 4.2 option a); export comments double as the canonical tooltip text (D-06/D-12); missing INI key falls back to default 2 via try_to_load — Keeps all masker params in one object the batch worker receives in one piece; upstream PC ignores the extra key
+- [Phase ?]: 08-02: Canvas mask is a three-plane composite ((manual | auto) & ~erase) with _mask kept as the display/LaMa/persistence surface — set_mask replaces the AUTO plane only (UI-SPEC A10: re-detect keeps strokes + ledger; any-size heatmaps fitted top-left); the erase ledger makes erased false positives permanent across re-dilates
+- [Phase ?]: 08-02: Geometry ops collapse plane provenance into the auto plane (set_planes rebuild from the transformed composite; pre-op planes snapshot on the undo record); apply_undo_mask hard-rejects bare QImages — the three unified-pop tests re-based to planes_snapshot()
+- [Phase ?]: 08-02: D-11 seam carries packed plane slots (auto_mask/mask_manual/mask_erase, Qt-free); empty planes pack to None, has_mask_planes() gates restore-vs-legacy; same-dims numpy page switches must wipe/restore planes explicitly or strokes bleed; .mas container write owned by 08-07 Task 3
+- [Phase ?]: 08-02: MASK-06 dispatch — PAINT_TOOLS={BRUSH,RECTANGLE,LASSO,ERASER}; no-Alt paint presses fall through the whole box branch (bodies AND handles paint), Alt runs today's box behavior with NO Shift-toggle (RESEARCH 7.2); crop/double-click/_box_item_at byte-identical
 
 ### Roadmap Evolution
 
@@ -301,8 +306,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-16T18:02:00.719Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-08-17T00:06:11.135Z
+Stopped at: Completed 08-02-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
