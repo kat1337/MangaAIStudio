@@ -64,6 +64,10 @@ from manga_ai_studio.core.box_model import (
     PageBox,
     textblock_to_box,
 )
+from manga_ai_studio.core.detection_boxes import (
+    derive_page_mask_state,
+    dilate_auto_mask,
+)
 from manga_ai_studio.core.history_manager import HistoryManager
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.mask_editor import (
@@ -4129,20 +4133,35 @@ class MainWindow(QMainWindow):
         self.status_bar_left.setText(f"Detecting text\u2026 {int(percent)}%")
 
     def _on_detection_finished(self, result) -> None:
-        """Composite the detected mask onto the canvas (main thread only).
+        """Reworked detection->mask seam (plan 08-07) — the reorder + the
+        box-constrained derivation (main thread only).
 
-        Converts the numpy heatmap (H, W) to a QImage, applies ``.copy()``
-        buffer discipline (RESEARCH Pitfall 2), and hands it to
-        ``EditorCanvas.set_mask`` which tints it with the rgba(255,0,0,0.63)
-        overlay (UI-SPEC §Color).
+        Plan 03-04 TEXT-01 seam (boxes → the D-01 mode toggle) is retained;
+        Phase 8 replaces the flat ``set_mask`` composite with the
+        ``derive_page_mask_state`` derivation (plan 08-03 core):
 
-        Plan 03-04 TEXT-01 seam (the load-bearing one-line thread-through):
-        Phase 1 discarded ``result["blocks"]``; Phase 3, when the Detect Boxes
-        mode toggle (D-01) is on, surfaces it as editable ``BoxItem``s on the
-        canvas. NO worker change, NO new model call, NO adapter change — the
-        blk_list is ALREADY in the dict (``_run_detection_task`` returns
-        ``{"mask": ..., "blocks": blk_list}`` at line ~1217). Mode off =
-        Phase 1 behaviour preserved exactly (mask only, no box work).
+        Mode ON (``action_detect_boxes_mode.isChecked()``):
+        1. **D-04 GATE FIRST** — the replace-detected confirmation runs
+           BEFORE any mask or box mutation (the reorder trap fix: the old
+           seam composited the full mask before the gate ran). Cancel
+           returns with the canvas byte-identical.
+        2. Build detected boxes via ``_build_detected_boxes`` (D-03
+           replace-detected-keep-user preserved).
+        3. Read the current page image + ALL canvas boxes (user + detected
+           — every box certifies).
+        4. ``derive_page_mask_state`` fits every live PageBox in place
+           (``mask``/``std_dev``) and composes the auto binary under the
+           std-dev gate (D-02/MASK-05: content can never exit a box).
+        5. ``canvas.set_auto_binary(derivation.auto_binary)`` + pack the
+           pre-dilation ``raw_binary`` onto the current ImageFile's
+           ``raw_detected_mask`` (D-08 retention).
+        6. ``refresh_box_inpaint_states()`` + explicit ``_set_session_dirty()``
+           (recompose is signal-silent, so the mask_modified-driven dirty
+           hook does not fire).
+
+        Mode OFF (D-03): the FULL heatmap dilated by the profile radius is
+        the auto layer (MASK-01 applies in mask-only mode) — no boxes, no
+        fits, no state refresh; raw retained the same way.
         """
         import numpy as np
 
@@ -4150,19 +4169,72 @@ class MainWindow(QMainWindow):
         if mask is None:
             self.status_bar_left.setText("Detection complete (no mask)")
             return
-        # numpy (H,W) uint8 -> QImage grayscale, copy-detached (Pitfall 2).
-        h, w = mask.shape[:2]
-        qimage = QImage(mask.data, w, h, w, QImage.Format.Format_Grayscale8)
-        self.canvas.set_mask(qimage.copy())
-        self.status_bar_left.setText("Detection complete")
 
-        # D-01 mode-toggle gate: only build boxes when Detect Boxes is on. When
-        # off, Phase 1 behaviour (mask only) is preserved exactly — no box
-        # work, no overlay side-effects, no history push. result["blocks"] is
-        # the blk_list the worker ALREADY returned (main_window.py:1217).
+        profile = self.profile_manager.config.current_profile
+        radius = int(profile.masker.mask_dilation_radius)
+
         if self.action_detect_boxes_mode.isChecked():
-            blk_list = result.get("blocks") or []
-            self._build_detected_boxes(blk_list)
+            # (1) D-04 GATE FIRST — before ANY mask/box mutation. Fires only
+            # when >= 1 DETECTED box exists (a user-only layer is not a
+            # replace scenario; UI-SPEC '>= 1 detected box' wording).
+            detected_now, _user_now = self.canvas.box_origin_counts()
+            if detected_now >= 1:
+                if not self._confirm_replace_boxes():
+                    self.status_bar_left.setText("Detection cancelled")
+                    self._refresh_action_states()
+                    return
+
+            # (2) Build detected boxes (the D-03 replace-detected-keep-user
+            # merge + the _suppress_boxes_push discipline live inside).
+            self._build_detected_boxes(result.get("blocks") or [])
+
+            # (3) Read the current page image + all live pageboxes (user +
+            # detected — every box certifies the auto content).
+            image_rgb = self.canvas.get_image_numpy()
+            if image_rgb is None:
+                self._refresh_action_states()
+                return
+            all_pageboxes = [it.pagebox for it in self.canvas._box_items]
+
+            # (4) Box-constrained derivation (08-03): fits every live
+            # pagebox in place (pb.mask / pb.std_dev — gate-lifted, the gate
+            # applies downstream) and composes the auto binary.
+            derivation = derive_page_mask_state(
+                image_rgb, np.asarray(mask), all_pageboxes, profile.masker, radius
+            )
+
+            # (5) Land the auto plane + retain the pre-dilation binary.
+            self.canvas.set_auto_binary(derivation.auto_binary)
+            idx = self._current_page_index()
+            if idx is not None and 0 <= idx < len(self.image_files):
+                self.image_files[idx].raw_detected_mask = pack_binary(
+                    derivation.raw_binary
+                )
+            # Preserve the Phase 1 display side-effect (set_mask showed the
+            # mask_item; recompose itself is visibility-neutral).
+            self.canvas.mask_item.setVisible(True)
+            self.canvas._mask_visible = True
+
+            # (6) Predictive border states + explicit dirty (D-08: recompose
+            # emits nothing, so the dirty hook must be set directly here).
+            self.refresh_box_inpaint_states()
+            self._set_session_dirty()
+        else:
+            # Mode OFF (D-03): the FULL heatmap is the auto layer — dilated
+            # by the profile radius (MASK-01), NO boxes, no fits, no state
+            # refresh. The pre-dilation binary is still retained (D-08).
+            raw_binary = np.where(
+                np.asarray(mask) > 0, np.uint8(255), np.uint8(0)
+            ).astype(np.uint8)
+            auto = dilate_auto_mask(raw_binary, radius)
+            self.canvas.set_auto_binary(auto)
+            idx = self._current_page_index()
+            if idx is not None and 0 <= idx < len(self.image_files):
+                self.image_files[idx].raw_detected_mask = pack_binary(raw_binary)
+            self.canvas.mask_item.setVisible(True)
+            self.canvas._mask_visible = True
+            self.status_bar_left.setText("Detection complete")
+            self._set_session_dirty()
 
         self._refresh_action_states()
 
@@ -4354,10 +4426,17 @@ class MainWindow(QMainWindow):
         self._refresh_action_states()
 
     def _confirm_replace_mask(self) -> bool:
-        """Show the replace-mask confirmation (UI-SPEC §Copywriting).
+        """Show the replace-mask confirmation (UI-SPEC §Copywriting, plan
+        08-07 A10 reword).
 
         Returns True only on Replace; False on Cancel. Caller guards: this is
         only invoked when ``canvas.has_mask()`` is True.
+
+        A10: the phase 1-7 copy ("Your manual edits will be lost — undo is
+        available via Ctrl+Z") was false under the layered model — re-detect
+        replaces only the auto plane (hand-painted strokes are kept) and
+        detection is a non-undoable baseline (plan 03-07), so the undo
+        sentence was already imprecise. Both are dropped.
 
         Uses custom buttons so the UI-SPEC copy (``[Cancel] [Replace Mask]``)
         renders exactly — Qt's standard button set has no "Replace" member.
@@ -4366,14 +4445,33 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Detect Text")
         box.setText(
-            "Replace the current mask with a new detection? Your manual edits"
-            " will be lost \u2014 undo is available via Ctrl+Z."
+            "Replace the auto-detected mask with a new detection? Your"
+            " hand-painted strokes are kept."
         )
         cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         replace_btn = box.addButton("Replace Mask", QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(replace_btn)
         box.exec()
         return box.clickedButton() is replace_btn
+
+    def refresh_box_inpaint_states(self) -> None:
+        """Re-derive every box's inpaint border state from its fields (D-12).
+
+        §37 refresh helper (phase 8): for every live BoxItem, derive the
+        inpaint state — ``PageBox.inpaint_state(threshold)``, the SINGLE
+        derivation site (08-01; this method never computes the gate) against
+        the CURRENT std-dev threshold — and render it via
+        ``BoxItem.set_inpaint_state`` (08-06). Cheap: pure field comparison
+        + one item repaint, so it rides every §37 trigger — detection finish,
+        threshold change, radius change, override commit, box move/resize/
+        create release, page load/restore.
+        """
+        threshold = (
+            self.profile_manager.config.current_profile.masker
+            .mask_max_standard_deviation
+        )
+        for item in self.canvas._box_items:
+            item.set_inpaint_state(item.pagebox.inpaint_state(threshold))
 
     # --------------------------------------------------------- inpaint (plan 05)
     def _inpainting_backend(self) -> str:

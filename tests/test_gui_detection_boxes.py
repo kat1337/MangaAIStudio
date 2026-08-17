@@ -63,7 +63,15 @@ def _window_with_page(qtbot, tmp_path: Path, w: int = 60, h: int = 50) -> MainWi
 
     Sets a solid-color PNG of (w x h) so ``canvas.image_item.pixmap()`` reports
     the image rect the V5 clamp bounds against.
+
+    Plan 08-07: the page is ALSO registered in the data model
+    (``image_files`` + the FileTable current row, no signal) so the reworked
+    seam's ``_current_page_index()``-driven writes — the D-08 raw-detection
+    retention and the explicit session-dirty mark — land on a real
+    ``ImageFile`` rather than being skipped by the None-index guard.
     """
+    from manga_ai_studio.core.image_file import ImageFile
+
     pm = ProfileManager(tmp_path)
     window = MainWindow(pm)
     qtbot.addWidget(window)
@@ -73,6 +81,11 @@ def _window_with_page(qtbot, tmp_path: Path, w: int = 60, h: int = 50) -> MainWi
     page_png = tmp_path / "page.png"
     Image.new("RGB", (w, h), color=(200, 200, 200)).save(page_png)
     assert window.canvas.set_image_from_path(page_png) is True
+    # Data-model registration (whole list + selected row, no scroll signal).
+    window.image_files = [ImageFile(path=page_png)]
+    window.file_table.set_pages([page_png])
+    window.file_table.select_path(page_png)
+    window._last_page_index = 0
     return window
 
 

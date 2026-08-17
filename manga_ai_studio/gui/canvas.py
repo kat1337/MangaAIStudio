@@ -2135,19 +2135,32 @@ class EditorCanvas(QGraphicsView):
         style edit survives every snapshot/restore round-trip (undo,
         page-switch, ``_snapshot_current_page``) — the same Pitfall 1
         discipline applied to the style field.
+
+        Phase 8 (plan 08-07): the snapshot forwards the per-box D-15 seam
+        fields (``mask`` / ``std_dev`` / ``inpaint_override``) so the
+        predictive border state survives EVERY snapshot/restore round-trip —
+        BOXES undo, page-switch, save, and the D-03 re-detect user-box merge
+        in ``_build_detected_boxes`` (a dropped override would silently
+        revert a user's per-box inpaint decision). The ``mask`` is a MUTABLE
+        PIL image, so it is ``.copy()``-detached (Pitfall 8 — the 08-01
+        detachment applied to the new field).
         """
         snapshots: list[PageBox] = []
         for item in self._box_items:
             fresh_box = item.current_box()
+            pb = item.pagebox
             snapshots.append(
                 PageBox(
                     box=fresh_box,
-                    origin=item.pagebox.origin,
-                    payload=item.pagebox.payload,
-                    edited=item.pagebox.edited,
-                    bubble_no=item.pagebox.bubble_no,
-                    manual_override=item.pagebox.manual_override,
-                    style=item.pagebox.style,
+                    origin=pb.origin,
+                    payload=pb.payload,
+                    edited=pb.edited,
+                    bubble_no=pb.bubble_no,
+                    manual_override=pb.manual_override,
+                    style=pb.style,
+                    mask=pb.mask.copy() if pb.mask is not None else None,
+                    std_dev=pb.std_dev,
+                    inpaint_override=pb.inpaint_override,
                 )
             )
         return snapshots
