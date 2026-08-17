@@ -89,6 +89,15 @@ ZOOM_TICK_FACTOR = 1.25
 MAX_IMAGE_DIMENSION = 10000
 # Accepted image suffixes (T-01-02 suffix allowlist).
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+# Phase 8 (plan 08-02, MASK-06 / UI-SPEC §39): the mask-painting tools. Under
+# one of these the box branch of mousePressEvent becomes Alt-gated — without
+# Alt, presses on box bodies AND handles fall through to painting (no dead
+# spots under boxes); with Alt, today's box interaction runs (D-15). CROP is
+# deliberately NOT here (D-17 — the Crop tool keeps today's box behavior) and
+# neither is MOVE/Pan.
+PAINT_TOOLS = frozenset(
+    {ToolMode.BRUSH, ToolMode.RECTANGLE, ToolMode.LASSO, ToolMode.ERASER}
+)
 
 # Phase 3 box-layer geometry (UI-SPEC §Z-order + §Spacing exceptions). The box
 # layer sits above the mask overlay, below the tool preview/cursor. The
@@ -1208,7 +1217,7 @@ class EditorCanvas(QGraphicsView):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         """Route mouse input to pan, box interaction, or the active mask tool.
 
-        Dispatch order (UI-SPEC §12d + §15):
+        Dispatch order (UI-SPEC §12d + §15 + Phase 8 §39):
         0. **Inline-editor guard** (RESEARCH Pitfall 3, §15) — FIRST branch.
            While the inline editor is active, a click INSIDE the proxy goes to
            the widget (``super()`` forwards it to the QTextEdit); a click
@@ -1216,11 +1225,17 @@ class EditorCanvas(QGraphicsView):
            consumed either way — no move/resize/select can start while editing
            (D-07).
         1. Pan (middle button OR Space+left) — highest priority, unchanged.
-        2. Box hit-test (only when the box layer is visible) — a left-click on a
-           corner handle begins a resize; on a box body selects + begins a move;
-           Alt+left-drag on empty canvas begins a create; a plain left-click on
-           empty canvas deselects the current box and FALLS THROUGH to the mask
-           tool dispatch (so mask painting still works with the layer visible).
+        2. Box hit-test (only when the box layer is visible) — **Alt-gated
+           under paint tools** (MASK-06, plan 08-02 / D-15/D-18): when the
+           active tool is in :data:`PAINT_TOOLS` and Alt is NOT held, the
+           entire box branch falls through so a press on a box BODY or a
+           corner HANDLE paints exactly as if the boxes weren't there (only
+           the empty-canvas selection-clear stays, as today); with Alt, the
+           box interaction runs (handle resize under the sole-selection gate,
+           body select + move, Alt+drag create on empty canvas). Under
+           Move/Pan and Crop the branch runs verbatim as before: handle
+           resize, Shift-toggle / select + move, Alt+drag create, and the
+           plain empty-canvas press clears the selection and falls through.
         3. Mask tool (left-click + active mask tool) — unchanged.
         4. Base QGraphicsView (item selection, scrollbar click, etc.).
         """
@@ -1249,12 +1264,15 @@ class EditorCanvas(QGraphicsView):
             return
 
         # --- Phase 3 box hit-test (D-07: boxes always interactive when the
-        # layer is visible; Pitfall 5: hidden layer skips hit-testing entirely).
+        # layer is visible; Pitfall 5: hidden layer skips hit-testing entirely),
+        # restructured in Phase 8 (plan 08-02, MASK-06 / UI-SPEC §39) into the
+        # Alt-gated paint-tool carve-out + the verbatim non-paint branch.
         if (
             self.box_layer.isVisible()
             and event.button() == Qt.MouseButton.LeftButton
         ):
             scene_pos = self._scene_pos(event)
+            alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
             # Hit-test WITHOUT passing the view's zoom transform. Passing
             # self.transform() here (the zoom) makes QGraphicsScene's BSP
             # coarse pass return the parent BoxItem instead of the child
@@ -1270,26 +1288,53 @@ class EditorCanvas(QGraphicsView):
             # first *interactive box* instead, preserving handle-over-body
             # priority while ignoring visual-only overlays.
             item = self._box_item_at(scene_pos)
-            if isinstance(item, CornerHandle):
-                if len(self._scene.selectedItems()) == 1:
-                    self._begin_resize(item, scene_pos)
-                event.accept()
-                return
-            if isinstance(item, BoxItem):
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    self._toggle_box_selection(item)
-                else:
-                    self._select_and_begin_move(item, scene_pos)
-                event.accept()
-                return
-            if event.modifiers() & Qt.KeyboardModifier.AltModifier:
-                self._begin_create_box(scene_pos)
-                event.accept()
-                return
-            # Empty canvas, no Alt: clear the WHOLE selection and FALL THROUGH
-            # (do not return) so the mask-tool branch below still runs (UI-SPEC
-            # §12d + surface 32 — clicking empty canvas clears the selection).
-            self._clear_selection()
+            if self.current_tool in PAINT_TOOLS:
+                if alt:
+                    # D-15: Alt gates the box interaction under a paint tool —
+                    # today's box behavior exactly. NOTE: no Shift-toggle here
+                    # (the UI-SPEC §39 Shift row — Shift+click under a paint
+                    # tool paints; selection toggling needs Move/Pan).
+                    if isinstance(item, CornerHandle):
+                        if len(self._scene.selectedItems()) == 1:
+                            self._begin_resize(item, scene_pos)
+                        event.accept()
+                        return
+                    if isinstance(item, BoxItem):
+                        self._select_and_begin_move(item, scene_pos)
+                        event.accept()
+                        return
+                    self._begin_create_box(scene_pos)
+                    event.accept()
+                    return
+                # MASK-06: no-Alt paint press — fall through the ENTIRE box
+                # branch (no accept, no return) so box bodies AND handles
+                # paint. Keep only today's empty-canvas selection-clear (a
+                # paint-start over empty canvas clears the selection today
+                # and stays — UI-SPEC §12d + surface 32).
+                if item is None:
+                    self._clear_selection()
+            else:
+                if isinstance(item, CornerHandle):
+                    if len(self._scene.selectedItems()) == 1:
+                        self._begin_resize(item, scene_pos)
+                    event.accept()
+                    return
+                if isinstance(item, BoxItem):
+                    if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                        self._toggle_box_selection(item)
+                    else:
+                        self._select_and_begin_move(item, scene_pos)
+                    event.accept()
+                    return
+                if alt:
+                    self._begin_create_box(scene_pos)
+                    event.accept()
+                    return
+                # Empty canvas, no Alt: clear the WHOLE selection and FALL
+                # THROUGH (do not return) so the mask-tool branch below still
+                # runs (UI-SPEC §12d + surface 32 — clicking empty canvas
+                # clears the selection).
+                self._clear_selection()
 
         # --- Crop-tool branch (plan 05-07, UI-SPEC surface 24a). The box
         # hit-test above already returned for presses on boxes/handles — the

@@ -608,8 +608,8 @@ def _release(
     return QMouseEvent(
         QEvent.Type.MouseButtonRelease,
         QPointF(vp),
-        Qt.MouseButton.NoButton,
         Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
         mods,
     )
 
