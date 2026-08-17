@@ -92,6 +92,23 @@ _TINT_ALPHA = 31
 # UI-SPEC §Spacing exceptions: unselected stroke 2px, selected 3px.
 _UNSELECTED_PEN_WIDTH = 2
 _SELECTED_PEN_WIDTH = 3
+# Phase 8 border-state palette (UI-SPEC §Color — the border-state contract table).
+# ZERO new hex values: both override-state colours reuse existing palette
+# members (Text primary ``#e8e8ea`` / Text muted ``#9a9aa2``) as semantic
+# surface colours, declared the same way Phase 1 declared the mask red.
+_INPAINT_FORCED_HEX = "#e8e8ea"  # near-white — "Always" (promoted)
+_INPAINT_NEVER_HEX = "#9a9aa2"  # muted grey — "Never" (demoted)
+# The two override states that REPLACE the origin hue with a grey (reading rule
+# 2: hue = who decided; overrides are user decisions). The auto-gate states
+# (will_inpaint/gate_skipped) keep the origin hue.
+_INPAINT_GREY_STATES = frozenset({"forced", "never"})
+# 6/4 scene px dash (UI-SPEC §Spacing/§Color): dash lengths ~3x the 2px stroke
+# so the pattern reads as a dash (not dots, not mush) at 100% zoom; scene units
+# match how the Phase 3 border scales with zoom (the border-state high-DPI note).
+_INPAINT_DASH_PATTERN = [6.0, 4.0]
+# The two states that render DASHED ("C won't inpaint this box's detected
+# text" — reading rule 1 encodes the outcome in pattern, never hue alone).
+_INPAINT_DASHED_STATES = frozenset({"gate_skipped", "never"})
 # UI-SPEC §Spacing exceptions: 8x8 viewport-px corner handle.
 _HANDLE_SIZE = 8
 # Invisible hit-area enlargement (UAT test 2 gap-closure, plan 03-06). The VISIBLE
@@ -538,6 +555,11 @@ class BoxItem(QGraphicsRectItem):
         # a cycle stalls Python GC of the canvas and breaks Qt teardown
         # ordering (crash probe).
         self._primary_owner = None
+        # Phase 8 inpaint border-state dimension (plan 08-06). None = no refresh
+        # yet — renders the Phase 3 look (backward-compat default). State strings
+        # come from PageBox.inpaint_state(threshold) (08-01) via the 08-07 refresh
+        # helper; BoxItem never computes the gate itself.
+        self._inpaint_state: str | None = None
         self._apply_origin_pen()
         self._sync_handles()
         # Render the display-object children from the current payload/bubble_no
@@ -546,24 +568,81 @@ class BoxItem(QGraphicsRectItem):
         self.refresh_badge()
 
     # ------------------------------------------------------------- rendering
-    def _apply_origin_pen(self) -> None:
-        """Set the pen (2px/3px origin hue) and brush (NoBrush/tint) by selection.
+    def _inpaint_pen_color(self, base_hue: str) -> QColor:
+        """The border colour for the current inpaint state (UI-SPEC §Color).
 
-        UI-SPEC §12c: unselected = 2px solid hue + transparent fill; selected =
-        3px solid hue + ``rgba(hue, 0.12)`` tint. The border is the sole
-        selection signal (plus handles + tint) — Qt's default dashed outline
-        is suppressed because we set our own pen here (no ``QStyleOption`` flag).
+        ``forced``/``never`` REPLACE the origin hue with the reused palette
+        greys — an override state means the user decided, so the hue switches
+        from "the auto gate decided" (origin hue) to "the user's override
+        decided" (near-white forced-in / muted grey forced-out, reading rule 2).
+        Every other state (``will_inpaint``/``gate_skipped``/``None``) keeps the
+        origin hue (the auto-gate surface).
+        """
+        if self._inpaint_state in _INPAINT_GREY_STATES:
+            # The set guarantees only the two override values reach this branch;
+            # pick the specific grey by state (the near-white vs muted distance
+            # is the ~2.4:1 luminance difference the §Accessibility note relies on).
+            return QColor(
+                _INPAINT_FORCED_HEX
+                if self._inpaint_state == "forced"
+                else _INPAINT_NEVER_HEX
+            )
+        return QColor(base_hue)
+
+    def _apply_origin_pen(self) -> None:
+        """Set the pen (2px/3px state colour) and brush (NoBrush/tint) by selection.
+
+        UI-SPEC §12c + the Phase 8 border-state contract: unselected = 2px
+        state colour + transparent fill; selected = 3px state colour + the same
+        colour at ``rgba(., 0.12)`` tint. The state adds the stroke-style
+        dimension (solid = will inpaint / dashed = won't) and the hue-or-grey
+        decider dimenension (origin hue = auto gate, greys = user override),
+        then the existing width/tint logic applies on top. The border is the
+        sole selection signal (plus handles + tint) — Qt's default dashed
+        outline is suppressed because we set our own pen here (no ``QStyleOption``
+        flag).
         """
         hue = origin_hue(self.pagebox.origin)
+        pen_color = self._inpaint_pen_color(hue)
         selected = self.isSelected()
         width = _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH
-        self.setPen(QPen(QColor(hue), width))
+        pen = QPen(pen_color, width)
+        if self._inpaint_state in _INPAINT_DASHED_STATES:
+            pen.setStyle(Qt.PenStyle.CustomDashLine)
+            pen.setDashPattern(_INPAINT_DASH_PATTERN)
+        else:  # will_inpaint / forced / None — solid (the phase 3 look)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
         if selected:
-            tint = QColor(hue)
+            tint = QColor(pen_color)
             tint.setAlpha(_TINT_ALPHA)
             self.setBrush(QBrush(tint))
         else:
             self.setBrush(Qt.BrushStyle.NoBrush)
+
+    def set_inpaint_state(self, state: str | None) -> None:
+        """Set the inpaint border-state dimension (plan 08-06, UI-SPEC §37).
+
+        ``state`` is one of the ``PageBox.inpaint_state(threshold)`` returns
+        (08-01 — the SINGLE derivation site; this method never computes the
+        gate itself): ``"will_inpaint"`` / ``"gate_skipped"`` / ``"forced"`` /
+        ``"never"``, or ``None`` to reset to the Phase 3 look (the
+        backward-compat default before any refresh call). The sole caller is
+        ``MainWindow.refresh_box_inpaint_states`` (plan 08-07).
+
+        Stores the state then re-derives the pen through the SAME paths
+        ``itemChange`` uses (``_apply_origin_pen`` unselected /
+        ``_apply_look_for`` selected) so the ItemSelectedChange re-apply hook
+        (:meth:`itemChange`) keeps working with zero changes — a selection
+        change always re-renders with the CURRENT state. One item repaint,
+        negligible cost (PATTERNS file 6 — event-driven state -> pen).
+        """
+        self._inpaint_state = state
+        if self.isSelected():
+            self._apply_look_for(True)
+        else:
+            self._apply_origin_pen()
+        self.update()
 
     def set_primary_owner(self, owner) -> None:
         """Install the owning canvas WEAKREF (D-09, plan 07-02).
@@ -626,13 +705,23 @@ class BoxItem(QGraphicsRectItem):
     def _apply_look_for(self, selected: bool) -> None:
         """Apply pen/brush for a given selection state without mutating flags.
 
-        Used by :meth:`itemChange` where the flag has not flipped yet.
+        Used by :meth:`itemChange` where the flag has not flipped yet. Mirrors
+        :meth:`_apply_origin_pen` and consumes the Phase 8 ``_inpaint_state``
+        identically (the state's hue-or-grey + solid-or-dashed at the
+        state's width, with the selection tint on top).
         """
         hue = origin_hue(self.pagebox.origin)
+        pen_color = self._inpaint_pen_color(hue)
         width = _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH
-        self.setPen(QPen(QColor(hue), width))
+        pen = QPen(pen_color, width)
+        if self._inpaint_state in _INPAINT_DASHED_STATES:
+            pen.setStyle(Qt.PenStyle.CustomDashLine)
+            pen.setDashPattern(_INPAINT_DASH_PATTERN)
+        else:  # will_inpaint / forced / None — solid (the phase 3 look)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
         if selected:
-            tint = QColor(hue)
+            tint = QColor(pen_color)
             tint.setAlpha(_TINT_ALPHA)
             self.setBrush(QBrush(tint))
         else:
