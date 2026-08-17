@@ -5,15 +5,15 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-08-17T00:06:11.149Z"
+stopped_at: Completed 08-03-PLAN.md
+last_updated: "2026-08-17T17:11:45.565Z"
 last_activity: 2026-08-16
 last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 68
-  completed_plans: 61
+  completed_plans: 62
   percent: 78
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-08-16 — Phase 08 execution started
 
@@ -118,6 +118,7 @@ Last activity: 2026-08-16 — Phase 08 execution started
 | Phase 06 P08 | 11 min | 2 tasks | 2 files |
 | Phase 08 P01 | 11 min | 3 tasks | 8 files |
 | Phase 08 P02 | 6h 1min | 3 tasks | 7 files |
+| Phase 08 P03 | 42 min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -273,6 +274,11 @@ Recent decisions affecting current work:
 - [Phase ?]: 08-02: Geometry ops collapse plane provenance into the auto plane (set_planes rebuild from the transformed composite; pre-op planes snapshot on the undo record); apply_undo_mask hard-rejects bare QImages — the three unified-pop tests re-based to planes_snapshot()
 - [Phase ?]: 08-02: D-11 seam carries packed plane slots (auto_mask/mask_manual/mask_erase, Qt-free); empty planes pack to None, has_mask_planes() gates restore-vs-legacy; same-dims numpy page switches must wipe/restore planes explicitly or strokes bleed; .mas container write owned by 08-07 Task 3
 - [Phase ?]: 08-02: MASK-06 dispatch — PAINT_TOOLS={BRUSH,RECTANGLE,LASSO,ERASER}; no-Alt paint presses fall through the whole box branch (bodies AND handles paint), Alt runs today's box behavior with NO Shift-toggle (RESEARCH 7.2); crop/double-click/_box_item_at byte-identical
+- [Phase 08]: derive_page_mask_state MUTATES the live PageBox list (writes pb.mask/pb.std_dev) and returns a fits dict keyed by id(pagebox); compose_auto_binary recomposes purely from the stored fields and derive calls it (never duplicated); gate-lifted fits (attrs.evolve mask_max_standard_deviation=1e9) ALWAYS store best_mask + the honest std — the gate applies downstream, so threshold changes never re-fit
+- [Phase 08]: Dilate-then-intersect (MASK-05 literal): grow_mask runs FIRST then mask_intersection with the ALL-box union (user + detected) — auto content can never exit a box (D-02 discard + box-border clamp in one step); the pre-dilation binary is returned as raw_binary for D-08 retention; mask-only mode keeps the full heatmap via dilate_auto_mask (D-03, MASK-01 still applies)
+- [Phase 08]: Reference-box padding is the plan formula pb.box.pad(mask_growth_step_pixels * mask_growth_steps, page_size); Pillow's FIND_EDGES copies border pixels from the source, so a candidate that saturates its reference frame yields the frame-border ring (never a fabricated BlankMaskError) — probe-verified and encoded in the battery; a symmetric two-color border split reads std 0 in the RGB path, so contrast fixtures are asymmetric and noise-failure fixtures must reach the frame border
+- [Phase 08]: T-08-04 mitigations implemented as explicit guards: strict int img_w/img_h in build_detected_pageboxes (float bounds would leak float clamp coords into the geometry) + heatmap-vs-image shape ValueError in derive_page_mask_state (no allocation sized from unvalidated dims)
+- [Phase 08]: The headless purity lock runs a HERMETIC subprocess probe: an in-process sys.modules check is broken by any earlier GUI test module in the same process (order-dependent full-suite failure fixed in 1ab15b5) — the source-token scan remains the primary load-bearing assertion
 
 ### Roadmap Evolution
 
@@ -306,8 +312,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T00:06:11.135Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-08-17T17:11:45.551Z
+Stopped at: Completed 08-03-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
