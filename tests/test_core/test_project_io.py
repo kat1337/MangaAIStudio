@@ -13,6 +13,7 @@ and require NO Qt and NO model weights (the module contract mirrors
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import struct
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from manga_ai_studio.core.box_model import PageBox, USER
 from manga_ai_studio.core.project_io import (
@@ -252,6 +253,145 @@ def test_required_keys_unchanged() -> None:
                 "payload": None,
             }
         )
+
+
+@pytest.mark.unit
+def test_phase8_seam_fields_round_trip() -> None:
+    """A PageBox carrying std_dev, inpaint_override, and a box-cropped
+    mode-"1" mask survives pagebox_to_json -> json_to_pagebox (plan 08-04).
+
+    The mask rebuilds with equal size and matching binary content (the
+    np.array equality — the D-15 seam closes through persistence).
+    """
+    mask = Image.new("1", (20, 10), 0)
+    ImageDraw.Draw(mask).rectangle([2, 2, 18, 8], fill=1)  # filled region
+    pb = PageBox(
+        box=Box(5, 5, 25, 15),  # box w=20, h=10 matches the mask crop
+        origin=USER,
+        payload=None,
+        std_dev=12.3,
+        inpaint_override="never",
+        mask=mask,
+    )
+    d = pagebox_to_json(pb)
+    assert d["std_dev"] == 12.3
+    assert d["inpaint_override"] == "never"
+    assert d["mask"]  # a non-empty base64 PNG str, not None
+
+    out = json_to_pagebox(d)
+    assert out.std_dev == 12.3
+    assert out.inpaint_override == "never"
+    assert out.mask is not None
+    assert out.mask.size == (20, 10)  # equal-size — box dims
+    assert out.mask.mode == "1"
+    assert np.array_equal(np.array(out.mask), np.array(mask))
+
+
+@pytest.mark.unit
+def test_legacy_pagebox_without_phase8_keys_loads_defaults() -> None:
+    """A Phase 5/7-shape pagebox dict (NO std_dev/inpaint_override/mask keys)
+    loads clean with all three None (the no-version-bump optional-key pattern).
+
+    Clone of ``test_legacy_mas_without_style_loads_with_defaults`` applied to
+    the three Phase 8 keys.
+    """
+    legacy = {
+        "box": [0, 0, 100, 40],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "style": None,
+        "payload": None,
+    }
+    out = json_to_pagebox(legacy)
+    assert out.std_dev is None
+    assert out.inpaint_override is None
+    assert out.mask is None
+    assert out.style == TextStyle()  # existing D-07 default behavior unchanged
+
+
+@pytest.mark.unit
+def test_invalid_inpaint_override_rejected() -> None:
+    """An inpaint_override not in {"always","never"} raises ProjectFormatError,
+    matching the format-version rejection stance (T-08-08 enum validation).
+
+    None (Auto) passes; any other string is structural garbage.
+    """
+    base = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "inpaint_override": "sometimes"})
+    # None (null/Auto) loads clean
+    out = json_to_pagebox({**base, "inpaint_override": None})
+    assert out.inpaint_override is None
+
+
+@pytest.mark.unit
+def test_invalid_std_dev_rejected() -> None:
+    """A non-numeric std_dev raises ProjectFormatError via float coercion
+    (T-08-08 — NaN/std garbage never enters the border-state derivation)."""
+    base = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "std_dev": "abc"})
+    # a numeric str / number loads
+    out = json_to_pagebox({**base, "std_dev": 12.3})
+    assert out.std_dev == 12.3
+
+
+@pytest.mark.unit
+def test_per_box_mask_size_mismatch_rejected() -> None:
+    """A per-box mask whose decoded PNG size does not match the box's (w, h)
+    raises ProjectFormatError (T-08-06 size cross-check — the decoded image
+    is bounded to the declared box dims)."""
+    tiny = Image.new("1", (4, 4), 0)
+    buf = BytesIO()
+    tiny.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    base = {  # box is 100x40, but the mask decodes to 4x4
+        "box": [0, 0, 100, 40],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "mask": b64})
+
+
+@pytest.mark.unit
+def test_per_box_mask_garbage_rejected() -> None:
+    """A mask value that is not a decryptable/valid PNG raises
+    ProjectFormatError, never a raw binascii/PIL exception (T-08-06 decode
+    hardening — the T-05-01 pattern)."""
+    base = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    # not valid base64 at all
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "mask": "!!!not-base64!!!%%"})
+    # valid base64 but not a PNG
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "mask": base64.b64encode(b"not a png").decode("ascii")})
 
 
 @pytest.mark.unit
@@ -487,20 +627,24 @@ def test_sibling_manifest_detection(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_d15_seam_preserved() -> None:
-    """D-15 seam: mask/std_dev are never serialized, always None on load.
+def test_d15_seam_superseded_by_phase8() -> None:
+    """Phase 8 supersedes the Phase 5/7 'never writes mask/std_dev' D-15 seam
+    contract: the fields are now serialized as JSON keys (None when unset)
+    and round-trip back to None.
 
-    A PageBox with mask/std_dev set to non-None objects must serialize
-    WITHOUT those keys in the dict, and json_to_pagebox must yield None for
-    both.
+    A PageBox with unset seam fields must serialize ``"std_dev"`` /
+    ``"inpaint_override"`` / ``"mask"`` all as explicit null, and
+    json_to_pagebox must rebuild all three as None.
     """
-    pb = PageBox(box=Box(0, 0, 10, 10), origin=USER, mask=object(), std_dev=0.5)
+    pb = PageBox(box=Box(0, 0, 10, 10), origin=USER, mask=None, std_dev=None)
     d = pagebox_to_json(pb)
-    assert "mask" not in d
-    assert "std_dev" not in d
+    assert d["std_dev"] is None
+    assert d["inpaint_override"] is None
+    assert d["mask"] is None
     out = json_to_pagebox(d)
     assert out.mask is None
     assert out.std_dev is None
+    assert out.inpaint_override is None
     assert out.origin == USER
 
 
