@@ -102,9 +102,26 @@ def test_detection_boxes_module_is_headless() -> None:
     for forbidden in ("PySide6", "QtWidgets", "QtCore", "QtGui", "torch", "gui."):
         assert forbidden not in source, f"detection_boxes.py must not reference {forbidden}"
 
-    import manga_ai_studio.core.detection_boxes  # noqa: F401
+    import subprocess
+    import textwrap
 
-    assert "manga_ai_studio.gui" not in sys.modules
+    # Runtime proof in a HERMETIC subprocess (order-independent — the suite
+    # may have already imported the GUI package into this process): importing
+    # the module cold must not pull anything from the GUI layer.
+    probe = textwrap.dedent(
+        """
+        import sys
+        import manga_ai_studio.core.detection_boxes
+        gui = [m for m in sys.modules if m.startswith("manga_ai_studio.gui")]
+        if gui:
+            print("GUI modules pulled:", gui, file=sys.stderr)
+            raise SystemExit(1)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"import pulled GUI modules: {result.stderr}"
 
 
 # ===========================================================================
