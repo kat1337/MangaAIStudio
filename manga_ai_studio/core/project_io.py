@@ -47,6 +47,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from manga_ai_studio.core.image_io import save_image_bytes
+from manga_ai_studio.core.mask_planes import pack_binary
 
 # D-04 container header constants (RESEARCH Pattern 1, 05-RESEARCH.md:259-283).
 _MAGIC = b"MAS\x00"
@@ -393,18 +394,27 @@ def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image:
 # --------------------------------------------------- page assembly + chapter
 
 def build_page_entries(page_state: dict) -> dict[str, bytes]:
-    """Project a page's live state into its 4 ``.mas`` entries (D-03/D-05).
+    """Project a page's live state into its ``.mas`` entries (D-03/D-05).
 
     ``page_state`` is a plain dict carrying:
       boxes (list[PageBox]), image_rgb (np.ndarray (H,W,3) uint8),
       mask_bin (np.ndarray (H,W) uint8 or None), geometry_altered (bool),
-      original_path (Path or None), original_sha256 (str or None).
+      original_path (Path or None), original_sha256 (str or None),
+      and the OPTIONAL Phase 8 (plan 08-04) plane binaries:
+      raw_binary / auto_binary / manual_binary / erase_binary
+      (each an (H,W) uint8 0/255 numpy array or None — the 08-02 plane
+      slots' raw binary form; D-08 raw-mask retention + the layered-model
+      provenance the loader needs to restore planes without re-dilating).
 
     Returns the entries dict: ``meta.json`` (UTF-8 JSON with the img/mask
     dims so load can reshape without trusting blob length alone),
     ``image.png`` (in-memory PNG encode), ``mask.bin`` (raw mask bytes —
-    omitted when there is no mask), and ``original.json`` (the D-06 path +
-    sha256 ref — present even when the source no longer exists on disk).
+    omitted when there is no mask), ``original.json`` (the D-06 path +
+    sha256 ref — present even when the source no longer exists on disk),
+    and — only when the corresponding page_state binary is not None — the
+    four OPTIONAL plane entries ``rawmask.bin`` / ``automask.bin`` /
+    ``manualmask.bin`` / ``erasemask.bin`` holding ``pack_binary`` blobs
+    (RESEARCH §6.3c on the naturally-optional entry names).
     """
     boxes = page_state["boxes"]
     image_rgb = page_state["image_rgb"]
@@ -412,6 +422,10 @@ def build_page_entries(page_state: dict) -> dict[str, bytes]:
     geometry_altered = bool(page_state.get("geometry_altered", False))
     original_path = page_state.get("original_path")
     original_sha256 = page_state.get("original_sha256")
+    raw_binary = page_state.get("raw_binary")
+    auto_binary = page_state.get("auto_binary")
+    manual_binary = page_state.get("manual_binary")
+    erase_binary = page_state.get("erase_binary")
 
     h, w = image_rgb.shape[:2]
     original = (
@@ -441,6 +455,17 @@ def build_page_entries(page_state: dict) -> dict[str, bytes]:
         entries["original.json"] = json.dumps(original, ensure_ascii=False).encode(
             "utf-8"
         )
+    # Phase 8 (plan 08-04): the four OPTIONAL plane entries — written only
+    # when the page carries the corresponding binary (legacy pages store
+    # nothing; entry names are naturally optional on parse).
+    for entry_name, binary in (
+        ("rawmask.bin", raw_binary),
+        ("automask.bin", auto_binary),
+        ("manualmask.bin", manual_binary),
+        ("erasemask.bin", erase_binary),
+    ):
+        if binary is not None:
+            entries[entry_name] = pack_binary(binary).tobytes()
     return entries
 
 
@@ -535,11 +560,22 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
     mirror of :func:`build_page_entries`.
 
     Returns ``{"meta": dict, "image_png": bytes, "mask": np.ndarray | None,
-    "original": dict | None}``. ``mask`` is reshaped via the dims recorded in
-    ``meta["mask"]`` (never trusted from blob length alone) and
+    "original": dict | None, "raw_packed": np.ndarray | None,
+    "auto_packed": np.ndarray | None, "manual_packed": np.ndarray | None,
+    "erase_packed": np.ndarray | None}``. ``mask`` is reshaped via the dims
+    recorded in ``meta["mask"]`` (never trusted from blob length alone) and
     ``.copy()``-detached from the container buffer (Pitfall 2 discipline).
-    Typed model construction (PageBox/ImageFile) happens at the GUI boundary
-    (plan 05-05) so this module stays Qt-free.
+
+    Phase 8 (plan 08-04): the four plane entries — ``rawmask.bin`` /
+    ``automask.bin`` / ``manualmask.bin`` / ``erasemask.bin`` — are OPTIONAL
+    (legacy Phase 5/7 projects omit them; entry names are naturally optional).
+    When present, each blob is read as a ``pack_binary`` blob and validated
+    against the meta-declared image dims (``ceil(h*w/8)`` bytes — the same
+    cross-check discipline as the ``mask.bin`` length check, T-08-07: a
+    short/long crafted blob is a ProjectFormatError, never a mis-shaped
+    array). Callers unpack via ``mask_planes.unpack_binary`` with the page
+    dims. Typed model construction (PageBox/ImageFile) happens at the GUI
+    boundary (plan 05-05) so this module stays Qt-free.
     """
     try:
         meta_raw = entries["meta.json"]
@@ -590,7 +626,37 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
         except ValueError as exc:
             raise ProjectFormatError(f"malformed original.json: {exc}") from exc
 
-    return {"meta": meta, "image_png": image_png, "mask": mask, "original": original}
+    # Phase 8 (plan 08-04): the four OPTIONAL packed plane entries. Blob
+    # length is cross-checked against the meta-declared IMAGE dims (the
+    # planes are page-sized, ``ceil(h*w/8)`` bytes after pack_binary; the
+    # composite mask.bin dims equal the image dims whenever both present via
+    # validate_meta). None when absent (legacy project).
+    img_meta = meta["img"]
+    page_h = int(img_meta["h"])
+    page_w = int(img_meta["w"])
+    plane_expected = (page_h * page_w + 7) // 8
+
+    def _read_plane(entry_name: str) -> np.ndarray | None:
+        if entry_name not in entries:
+            return None
+        blob = entries[entry_name]
+        if len(blob) != plane_expected:
+            raise ProjectFormatError(
+                f"{entry_name} length {len(blob)} does not match declared "
+                f"dims {page_h}x{page_w} (expected {plane_expected} bytes)"
+            )
+        return np.frombuffer(blob, dtype=np.uint8)
+
+    return {
+        "meta": meta,
+        "image_png": image_png,
+        "mask": mask,
+        "original": original,
+        "raw_packed": _read_plane("rawmask.bin"),
+        "auto_packed": _read_plane("automask.bin"),
+        "manual_packed": _read_plane("manualmask.bin"),
+        "erase_packed": _read_plane("erasemask.bin"),
+    }
 
 
 # --------------------------------------------- D-06 checksum + D-09 climb
