@@ -842,3 +842,254 @@ def test_boxes_undo_restores_per_box_mask_and_std_dev(qtbot, tmp_path) -> None:
         "std_dev must round-trip through the BOXES undo (snapshot carry)"
     )
     assert restored.pagebox.mask is not None
+
+
+# ===========================================================================
+# Plan 08-07 Task 3 — live radius/threshold slots, .mas plane round-trip,
+# inpaint completion copy
+# ===========================================================================
+
+
+def _noisy_right_half_page(h: int = 80, w: int = 120) -> np.ndarray:
+    """A page whose left half is uniform 200 and whose right half (cols >=
+    w//2) is deterministic full-bleed noise (contrast reaching the frame —
+    the std-dev gate reads it above threshold, cf. the 08-03 battery)."""
+    page = np.full((h, w, 3), 200, dtype=np.uint8)
+    rng = np.random.default_rng(42)
+    page[:, w // 2 :] = rng.integers(0, 256, size=(h, w // 2, 3), dtype=np.uint8)
+    return page
+
+
+def _seed_manual_stroke(window, x: int = 2, y: int = 2, s: int = 10) -> None:
+    """Paint an opaque red block onto the manual plane (the scratch-seeding
+    the mask_planes tests use — real QPainter, no canvas event chain)."""
+    from PySide6.QtGui import QColor, QPainter
+
+    painter = QPainter(window.canvas._mask_manual)
+    painter.fillRect(x, y, s, s, QColor(255, 0, 0, 255))
+    painter.end()
+
+
+@pytest.mark.gui
+def test_refresh_box_inpaint_states_iterates_and_derives(qtbot, tmp_path) -> None:
+    """refresh_box_inpaint_states() iterates every canvas box item and calls
+    set_inpaint_state with the profile-threshold derivation (the §37
+    single-derivation refresh; a std flip re-renders the border)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+    window._on_detection_finished(
+        {
+            "mask": _heatmap_with_in_and_out_content(),
+            "blocks": [_blk(5, 6, 25, 30), _blk(30, 10, 50, 40)],
+        }
+    )
+    threshold = _profile_threshold(window)
+    items = list(window.canvas._box_items)
+    assert len(items) == 2
+    for it in items:
+        assert it._inpaint_state == it.pagebox.inpaint_state(threshold), (
+            "each item must carry the SINGLE-derivation state (08-01)"
+        )
+
+    # A std-dev flip + refresh re-renders (border dashed under the gate).
+    it = items[0]
+    it.pagebox.std_dev = 9999.0
+    window.refresh_box_inpaint_states()
+    assert it._inpaint_state == "gate_skipped"
+    assert it.pen().style() == Qt.PenStyle.CustomDashLine
+
+
+@pytest.mark.gui
+def test_dilation_live_redilate_grows_shrinks_keeps_strokes(qtbot, tmp_path) -> None:
+    """D-08 live re-dilate: emitting dilation_changed re-derives the auto
+    plane from the retained raw mask WITHOUT a model call — the composite
+    GROWS with the radius, SHRINKS when it returns to 0, and the hand strokes
+    painted between the emits stay present; no worker, no status change."""
+    window = _window_with_custom_page(qtbot, tmp_path, np.full((80, 120, 3), 200, dtype=np.uint8))
+    window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((80, 120), dtype=np.uint8)
+    heat[10:30, 10:30] = 255
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 35, 35)]})
+    status_before = window.status_bar_left.text()
+    assert not window._op_running
+
+    auto0 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
+    _seed_manual_stroke(window)
+
+    # First emit: radius 5 -> the box-constrained auto content GROWS.
+    window.tools_panel.dilation_changed.emit(5)
+    auto1 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
+    assert auto1 > auto0, "raising the radius must re-dilate the retained raw"
+
+    # Second emit: radius 0 -> it SHRINKS back (grow no-op -> the raw only).
+    window.tools_panel.dilation_changed.emit(0)
+    auto2 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
+    assert auto2 < auto1, "dropping the radius to 0 must shrink the auto plane"
+
+    # The hand stroke painted between the emits is unchanged + still present.
+    composite = mask_to_numpy_binary(window.canvas.get_mask())
+    assert composite[2:12, 2:12].any(), "manual strokes must survive re-dilates"
+    assert window.status_bar_left.text() == status_before, (
+        "a live re-dilate must not touch the status bar"
+    )
+    assert window._op_running is False, "no worker was dispatched"
+
+
+@pytest.mark.gui
+def test_threshold_live_regate_flips_border_and_composite(qtbot, tmp_path) -> None:
+    """D-12 threshold: emitting std_dev_threshold_changed recomposes ONLY
+    from the STORED fits (no refit — std_dev unchanged): 100.0 admits an
+    above-threshold box (solid border + composite content), 0.0 excludes it
+    (dashed border + content removed)."""
+    window = _window_with_custom_page(qtbot, tmp_path, _noisy_right_half_page())
+    window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((80, 120), dtype=np.uint8)
+    heat[10:30, 90:110] = 255  # the box sits over the NOISY half -> std > gate
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(85, 5, 115, 35)]})
+    item = window.canvas._box_items[0]
+    threshold = _profile_threshold(window)
+    assert item.pagebox.std_dev is not None
+    assert item.pagebox.std_dev > threshold, "fixture must measure above the gate"
+    std_before = item.pagebox.std_dev
+
+    # At the default gate the box is excluded (dashed) ...
+    assert item.pagebox.inpaint_state(threshold) == "gate_skipped"
+    assert item.pen().style() == Qt.PenStyle.CustomDashLine
+
+    # 100.0 admits it: solid border + content in the composite (pure recompose).
+    window.tools_panel.std_dev_threshold_changed.emit(100.0)
+    assert item.pagebox.std_dev == std_before, (
+        "threshold change must NOT re-fit — the stored std stays (D-12)"
+    )
+    assert item.pagebox.inpaint_state(100.0) == "will_inpaint"
+    assert item.pen().style() == Qt.PenStyle.SolidLine
+    composite = mask_to_numpy_binary(window.canvas.get_mask())
+    assert composite[10:30, 90:110].any(), "admitted box contributes content"
+
+    # 0.0 excludes it again: dashed + content REMOVED, std still stored.
+    window.tools_panel.std_dev_threshold_changed.emit(0.0)
+    assert item.pagebox.std_dev == std_before
+    assert item.pagebox.inpaint_state(0.0) == "gate_skipped"
+    assert item.pen().style() == Qt.PenStyle.CustomDashLine
+    composite = mask_to_numpy_binary(window.canvas.get_mask())
+    assert not composite[10:30, 90:110].any(), "excluded box leaves the composite"
+
+
+@pytest.mark.gui
+def test_dilation_no_raw_is_silent_noop(qtbot, tmp_path) -> None:
+    """A dilation change on a NEVER-detected page is a silent no-op: the mask
+    stays byte-equal, the profile persists, no exception."""
+    window = _window_with_page(qtbot, tmp_path)
+    mask_before = mask_to_numpy_binary(window.canvas.get_mask())
+    profile = window.profile_manager.config.current_profile
+    profile.masker.mask_dilation_radius = 7  # a state that must NOT re-derive
+
+    window.tools_panel.dilation_changed.emit(9)
+
+    assert np.array_equal(
+        mask_to_numpy_binary(window.canvas.get_mask()), mask_before
+    ), "no raw detection -> the auto plane must be untouched"
+    assert profile.masker.mask_dilation_radius == 9  # the setting still persists
+
+
+@pytest.mark.gui
+def test_mas_save_roundtrip_restores_planes_without_detect(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Save + reload a session through the REAL Save Project path: border
+    states render from the round-tripped per-box fields, the auto plane is
+    restored from the persisted automask entry, and the raw plane is retained
+    — a post-load radius change re-dilates from it with NO detect call."""
+    from manga_ai_studio.core.mask_planes import unpack_binary as _unpack
+
+    window = _window_with_custom_page(qtbot, tmp_path, np.full((80, 120, 3), 200, dtype=np.uint8))
+    window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((80, 120), dtype=np.uint8)
+    heat[10:30, 10:30] = 255
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 35, 35)]})
+    threshold = _profile_threshold(window)
+    pre_state = window.canvas._box_items[0].pagebox.inpaint_state(threshold)
+
+    # Real Save Project path (only the folder dialog is bypassed).
+    proj = tmp_path / "proj"
+    with patch.object(MainWindow, "_choose_project_dir", return_value=(proj, False)):
+        assert window._save_project(force_as=True) is True
+
+    # A FRESH window + the real open path (no detect ever runs on it).
+    reopen_dir = tmp_path / "reopen"
+    reopen_dir.mkdir()
+    window2 = _window_with_custom_page(qtbot, reopen_dir, np.full((80, 120, 3), 200, dtype=np.uint8))
+    window2._load_project_session(proj / "manifest.json")
+
+    items = list(window2.canvas._box_items)
+    assert len(items) == 1, "the restored page must carry its box"
+    it = items[0]
+    assert it.pagebox.mask is not None and it.pagebox.std_dev is not None, (
+        "per-box mask/std_dev must round-trip through the real save path"
+    )
+    assert it._inpaint_state == it.pagebox.inpaint_state(threshold) == pre_state, (
+        "border states must render from the round-tripped fields"
+    )
+    imf2 = window2.image_files[0]
+    assert imf2.raw_detected_mask is not None, "the raw plane must be retained"
+    assert window2.canvas._auto_bin is not None, "the auto plane must restore"
+    persisted_auto = _unpack(imf2.auto_mask, 80, 120)
+    assert np.array_equal(persisted_auto, window2.canvas._auto_bin), (
+        "the restored auto plane must match the persisted automask entry"
+    )
+    assert np.count_nonzero(window2.canvas._auto_bin) > 0
+
+    # A post-load radius change re-dilates from the retained raw — no detect.
+    before = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))
+    window2.tools_panel.dilation_changed.emit(8)
+    after = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))
+    assert after > before, "post-load dilation must re-dilate from the raw plane"
+
+
+@pytest.mark.gui
+def test_inpaint_completion_copy_no_boxes(qtbot, tmp_path) -> None:
+    """With no boxes on the page, the completion flash stays exactly
+    'Inpainting complete' (plan 08-07, UI-SPEC §Copywriting surface 7)."""
+    window = _window_with_page(qtbot, tmp_path)
+    result_rgb = np.full((50, 60, 3), 200, dtype=np.uint8)
+    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 60, 50)})
+    assert window.status_bar_left.text() == "Inpainting complete"
+
+
+@pytest.mark.gui
+def test_inpaint_completion_copy_box_counts(qtbot, tmp_path) -> None:
+    """With boxes, the completion flash tells the selective story: n boxes
+    inpainted (+ '· m skipped' when some are skipped — gate-failed boxes)."""
+    window = _window_with_custom_page(qtbot, tmp_path, _noisy_right_half_page())
+    window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((80, 120), dtype=np.uint8)
+    heat[10:30, 10:30] = 255  # uniform box -> will_inpaint
+    heat[10:30, 90:110] = 255  # noise box -> gate_skipped
+    window._on_detection_finished(
+        {"mask": heat, "blocks": [_blk(5, 5, 35, 35), _blk(85, 5, 115, 35)]}
+    )
+    threshold = _profile_threshold(window)
+    states = [it.pagebox.inpaint_state(threshold) for it in window.canvas._box_items]
+    assert "gate_skipped" in states, "the noise box must be skipped by the gate"
+
+    result_rgb = np.full((80, 120, 3), 200, dtype=np.uint8)
+    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 120, 80)})
+    assert window.status_bar_left.text() == (
+        "Inpainting complete · 1 box(es) inpainted · 1 skipped"
+    )
+
+
+@pytest.mark.gui
+def test_inpaint_completion_copy_zero_skipped(qtbot, tmp_path) -> None:
+    """When every box is inpainted (m == 0), the skipped clause is omitted
+    (zero-one-many: 'Inpainting complete · n box(es) inpainted')."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+    window._on_detection_finished(
+        {"mask": _heatmap_with_in_and_out_content(), "blocks": [_blk(5, 6, 25, 30)]}
+    )
+    result_rgb = np.full((50, 60, 3), 200, dtype=np.uint8)
+    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 60, 50)})
+    assert window.status_bar_left.text() == (
+        "Inpainting complete · 1 box(es) inpainted"
+    )
