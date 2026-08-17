@@ -237,3 +237,201 @@ def controls_for(panel: ToolsPanel) -> list:
         panel.allow_colored_check,
         panel.fast_selection_check,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — MainWindow wiring tests (toggle relocation, persistence, save-through)
+# ---------------------------------------------------------------------------
+
+
+from PySide6.QtCore import QSettings  # noqa: E402
+
+from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
+from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
+
+
+def _window(qtbot, tmp_path) -> MainWindow:
+    """A MainWindow over a tmp-dir ProfileManager (the detection_boxes pattern)."""
+    pm = ProfileManager(tmp_path)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    return window
+
+
+def _isolate_settings(window, tmp_path, monkeypatch) -> None:
+    """Point the window's QSettings at a throwaway INI (never the real one).
+
+    Mirrors ``tests/test_gui_detection_boxes.py::_isolate_settings`` — the
+    view-state persistence tests must never touch the user's registry.
+    """
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        window,
+        "_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+
+def _tools_menu_texts(window: MainWindow) -> list[str] | None:
+    """The Tools menu's action texts, or None if the menu is absent.
+
+    Holds the ``QMenuBar.actions()`` wrappers while resolving the menu and its
+    actions — temporary wrappers GC-delete the C++ QMenu (the 06-05 PySide6
+    wrapper-lifetime precedent in STATE.md).
+    """
+    bar_actions = window.menuBar().actions()
+    for bar_act in bar_actions:
+        menu = bar_act.menu()
+        if menu is not None and "Tools" in menu.title():
+            menu_actions = menu.actions()
+            return [act.text() for act in menu_actions]
+    return None
+
+
+@pytest.mark.gui
+def test_dilation_change_updates_profile_and_ini_round_trips(
+    qtbot, tmp_path
+) -> None:
+    """Moving the radius slider 0->7 updates ``profile.masker.mask_dilation_radius``
+    AND the INI on disk round-trips through a second ProfileManager (D-10)."""
+    window = _window(qtbot, tmp_path)
+
+    window.tools_panel.dilation_slider.setValue(7)
+
+    pm = window.profile_manager
+    assert pm.config.current_profile.masker.mask_dilation_radius == 7
+
+    # The "default" profile INI was written by _save_masker_profile; a fresh
+    # manager over the same dir = a new app session.
+    fresh = ProfileManager(tmp_path)
+    fresh.load_profile("default")
+    assert fresh.config.current_profile.masker.mask_dilation_radius == 7
+
+
+@pytest.mark.gui
+def test_std_dev_threshold_change_persists(qtbot, tmp_path) -> None:
+    """The LIVE gate threshold change persists to the profile + INI (D-12)."""
+    window = _window(qtbot, tmp_path)
+
+    window.tools_panel.std_dev_threshold_spin.setValue(30.0)
+
+    pm = window.profile_manager
+    assert pm.config.current_profile.masker.mask_max_standard_deviation == 30.0
+
+    fresh = ProfileManager(tmp_path)
+    fresh.load_profile("default")
+    assert fresh.config.current_profile.masker.mask_max_standard_deviation == 30.0
+
+
+@pytest.mark.gui
+def test_masker_params_change_persists_once(qtbot, tmp_path) -> None:
+    """Any of the seven next-detect controls flips its profile field and the
+    INI round-trips (one shared persist fate, UI-SPEC §36)."""
+    window = _window(qtbot, tmp_path)
+
+    window.tools_panel.growth_steps_spin.setValue(25)
+    window.tools_panel.allow_colored_check.setChecked(False)
+
+    pm = window.profile_manager
+    assert pm.config.current_profile.masker.mask_growth_steps == 25
+    assert pm.config.current_profile.masker.allow_colored_masks is False
+
+    fresh = ProfileManager(tmp_path)
+    fresh.load_profile("default")
+    assert fresh.config.current_profile.masker.mask_growth_steps == 25
+    assert fresh.config.current_profile.masker.allow_colored_masks is False
+
+
+@pytest.mark.gui
+def test_detect_boxes_removed_from_tools_menu_action_kept(qtbot, tmp_path) -> None:
+    """A8: the Tools menu no longer contains a Detect Boxes action, while
+    ``action_detect_boxes_mode`` (the state holder) still toggles and drives
+    the dock checkbox both ways."""
+    window = _window(qtbot, tmp_path)
+
+    texts = _tools_menu_texts(window)
+    assert texts is not None, "Tools menu not found"
+    assert "Detect Boxes" not in texts
+
+    # The state holder lives on (read by _on_detection_finished) and syncs the
+    # dock checkbox via the action.toggled connection back.
+    window.action_detect_boxes_mode.setChecked(False)
+    assert window.tools_panel.detect_checkbox.isChecked() is False
+    window.action_detect_boxes_mode.setChecked(True)
+    assert window.tools_panel.detect_checkbox.isChecked() is True
+
+
+@pytest.mark.gui
+def test_checkbox_toggle_syncs_action_and_persists_qsettings(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Toggling the dock checkbox flips ``action_detect_boxes_mode`` AND
+    persists QSettings ``detectBoxesMode`` (A7 view-state, isolated INI)."""
+    window = _window(qtbot, tmp_path)
+    _isolate_settings(window, tmp_path, monkeypatch)
+
+    window.tools_panel.detect_checkbox.setChecked(False)
+    assert window.action_detect_boxes_mode.isChecked() is False
+    assert window._settings().value("detectBoxesMode") is False
+
+    window.tools_panel.detect_checkbox.setChecked(True)
+    assert window.action_detect_boxes_mode.isChecked() is True
+    assert window._settings().value("detectBoxesMode") is True
+
+
+@pytest.mark.gui
+def test_startup_renders_persisted_profile_and_qsettings(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Startup renders the persisted profile masker values + the persisted
+    Detect Boxes QSettings view-state (D-10 + A7 — the 08-01 load chain)."""
+    # Seed a profile INI with non-default radius/threshold.
+    seed = ProfileManager(tmp_path)
+    prof = seed.default_profile()
+    prof.masker.mask_dilation_radius = 7
+    prof.masker.mask_max_standard_deviation = 20.0
+    seed.save_profile(prof, "default")
+
+    # Seed the isolated QSettings INI with Detect Boxes OFF.
+    ini = tmp_path / "settings.ini"
+    pre = QSettings(str(ini), QSettings.Format.IniFormat)
+    pre.setValue("detectBoxesMode", False)
+    del pre
+
+    # Patch BEFORE construction so the startup read uses the temp INI.
+    monkeypatch.setattr(
+        MainWindow,
+        "_settings",
+        lambda self: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+    pm = ProfileManager(tmp_path)
+    pm.load_profile("default")  # the __main__ startup load (08-01)
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+
+    assert window.tools_panel.dilation_spinbox.value() == 7
+    assert window.tools_panel.std_dev_threshold_spin.value() == 20.0
+    assert window.tools_panel.detect_checkbox.isChecked() is False
+    assert window.action_detect_boxes_mode.isChecked() is False
+
+
+@pytest.mark.gui
+def test_startup_defaults_detect_boxes_on_when_no_key(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A fresh session with no saved ``detectBoxesMode`` key boots with Detect
+    Boxes ON (UI-SPEC A1 default checked)."""
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        MainWindow,
+        "_settings",
+        lambda self: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+    pm = ProfileManager(tmp_path)  # no seed -> defaults
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+
+    assert window.tools_panel.detect_checkbox.isChecked() is True
+    assert window.action_detect_boxes_mode.isChecked() is True

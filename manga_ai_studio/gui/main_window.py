@@ -798,6 +798,12 @@ class MainWindow(QMainWindow):
         # mask); when off, Phase 1 behaviour is preserved (mask only). There is
         # NO second model pass — the toggle only gates whether _on_detection_
         # finished surfaces the already-returned blk_list (UI-SPEC surface 10).
+        #
+        # Phase 8 (plan 08-05, A8): the action is REMOVED from the Tools menu —
+        # the detection-settings dock checkbox is the single user-facing
+        # control. This action survives as the STATE HOLDER (its isChecked()
+        # is still read by _on_detection_finished); the dock checkbox syncs it
+        # bidirectionally and persists QSettings "detectBoxesMode" (A7).
         self.action_detect_boxes_mode = QAction("Detect Boxes", self)
         self.action_detect_boxes_mode.setCheckable(True)
         self.action_detect_boxes_mode.setChecked(True)  # default on (UI-SPEC A1)
@@ -933,7 +939,10 @@ class MainWindow(QMainWindow):
 
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
-        tools_menu.addAction(self.action_detect_boxes_mode)
+        # NOTE (plan 08-05, A8): action_detect_boxes_mode is deliberately NOT
+        # added here — the Detect Boxes toggle moved to the Tools dock's
+        # detection-settings section (the single user-facing control). The
+        # action lives on as the state holder only.
         tools_menu.addAction(self.action_inpaint)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_tool_move)
@@ -2865,7 +2874,115 @@ class MainWindow(QMainWindow):
 
         # Clear Mask (plan 04) — wired to the canvas.
         self.action_clear_mask.triggered.connect(self._on_clear_mask)
+
+        # Phase 8 detection-settings wiring (plan 08-05): the dock section
+        # persists through the profile INI (D-10) + the QSettings view-state
+        # (A7/A8). The four signals -> commit handlers below.
+        self.tools_panel.detect_boxes_changed.connect(self._on_detect_boxes_changed)
+        self.action_detect_boxes_mode.toggled.connect(
+            self._on_action_detect_boxes_toggled
+        )
+        self.tools_panel.dilation_changed.connect(self._on_dilation_changed)
+        self.tools_panel.std_dev_threshold_changed.connect(
+            self._on_std_dev_threshold_changed
+        )
+        self.tools_panel.masker_params_changed.connect(self._on_masker_params_changed)
+
+        # Startup population (D-10 + RESEARCH §4.1, delivered by 08-01): render
+        # the persisted profile masker values + the persisted Detect Boxes
+        # view-state (default on). blockSignals on the action so the toggled
+        # connection back to the checkbox doesn't fire during seed.
+        detect_boxes = self._read_detect_boxes_mode()
+        was = self.action_detect_boxes_mode.blockSignals(True)
+        self.action_detect_boxes_mode.setChecked(detect_boxes)
+        self.action_detect_boxes_mode.blockSignals(was)
+        self.tools_panel.set_masker_values(
+            self.profile_manager.config.current_profile.masker, detect_boxes
+        )
+
         self._refresh_action_states()
+
+    # ------------------------------------------- detection settings (Phase 8)
+    def _read_detect_boxes_mode(self) -> bool:
+        """Read the Detect Boxes view-state from QSettings (default True = on).
+
+        The toggle is a MODE, not a profile quality knob — UI-SPEC A7 locks it
+        as QSettings view-state (kept out of the profile INI).
+        """
+        raw = self._settings().value("detectBoxesMode", True)
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in ("true", "1", "yes", "on")
+
+    def _save_masker_profile(self) -> None:
+        """Persist the current profile to the 'default' profile INI (D-10).
+
+        Wrapped in try/except OSError — a read-only config dir must not crash
+        the app (the callbacks are user-paced preference commits of a small
+        INI, T-08-10 accept).
+        """
+        try:
+            self.profile_manager.save_profile(
+                self.profile_manager.config.current_profile, "default"
+            )
+        except OSError as exc:
+            logger.warning(f"Could not save masker settings to the profile INI: {exc}")
+
+    def _on_detect_boxes_changed(self, checked: bool) -> None:
+        """Dock checkbox flipped -> sync the action state holder + persist.
+
+        blockSignals on the action prevents the toggled->checkbox feedback
+        loop (the action.toggled connection back re-populates the checkbox).
+        """
+        was = self.action_detect_boxes_mode.blockSignals(True)
+        self.action_detect_boxes_mode.setChecked(checked)
+        self.action_detect_boxes_mode.blockSignals(was)
+        self._settings().setValue("detectBoxesMode", checked)
+
+    def _on_action_detect_boxes_toggled(self, checked: bool) -> None:
+        """Action toggled (the state-holder path) -> re-populate the dock
+        checkbox with blockSignals so no feedback loop fires.
+
+        The action is no longer user-reachable (removed from the Tools menu),
+        but programmatic toggles (e.g. tests, future restores) must keep the
+        dock checkbox in sync.
+        """
+        was = self.tools_panel.detect_checkbox.blockSignals(True)
+        self.tools_panel.detect_checkbox.setChecked(checked)
+        self.tools_panel.detect_checkbox.blockSignals(was)
+
+    def _on_dilation_changed(self, value: int) -> None:
+        """Dilation radius changed (LIVE parameter) -> persist to the profile
+        masker (D-10).
+
+        Extension point: the LIVE current-page re-dilate + border re-derive is
+        added by plan 08-07 — this plan persists only.
+        """
+        profile = self.profile_manager.config.current_profile
+        profile.masker.mask_dilation_radius = value
+        self._save_masker_profile()
+
+    def _on_std_dev_threshold_changed(self, value: float) -> None:
+        """Std-dev gate threshold changed (LIVE parameter) -> persist.
+
+        Extension point: the LIVE gate re-derive + box-border refresh is added
+        by plan 08-07 — this plan persists only.
+        """
+        profile = self.profile_manager.config.current_profile
+        profile.masker.mask_max_standard_deviation = value
+        self._save_masker_profile()
+
+    def _on_masker_params_changed(self) -> None:
+        """Any of the seven next-detect fit params changed -> copy them into
+        the profile masker and save ONCE (they share one persist fate).
+
+        ``masker_values()`` keys match ``MaskerConfig`` field names, so the
+        reader result setattrs directly.
+        """
+        profile = self.profile_manager.config.current_profile
+        for key, value in self.tools_panel.masker_values().items():
+            setattr(profile.masker, key, value)
+        self._save_masker_profile()
 
     # ------------------------------------------------------ history (plan 06)
     def _wire_history_actions(self) -> None:
