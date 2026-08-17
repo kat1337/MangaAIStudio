@@ -32,10 +32,14 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.box_model import DETECTED, USER  # noqa: E402
+from manga_ai_studio.core.detection_boxes import dilate_auto_mask  # noqa: E402
+from manga_ai_studio.core.mask_editor import mask_to_numpy_binary  # noqa: E402
+from manga_ai_studio.core.mask_planes import unpack_binary  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 
 
@@ -429,3 +433,230 @@ def test_detected_boxes_keep_style_none_without_key(
     assert len(items) == 1
     assert items[0].pagebox.origin == DETECTED
     assert items[0].pagebox.style is None
+
+
+# ===========================================================================
+# Phase 8 (plan 08-07) — detection->mask seam rework. The six behavior cases
+# of Task 1: the D-04 gate runs BEFORE any mask/box mutation, the composite
+# is box-constrained, the pre-dilation raw binary is retained in BOTH modes,
+# detection pushes nothing but dirties the session, and re-detect replaces
+# detected boxes while user boxes keep their per-box state.
+# ===========================================================================
+
+
+def _heatmap_with_in_and_out_content(h: int = 50, w: int = 60) -> np.ndarray:
+    """A (h, w) uint8 heatmap with non-zero content INSIDE the fixture box
+    (5,6,25,30) AND OUTSIDE every box (the D-02 discard region)."""
+    heat = np.zeros((h, w), dtype=np.uint8)
+    heat[10:20, 10:20] = 255  # inside the fixture box
+    heat[10:20, 40:50] = 255  # outside any box -> must never enter the mask
+    return heat
+
+
+def _profile_threshold(window) -> float:
+    """The current std-dev gate from the active profile (the value
+    refresh_box_inpaint_states reads)."""
+    return float(
+        window.profile_manager.config.current_profile.masker
+        .mask_max_standard_deviation
+    )
+
+
+@pytest.mark.gui
+def test_mode_on_composite_contains_only_in_box_content(qtbot, tmp_path) -> None:
+    """Mode ON: the heatmap outside the box never enters the composite; the
+    box content does, the PageBox is fitted (mask + float std_dev), and the
+    border pen renders the derived state (D-02/MASK-05)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    result = {
+        "mask": _heatmap_with_in_and_out_content(),
+        "blocks": [_blk(5, 6, 25, 30)],
+    }
+    window._on_detection_finished(result)
+
+    # Composite == the auto plane (no manual strokes): only in-box content.
+    auto = mask_to_numpy_binary(window.canvas.get_mask())
+    assert auto[10:20, 10:20].any(), "the in-box heatmap content must land"
+    assert not auto[10:20, 40:50].any(), (
+        "heatmap content outside every box must NEVER enter the mask (D-02)"
+    )
+    assert not auto[:, 26:].any(), "nothing right of the fixture box"
+    assert not auto[31:, :].any(), "nothing below the fixture box"
+
+    # The PageBox is fitted: non-None mask + float std_dev.
+    item = window.canvas._box_items[0]
+    assert item.pagebox.mask is not None, "the box must carry a fitted mask"
+    assert item.pagebox.std_dev is not None
+    assert isinstance(item.pagebox.std_dev, float)
+
+    # The border renders the DERIVED state (single derivation site): the pen
+    # style is solid iff the state says will-inpaint / forced.
+    expected = item.pagebox.inpaint_state(_profile_threshold(window))
+    if expected in ("will_inpaint", "forced"):
+        assert item.pen().style() == Qt.PenStyle.SolidLine
+    else:
+        assert item.pen().style() == Qt.PenStyle.CustomDashLine
+
+
+@pytest.mark.gui
+def test_mode_on_cancel_aborts_before_any_mutation(qtbot, tmp_path) -> None:
+    """D-04 Cancel: with detected boxes present, a cancelled re-detect must
+    abort BEFORE any mask or box mutation — the canvas mask stays byte-equal,
+    the boxes stay put, and no 'Detection complete' status shows (the reorder
+    trap's regression lock)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    # First detect establishes the detected box + the auto plane (no gate).
+    window._on_detection_finished(
+        {"mask": _heatmap_with_in_and_out_content(), "blocks": [_blk(5, 6, 25, 30)]}
+    )
+    assert window.canvas.box_origin_counts() == (1, 0)
+    mask_before = mask_to_numpy_binary(window.canvas.get_mask())
+    boxes_before = [pb.box.as_tuple for pb in window.canvas.boxes_snapshot()]
+    dirty_before = window.image_files[0].dirty
+
+    # Re-detect with a DIFFERENT heatmap; user clicks Cancel.
+    different_heat = np.zeros((50, 60), dtype=np.uint8)
+    different_heat[40:48, 40:55] = 255
+    with patch.object(MainWindow, "_confirm_replace_boxes", return_value=False):
+        window._on_detection_finished(
+            {"mask": different_heat, "blocks": [_blk(40, 40, 55, 48)]}
+        )
+
+    # NOTHING changed: mask byte-equal, boxes unchanged, dirty unchanged.
+    mask_after = mask_to_numpy_binary(window.canvas.get_mask())
+    assert np.array_equal(mask_after, mask_before), (
+        "the D-04 gate must run BEFORE any mask mutation — a cancelled "
+        "re-detect leaves the composite byte-identical"
+    )
+    boxes_after = [pb.box.as_tuple for pb in window.canvas.boxes_snapshot()]
+    assert boxes_after == boxes_before, "cancelled re-detect must not touch boxes"
+    assert window.image_files[0].dirty == dirty_before
+    assert "Detection complete" not in window.status_bar_left.text(), (
+        "a cancelled detection must not report completion"
+    )
+
+
+@pytest.mark.gui
+def test_mode_off_full_heatmap_no_boxes_raw_retained(qtbot, tmp_path) -> None:
+    """Mode OFF (D-03): the FULL heatmap dilated by the profile radius lands
+    in the composite, NO boxes are built, and the pre-dilation raw binary is
+    still retained on the ImageFile (D-08)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(False)
+
+    heat = np.zeros((50, 60), dtype=np.uint8)
+    heat[5:15, 5:45] = 255  # content both inside AND outside box territory
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 6, 25, 30)]})
+
+    assert not window.canvas.has_boxes(), "mode off must build no boxes"
+    profile = window.profile_manager.config.current_profile
+    raw_expected = np.where(heat > 0, np.uint8(255), np.uint8(0)).astype(np.uint8)
+    expected_auto = dilate_auto_mask(
+        raw_expected, int(profile.masker.mask_dilation_radius)
+    )
+    composite = mask_to_numpy_binary(window.canvas.get_mask())
+    assert np.array_equal(composite, expected_auto), (
+        "mode off must land the FULL dilated heatmap in the composite"
+    )
+    # D-08: the pre-dilation binary is retained even without boxes.
+    imf = window.image_files[0]
+    assert imf.raw_detected_mask is not None
+    restored_raw = unpack_binary(imf.raw_detected_mask, 50, 60)
+    assert np.array_equal(restored_raw, raw_expected)
+
+
+@pytest.mark.gui
+def test_mode_on_stores_pre_dilation_raw_binary(qtbot, tmp_path) -> None:
+    """Mode ON: the pre-dilation binary is packed onto the current
+    ImageFile.raw_detected_mask (D-08 retention — feed for live re-dilate)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    heat = _heatmap_with_in_and_out_content()
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 6, 25, 30)]})
+
+    imf = window.image_files[0]
+    assert imf.raw_detected_mask is not None, "mode ON must retain the raw binary"
+    raw_expected = np.where(heat > 0, np.uint8(255), np.uint8(0)).astype(np.uint8)
+    restored_raw = unpack_binary(imf.raw_detected_mask, 50, 60)
+    assert np.array_equal(restored_raw, raw_expected)
+
+
+@pytest.mark.gui
+def test_detection_pushes_no_history_and_marks_dirty(qtbot, tmp_path) -> None:
+    """Detection remains a NON-undoable baseline (no MASK/BOXES pushes in any
+    stack) AND marks the session dirty explicitly (recompose is
+    signal-silent, so the mask_modified-driven dirty hook does not fire)."""
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+    assert not window.history.can_undo()
+
+    window._on_detection_finished(
+        {"mask": _heatmap_with_in_and_out_content(), "blocks": [_blk(5, 6, 25, 30)]}
+    )
+
+    assert not window.history.can_undo(), "detection must push NO history entry"
+    assert not window.history.can_undo_boxes(), (
+        "detection must push NO BOXES entry (non-undoable baseline, 03-07)"
+    )
+    assert window.image_files[0].dirty is True, (
+        "detection modifies the page — the session must be marked dirty"
+    )
+
+
+@pytest.mark.gui
+def test_redetect_replaces_detected_keeps_user_state(qtbot, tmp_path) -> None:
+    """D-03 with per-box state: a user box survives re-detect WITH its
+    inpaint_override (and a fresh fit); the REPLACED detected box's state
+    (override) vanishes with the old box."""
+    from panelcleaner.structures import Box
+
+    from manga_ai_studio.core.box_model import PageBox
+
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    # Seed a user box carrying a manual inpaint override — the state that
+    # must be carried THROUGH the re-detect merge, not dropped.
+    user_pb = PageBox(
+        box=Box(1, 1, 10, 10), origin=USER, inpaint_override="always"
+    )
+    window.canvas.set_boxes([user_pb], [])
+
+    # Heatmap with content inside the user box AND inside the detected box.
+    heat = np.zeros((50, 60), dtype=np.uint8)
+    heat[2:9, 2:9] = 255  # inside the user box (1,1,10,10)
+    heat[10:20, 10:20] = 255  # inside the first detected box
+    heat[41:48, 41:54] = 255  # inside the second detected box
+
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 6, 25, 30)]})
+    user_items = [it for it in window.canvas._box_items if it.pagebox.origin == USER]
+    assert len(user_items) == 1
+    user_item = user_items[0]
+    assert user_item.pagebox.inpaint_override == "always", (
+        "the seeded override must survive the first detect's layer rebuild"
+    )
+
+    # Re-detect with a DIFFERENT detected box; auto-approve the D-04 gate.
+    with patch.object(MainWindow, "_confirm_replace_boxes", return_value=True):
+        window._on_detection_finished(
+            {"mask": heat, "blocks": [_blk(40, 40, 55, 48)]}
+        )
+
+    detected, user = window.canvas.box_origin_counts()
+    assert detected == 1 and user == 1
+    snap = window.canvas.boxes_snapshot()
+    user_pbs = [pb for pb in snap if pb.origin == USER]
+    detected_pbs = [pb for pb in snap if pb.origin == DETECTED]
+    # The user box survived WITH its override and keeps a fresh fit.
+    assert user_pbs[0].box.as_tuple == (1, 1, 10, 10)
+    assert user_pbs[0].inpaint_override == "always"
+    assert user_pbs[0].mask is not None, "user box must be re-fitted"
+    # The REPLACED detected box is the new one, freshly fitted, override gone.
+    assert detected_pbs[0].box.as_tuple == (40, 40, 55, 48)
+    assert detected_pbs[0].inpaint_override is None
+    assert detected_pbs[0].mask is not None, "new detected box must be fitted"
