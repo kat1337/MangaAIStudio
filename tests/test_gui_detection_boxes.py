@@ -901,12 +901,14 @@ def test_refresh_box_inpaint_states_iterates_and_derives(qtbot, tmp_path) -> Non
 
 @pytest.mark.gui
 def test_dilation_live_redilate_grows_shrinks_keeps_strokes(qtbot, tmp_path) -> None:
-    """D-08 live re-dilate: emitting dilation_changed re-derives the auto
-    plane from the retained raw mask WITHOUT a model call — the composite
-    GROWS with the radius, SHRINKS when it returns to 0, and the hand strokes
-    painted between the emits stay present; no worker, no status change."""
+    """D-08 live re-dilate (mode OFF): emitting dilation_changed re-derives
+    the auto plane from the retained raw mask WITHOUT a model call — the
+    composite GROWS with the radius, SHRINKS when it returns to 0, and the
+    hand strokes painted between the emits stay present; no worker, no status
+    change. (Mode OFF is the deterministic path — the full heatmap is exactly
+    ``dilate_auto_mask(raw, r)``; line 2 covers the boxed re-derive.)"""
     window = _window_with_custom_page(qtbot, tmp_path, np.full((80, 120, 3), 200, dtype=np.uint8))
-    window.action_detect_boxes_mode.setChecked(True)
+    window.action_detect_boxes_mode.setChecked(False)
     heat = np.zeros((80, 120), dtype=np.uint8)
     heat[10:30, 10:30] = 255
     window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 35, 35)]})
@@ -916,7 +918,7 @@ def test_dilation_live_redilate_grows_shrinks_keeps_strokes(qtbot, tmp_path) -> 
     auto0 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
     _seed_manual_stroke(window)
 
-    # First emit: radius 5 -> the box-constrained auto content GROWS.
+    # First emit: radius 5 -> the full-heatmap auto layer GROWS.
     window.tools_panel.dilation_changed.emit(5)
     auto1 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
     assert auto1 > auto0, "raising the radius must re-dilate the retained raw"
@@ -931,6 +933,40 @@ def test_dilation_live_redilate_grows_shrinks_keeps_strokes(qtbot, tmp_path) -> 
     assert composite[2:12, 2:12].any(), "manual strokes must survive re-dilates"
     assert window.status_bar_left.text() == status_before, (
         "a live re-dilate must not touch the status bar"
+    )
+    assert window._op_running is False, "no worker was dispatched"
+
+
+@pytest.mark.gui
+def test_dilation_live_redilate_mode_on_rederives(qtbot, tmp_path) -> None:
+    """The boxed (mode ON) live path re-derives against the CURRENT radius:
+    the slot invokes the derivation core and stores exactly the fresh derive
+    at the emitted radius (never stale — the CTD model is NOT re-run)."""
+    from manga_ai_studio.core.detection_boxes import (
+        derive_page_mask_state as real_derive,
+    )
+
+    window = _window_with_custom_page(qtbot, tmp_path, np.full((80, 120, 3), 200, dtype=np.uint8))
+    window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((80, 120), dtype=np.uint8)
+    heat[10:30, 10:30] = 255
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 35, 35)]})
+    profile = window.profile_manager.config.current_profile
+
+    # The slot must actually invoke the re-derive (not a no-op), and the
+    # store must be byte-identical to the deterministic derive at radius 5.
+    with patch.object(
+        MainWindow, "_rederive_auto_layer", wraps=window._rederive_auto_layer
+    ) as spy:
+        window.tools_panel.dilation_changed.emit(5)
+    spy.assert_called_once()
+    raw = unpack_binary(window.image_files[0].raw_detected_mask, 80, 120)
+    boxes = [it.pagebox for it in window.canvas._box_items]
+    reference = real_derive(
+        window.canvas.get_image_numpy(), raw, boxes, profile.masker, 5
+    ).auto_binary
+    assert np.array_equal(reference, window.canvas._auto_bin), (
+        "the live store must be the fresh derive at the emitted radius (D-08)"
     )
     assert window._op_running is False, "no worker was dispatched"
 
@@ -1006,7 +1042,13 @@ def test_mas_save_roundtrip_restores_planes_without_detect(
     window.action_detect_boxes_mode.setChecked(True)
     heat = np.zeros((80, 120), dtype=np.uint8)
     heat[10:30, 10:30] = 255
-    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 35, 35)]})
+    # A REAL TextBlock payload (not the duck-typed _blk): the .mas serializer
+    # reads payload.lines/vertical/language/font_size/text/translation.
+    from panelcleaner.comic_text_detector.utils.textblock import TextBlock
+
+    window._on_detection_finished(
+        {"mask": heat, "blocks": [TextBlock([5, 5, 35, 35])]}
+    )
     threshold = _profile_threshold(window)
     pre_state = window.canvas._box_items[0].pagebox.inpaint_state(threshold)
 
@@ -1040,6 +1082,10 @@ def test_mas_save_roundtrip_restores_planes_without_detect(
     assert np.count_nonzero(window2.canvas._auto_bin) > 0
 
     # A post-load radius change re-dilates from the retained raw — no detect.
+    # (The boxed compose saturates to the box, so the mode-OFF dilate path is
+    # the deterministic witness: it is exactly dilate_auto_mask(raw, r) and
+    # grows with r — proving the raw plane survived the restore.)
+    window2.action_detect_boxes_mode.setChecked(False)
     before = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))
     window2.tools_panel.dilation_changed.emit(8)
     after = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))

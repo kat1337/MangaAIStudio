@@ -64,6 +64,7 @@ from manga_ai_studio.core.box_model import (
 )
 from manga_ai_studio.core.detection_boxes import (
     build_detected_pageboxes,
+    compose_auto_binary,
     derive_page_mask_state,
     dilate_auto_mask,
 )
@@ -817,6 +818,10 @@ class MainWindow(QMainWindow):
         # Inpaint (C) — wired in plan 05 (async LaMa inpainting).
         self.action_inpaint = QAction("Inpaint", self)
         self.action_inpaint.setShortcut(QKeySequence("C"))
+        self.action_inpaint.setToolTip(
+            "Inpaint the mask layer with LaMa (C). Hand-painted mask is always"
+            " inpainted; detected text is inpainted only inside text boxes."
+        )
         self.action_inpaint.triggered.connect(self.inpaint)
         # Enabled iff a page is open AND a mask exists AND no async op is running
         # (UI-SPEC surface 7; _refresh_action_states gates this).
@@ -1934,6 +1939,11 @@ class MainWindow(QMainWindow):
             finally:
                 self._suppress_boxes_push = False
 
+        # Step 4c (plan 08-07 Task 3, §37): the incoming page's predictive
+        # borders re-derive from the restored per-box fields + the current
+        # gate (page load/restore trigger). No-op when the page has no boxes.
+        self.refresh_box_inpaint_states()
+
         # Step 5 (unchanged tail; title via the D-07 format — plan 05-05).
         self._update_title()
         self.canvas.fit_to_window()
@@ -2134,6 +2144,35 @@ class MainWindow(QMainWindow):
         if image_np is not None:
             self.image_files[idx].current_image = image_np
 
+    def _page_plane_keys(self, imf: ImageFile, dims: tuple[int, int]) -> dict:
+        """Unpack the packed ImageFile plane slots into the 08-04 binary keys.
+
+        Plan 08-07 Task 3: the save-loop writes the four plane container
+        entries through this helper — the ONLY writer of those entries (the
+        in-memory slots are packed by the D-11 flush / ``_snapshot_current_page``
+        / the detection seam, but the .mas container write happens here).
+
+        Name alignment: ImageFile slots (``raw_detected_mask`` / ``auto_mask``
+        / ``mask_manual`` / ``mask_erase``, all packed) -> save-loop keys
+        ``raw_binary`` / ``auto_binary`` / ``manual_binary`` / ``erase_binary``
+        (unpacked via ``mask_planes.unpack_binary`` against the page dims) ->
+        08-04 parse keys ``raw_packed`` / ``auto_packed`` / ``manual_packed`` /
+        ``erase_packed``. A ``None`` slot omits its key — ``build_page_entries``
+        writes the entry only when the key is present and not None (legacy
+        pages store nothing).
+        """
+        h, w = dims
+        keys: dict[str, np.ndarray] = {}
+        if imf.raw_detected_mask is not None:
+            keys["raw_binary"] = unpack_binary(imf.raw_detected_mask, h, w)
+        if imf.auto_mask is not None:
+            keys["auto_binary"] = unpack_binary(imf.auto_mask, h, w)
+        if imf.mask_manual is not None:
+            keys["manual_binary"] = unpack_binary(imf.mask_manual, h, w)
+        if imf.mask_erase is not None:
+            keys["erase_binary"] = unpack_binary(imf.mask_erase, h, w)
+        return keys
+
     def _choose_project_dir(self) -> tuple[Path | None, bool]:
         """The Save Project As… folder dialog (D-02).
 
@@ -2300,6 +2339,7 @@ class MainWindow(QMainWindow):
                             "geometry_altered": imf.geometry_altered,
                             "original_path": imf.path,
                             "original_sha256": original_sha,
+                            **self._page_plane_keys(imf, image_rgb.shape[:2]),
                         }
                     ),
                 )
@@ -2513,6 +2553,14 @@ class MainWindow(QMainWindow):
         )
         if parsed["mask"] is not None:
             imf.mask = numpy_binary_to_mask_qimage(parsed["mask"])
+        # Phase 8 (plan 08-07 Task 3): thread 08-04's parsed packed plane
+        # blobs into the ImageFile slots so ``has_mask_planes()`` restores the
+        # three planes AND the raw detection binary is retained (a post-load
+        # radius change re-dilates from it without re-detecting — D-08).
+        imf.raw_detected_mask = parsed.get("raw_packed")
+        imf.auto_mask = parsed.get("auto_packed")
+        imf.mask_manual = parsed.get("manual_packed")
+        imf.mask_erase = parsed.get("erase_packed")
         imf.boxes = [
             project_io.json_to_pagebox(d)
             for d in parsed["meta"].get("boxes") or []
@@ -2570,8 +2618,11 @@ class MainWindow(QMainWindow):
             # Phase 8 (plan 08-02): restore the three planes when the page
             # carries plane data (the on_page_selected Step-4 mirror for the
             # project-open path; plan 08-07's load side populates the slots).
-            page_mask = self.canvas.get_mask()
-            h, w = page_mask.height(), page_mask.width()
+            # The planes are page-sized per the 08-04-validated meta dims, so
+            # the restore dims come from the embedded image — NOT canvas.get_mask()
+            # (a fresh project-open has re-seeded the planes but the composite
+            # ``_mask`` is still None until the first recompose).
+            h, w = imf.current_image.shape[:2]
             manual_bin = (
                 unpack_binary(imf.mask_manual, h, w)
                 if imf.mask_manual is not None
@@ -2615,6 +2666,31 @@ class MainWindow(QMainWindow):
             self.canvas.set_boxes(user_pbs, detected_pbs)
         finally:
             self._suppress_boxes_push = False
+        # Phase 8 (plan 08-07 Task 3): the border states + the auto plane
+        # restore WITHOUT a re-detect (criterion 5).
+        if (
+            not imf.has_mask_planes()
+            and (imf.mask is None or imf.mask.isNull())
+        ):
+            # No plane data AND no flat composite: an 08-04-era box-only page
+            # (its per-box masked fields serialize; this plan's save side is
+            # what writes the plane entries). Compose the auto plane from the
+            # loaded per-box masks so the composite + borders restore from the
+            # round-tripped fields without a detect call.
+            live = [it.pagebox for it in self.canvas._box_items]
+            if any(
+                pb.mask is not None and pb.mask.getbbox() is not None for pb in live
+            ):
+                profile = self.profile_manager.config.current_profile
+                threshold = float(profile.masker.mask_max_standard_deviation)
+                page_mask = self.canvas.get_mask()
+                if page_mask is not None and not page_mask.isNull():
+                    auto = compose_auto_binary(
+                        live, threshold, (page_mask.width(), page_mask.height())
+                    )
+                    if np.count_nonzero(auto) > 0:
+                        self.canvas.set_auto_binary(auto)
+        self.refresh_box_inpaint_states()
 
     def _confirm_discard_changes(self) -> bool:
         """The D-07 Unsaved Changes prompt: [Save] [Discard] [Cancel].
@@ -2954,25 +3030,93 @@ class MainWindow(QMainWindow):
         self.tools_panel.detect_checkbox.blockSignals(was)
 
     def _on_dilation_changed(self, value: int) -> None:
-        """Dilation radius changed (LIVE parameter) -> persist to the profile
-        masker (D-10).
+        """Dilation radius changed (LIVE parameter) -> persist + re-dilate.
 
-        Extension point: the LIVE current-page re-dilate + border re-derive is
-        added by plan 08-07 — this plan persists only.
+        Persists to the profile masker (D-10), then — plan 08-07 Task 3
+        (D-08) — LIVE re-derives the current page's auto plane from the
+        retained raw detection binary INSTANTLY: no worker, no model call.
         """
         profile = self.profile_manager.config.current_profile
         profile.masker.mask_dilation_radius = value
         self._save_masker_profile()
+        # Plan 08-07 (D-08): "instantly re-dilates the current detected mask
+        # without re-running the model" — the per-box fit re-runs (pure
+        # PIL/numpy, main-thread safe), the CTD model does NOT.
+        self._rederive_auto_layer()
 
     def _on_std_dev_threshold_changed(self, value: float) -> None:
-        """Std-dev gate threshold changed (LIVE parameter) -> persist.
+        """Std-dev gate threshold changed (LIVE parameter) -> persist + re-gate.
 
-        Extension point: the LIVE gate re-derive + box-border refresh is added
-        by plan 08-07 — this plan persists only.
+        Persists (D-10), then — plan 08-07 Task 3 (D-12) — recomposes the
+        auto plane from the STORED per-box fits under the new gate:
+        ``compose_auto_binary`` is a pure recomposition, so a threshold
+        change NEVER re-fits (the gate-decoupled fits make this exact) +
+        refreshes every border.
         """
         profile = self.profile_manager.config.current_profile
         profile.masker.mask_max_standard_deviation = value
         self._save_masker_profile()
+        # Plan 08-07 (D-12): pure recompose under the new gate + border
+        # refresh. The gate only applies to the box-constrained (mode ON)
+        # auto layer; mode OFF's full-heatmap layer does not participate.
+        if not self.action_detect_boxes_mode.isChecked():
+            return
+        current_boxes = [it.pagebox for it in self.canvas._box_items]
+        if not current_boxes:
+            return
+        image_np = self.canvas.get_image_numpy()
+        if image_np is None:
+            return
+        page_size = (int(image_np.shape[1]), int(image_np.shape[0]))
+        auto = compose_auto_binary(current_boxes, float(value), page_size)
+        self.canvas.set_auto_binary(auto)
+        self.refresh_box_inpaint_states()
+
+    def _rederive_auto_layer(self) -> None:
+        """Re-derive the current page's auto plane from the retained raw
+        binary (plan 08-07 Task 3, D-08).
+
+        Called by the live dilation slot after persisting:
+
+        - no retained raw mask on the current page -> silent no-op (the
+          never-detected case);
+        - mode ON (action_detect_boxes_mode checked): re-run
+          ``derive_page_mask_state`` against the CURRENT boxes/params — the
+          per-box fit re-runs (pure PIL/numpy), the CTD model does NOT — then
+          land the new auto binary and refresh the borders;
+        - mode OFF (no boxes): ``set_auto_binary(dilate_auto_mask(raw, r))``.
+
+        Neither this nor the slot pushes history or dirties the session
+        (settings are non-undoable preferences — RESEARCH §9).
+        """
+        idx = self._current_page_index()
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        imf = self.image_files[idx]
+        if imf.raw_detected_mask is None:
+            return
+        image_rgb = self.canvas.get_image_numpy()
+        if image_rgb is None:
+            return
+        h, w = image_rgb.shape[:2]
+        if len(imf.raw_detected_mask) != (h * w + 7) // 8:
+            logger.debug(
+                "Live re-dilate skipped: retained raw mask dims no longer "
+                "match the page (stale after a geometry op?)"
+            )
+            return
+        raw = unpack_binary(imf.raw_detected_mask, h, w)
+        profile = self.profile_manager.config.current_profile
+        radius = int(profile.masker.mask_dilation_radius)
+        if self.action_detect_boxes_mode.isChecked():
+            boxes = [it.pagebox for it in self.canvas._box_items]
+            derivation = derive_page_mask_state(
+                image_rgb, raw, boxes, profile.masker, radius
+            )
+            self.canvas.set_auto_binary(derivation.auto_binary)
+            self.refresh_box_inpaint_states()
+        else:
+            self.canvas.set_auto_binary(dilate_auto_mask(raw, radius))
 
     def _on_masker_params_changed(self) -> None:
         """Any of the seven next-detect fit params changed -> copy them into
@@ -4759,7 +4903,39 @@ class MainWindow(QMainWindow):
             # corrupting the undo state.
             self.history.push_image_action(x1, y1, original_patch_numpy)
 
-        self.status_bar_left.setText("Inpainting complete")
+        # Completion copy (plan 08-07, UI-SPEC §Copywriting surface 7 — the
+        # selective story): with boxes on the page the flash reports the
+        # inpaint verdict — n = boxes in a contributing state (will_inpaint /
+        # forced) that actually carried mask content, m = all other boxes
+        # (gate-skipped + never + no detected content); the skipped clause is
+        # omitted when m == 0. With no boxes the flash stays exactly
+        # "Inpainting complete".
+        box_items = list(self.canvas._box_items)
+        if box_items:
+            threshold = float(
+                self.profile_manager.config.current_profile.masker
+                .mask_max_standard_deviation
+            )
+            n = 0
+            for it in box_items:
+                pb = it.pagebox
+                state = pb.inpaint_state(threshold)
+                has_content = (
+                    pb.mask is not None and pb.mask.getbbox() is not None
+                )
+                if state in ("will_inpaint", "forced") and has_content:
+                    n += 1
+            m = len(box_items) - n
+            if m > 0:
+                self.status_bar_left.setText(
+                    f"Inpainting complete · {n} box(es) inpainted · {m} skipped"
+                )
+            else:
+                self.status_bar_left.setText(
+                    f"Inpainting complete · {n} box(es) inpainted"
+                )
+        else:
+            self.status_bar_left.setText("Inpainting complete")
         self._refresh_action_states()
 
     def _on_inpaint_error(self, worker_error) -> None:
