@@ -6,14 +6,14 @@ current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
 stopped_at: Completed 08-03-PLAN.md
-last_updated: "2026-08-17T17:11:45.565Z"
+last_updated: "2026-08-17T18:49:58.511Z"
 last_activity: 2026-08-16
 last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 9
   completed_phases: 7
   total_plans: 68
-  completed_plans: 62
+  completed_plans: 63
   percent: 78
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 4 of 9
+Plan: 5 of 9
 Status: Ready to execute
 Last activity: 2026-08-16 — Phase 08 execution started
 
@@ -119,6 +119,7 @@ Last activity: 2026-08-16 — Phase 08 execution started
 | Phase 08 P01 | 11 min | 3 tasks | 8 files |
 | Phase 08 P02 | 6h 1min | 3 tasks | 7 files |
 | Phase 08 P03 | 42 min | 3 tasks | 3 files |
+| Phase 08 P04 | 12min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -279,6 +280,9 @@ Recent decisions affecting current work:
 - [Phase 08]: Reference-box padding is the plan formula pb.box.pad(mask_growth_step_pixels * mask_growth_steps, page_size); Pillow's FIND_EDGES copies border pixels from the source, so a candidate that saturates its reference frame yields the frame-border ring (never a fabricated BlankMaskError) — probe-verified and encoded in the battery; a symmetric two-color border split reads std 0 in the RGB path, so contrast fixtures are asymmetric and noise-failure fixtures must reach the frame border
 - [Phase 08]: T-08-04 mitigations implemented as explicit guards: strict int img_w/img_h in build_detected_pageboxes (float bounds would leak float clamp coords into the geometry) + heatmap-vs-image shape ValueError in derive_page_mask_state (no allocation sized from unvalidated dims)
 - [Phase 08]: The headless purity lock runs a HERMETIC subprocess probe: an in-process sys.modules check is broken by any earlier GUI test module in the same process (order-dependent full-suite failure fixed in 1ab15b5) — the source-token scan remains the primary load-bearing assertion
+- [Phase ?]: 08-04: Per-box mask serializes as base64 PNG of the box-cropped mode-'1' image (RESEARCH 6.3 a) — PNG packbits keep mask small; T-08-06 size cross-check bounds crafted mask to box dims
+- [Phase ?]: 08-04: Plane binaries persist as pack_binary 1-bit blobs (~H*W/8 per page) in optional .mas entries — Loader re-dilates rawmask.bin on radius change without re-detecting; hand strokes never lost to recomposition
+- [Phase ?]: 08-04: Plane blob length validation uses ceil(h*w/8) against the meta-declared image dims — Planes are page-sized; validate_meta forces mask.bin dims to equal image dims, mirroring the mask.bin length cross-check (T-08-07)
 
 ### Roadmap Evolution
 
@@ -312,7 +316,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T17:11:45.551Z
+Last session: 2026-08-17T18:49:58.496Z
 Stopped at: Completed 08-03-PLAN.md
 Resume file: None
 
