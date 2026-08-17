@@ -99,3 +99,214 @@ def test_detection_boxes_module_is_headless() -> None:
     import manga_ai_studio.core.detection_boxes  # noqa: F401
 
     assert "manga_ai_studio.gui" not in sys.modules
+
+
+# ===========================================================================
+# Task 3 — the seam primitives (derive / compose / dilate)
+# ===========================================================================
+def _uniform_page_with_strokes() -> tuple[np.ndarray, np.ndarray]:
+    """(image_rgb, heatmap): a white 60x50 page with text-like strokes inside
+    the box (10,10)-(40,30), and a matching heatmap."""
+    page = Image.new("RGB", (60, 50), (240, 240, 240))
+    draw = ImageDraw.Draw(page)
+    heatmap = np.zeros((50, 60), dtype=np.uint8)
+    for y in (13, 18, 23, 27):
+        draw.rectangle([14, y, 36, y + 1], fill=(20, 20, 20))
+        heatmap[y : y + 2, 14:37] = 255
+    return np.array(page), heatmap
+
+
+def _page_bbox(mask_or_arr) -> tuple[int, int, int, int]:
+    """Page-coordinate bbox of a stored per-box mode-"1" mask pasted at its
+    box origin, or of an auto binary directly (as (y1, x1, y2, x2))."""
+    arr = np.asarray(mask_or_arr)
+    return _bbox(arr)
+
+
+@pytest.mark.unit
+def test_derive_discards_out_of_box_heatmap_content() -> None:
+    """D-02/MASK-05: heatmap content outside the union of all boxes NEVER
+    enters the auto binary — it is retained in raw_binary (D-08) but cut away
+    before fitting/composition."""
+    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+
+    image_rgb, heatmap = _uniform_page_with_strokes()
+    # A detected-text blob OUTSIDE every box (bottom-right corner).
+    heatmap[35:45, 45:55] = 255
+    boxes = [PageBox(box=st.Box(10, 10, 40, 30), origin=DETECTED)]
+
+    result = derive_page_mask_state(image_rgb, heatmap, boxes, cfg.MaskerConfig(), 0)
+
+    # Retained pre-dilation binary carries the out-of-box blob...
+    assert result.raw_binary[40, 50] == 255
+    # ...the constrained auto binary never does.
+    assert result.auto_binary[40, 50] == 0
+    # Auto content lives ONLY inside the box union.
+    assert np.count_nonzero(result.auto_binary[0:10, :]) == 0
+    assert np.count_nonzero(result.auto_binary[31:, :]) == 0
+    assert np.count_nonzero(result.auto_binary[:, 0:10]) == 0
+    assert np.count_nonzero(result.auto_binary[:, 41:]) == 0
+    assert np.count_nonzero(result.auto_binary[10:31, 10:41]) > 0
+
+
+@pytest.mark.unit
+def test_derive_dilation_grows_but_never_exits_the_box() -> None:
+    """MASK-01 via dilate-then-intersect: radius 3 grows the auto content by
+    ~3 px on unclamped sides and is CLIPPED exactly at the box border where it
+    would exit; radius 0 leaves it unchanged. The stored per-box mask and the
+    composed auto binary agree.
+
+    ``mask_growth_steps=1`` makes the winner deterministic: the single growth
+    candidate (dilated cut + min_thickness) beats the box-mask candidate,
+    whose border crosses the contrast ticks drawn on the box's right/bottom
+    edges (probe-verified selection)."""
+    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+
+    page = Image.new("RGB", (60, 50), (240, 240, 240))
+    draw = ImageDraw.Draw(page)
+    draw.rectangle([16, 16, 24, 24], fill=(20, 20, 20))  # the stroke block
+    # Contrast ticks crossing the box's right/bottom edges: the box-mask
+    # candidate's border std is high, so it never wins the selection.
+    for y in range(12, 34, 6):
+        draw.rectangle([44, y, 45, y + 1], fill=(10, 10, 10))
+    for x in range(16, 44, 6):
+        draw.rectangle([x, 34, x + 1, 35], fill=(10, 10, 10))
+    heatmap = np.zeros((50, 60), dtype=np.uint8)
+    heatmap[16:25, 16:25] = 255
+    boxes = [PageBox(box=st.Box(10, 10, 45, 35), origin=DETECTED)]
+    conf = cfg.MaskerConfig(mask_growth_steps=1)
+
+    r0 = derive_page_mask_state(np.array(page), heatmap, boxes, conf, 0)
+    r3 = derive_page_mask_state(np.array(page), heatmap, boxes, conf, 3)
+
+    # Radius 0: the stroke grown by min_thickness (4) — unchanged by dilation.
+    assert _page_bbox(r0.auto_binary) == (12, 12, 28, 28)
+    # Radius 3: +3 px on the unclamped sides (28 -> 31), CLIPPED at the box
+    # border on the clamped sides (12 -> 10 == the box edge, never past it).
+    assert _page_bbox(r3.auto_binary) == (10, 10, 31, 31)
+    # The stored per-box mask agrees with the composition.
+    assert boxes[0].mask is not None
+    local = _bbox(np.array(boxes[0].mask))
+    assert (local[0] + 10, local[1] + 10, local[2] + 10, local[3] + 10) == (10, 10, 31, 31)
+    # Dilation applies to detected content only and the pre-dilation binary is
+    # returned for retention (D-07/D-08): raw_binary is identical at both radii.
+    assert np.array_equal(r0.raw_binary, r3.raw_binary)
+    assert np.count_nonzero(r3.raw_binary) == 9 * 9  # the raw stroke, undilated
+
+
+@pytest.mark.unit
+def test_derive_per_box_fits_store_gate_lifted() -> None:
+    """Per-box fits: a uniform-region box stores mask+std; a box with no
+    heatmap content stores (None, None) — the noise outcome; a textured box
+    STILL stores its mask with an honest std ABOVE the threshold (the fit ran
+    gate-lifted — P-5: threshold changes never re-fit) and consequently does
+    NOT contribute to the auto binary at that threshold."""
+    from manga_ai_studio.core.detection_boxes import (
+        BoxMaskFit,
+        derive_page_mask_state,
+    )
+
+    image_rgb, heatmap = _uniform_page_with_strokes()
+    box_a = PageBox(box=st.Box(10, 10, 40, 30), origin=DETECTED)  # strokes
+    box_b = PageBox(box=st.Box(45, 5, 58, 20), origin=DETECTED)  # no content
+
+    result = derive_page_mask_state(image_rgb, heatmap, [box_a, box_b], cfg.MaskerConfig(), 0)
+
+    assert set(result.fits) == {id(box_a), id(box_b)}
+    # Uniform box: stored fit with a finite, gate-passing std.
+    assert result.fits[id(box_a)].mask is not None
+    assert box_a.mask is not None
+    assert box_a.std_dev is not None and np.isfinite(box_a.std_dev)
+    assert box_a.std_dev <= cfg.MaskerConfig().mask_max_standard_deviation
+    # Empty box: the noise outcome (None, None) — never an exception.
+    assert result.fits[id(box_b)] == BoxMaskFit(None, None)
+    assert box_b.mask is None and box_b.std_dev is None
+
+    # Textured page: the fit still stores a mask (gate-lifted) with an honest
+    # std above the default gate, so the box contributes nothing at threshold.
+    rng = np.random.default_rng(1234)
+    noisy_rgb = rng.integers(0, 256, size=(50, 60, 3), dtype=np.uint8)
+    noisy_box = PageBox(box=st.Box(10, 10, 40, 30), origin=DETECTED)
+    noisy = derive_page_mask_state(noisy_rgb, heatmap, [noisy_box], cfg.MaskerConfig(), 0)
+    assert noisy.fits[id(noisy_box)].mask is not None
+    assert noisy_box.std_dev is not None
+    assert noisy_box.std_dev > cfg.MaskerConfig().mask_max_standard_deviation
+    assert np.count_nonzero(noisy.auto_binary) == 0  # gate excludes it entirely
+
+
+@pytest.mark.unit
+def test_compose_auto_binary_gate_matrix() -> None:
+    """Pure recomposition from STORED per-box masks: Auto+under-threshold
+    contributes; "always" contributes regardless of std; "never" and mask-None
+    contribute nothing — and raising the threshold admits the above-threshold
+    box WITHOUT any re-fitting (the same stored masks recompose differently)."""
+    from manga_ai_studio.core.detection_boxes import compose_auto_binary
+
+    def _box(x1, override, std_dev, with_mask=True):
+        box = st.Box(x1, 0, x1 + 10, 10)
+        pb = PageBox(box=box, origin=DETECTED, std_dev=std_dev, inpaint_override=override)
+        if with_mask:
+            pb.mask = Image.new("1", (10, 10), 1)  # fully content
+        return pb
+
+    boxes = [
+        _box(0, None, 5.0),  # auto, under threshold
+        _box(10, None, 30.0),  # auto, ABOVE threshold
+        _box(20, "always", 30.0),  # forced despite high std
+        _box(30, "never", 1.0),  # demoted despite passing gate
+        _box(40, None, 1.0, with_mask=False),  # no stored mask
+    ]
+
+    at_15 = compose_auto_binary(boxes, threshold=15.0, page_size=(50, 10))
+    assert np.count_nonzero(at_15[:, 0:10]) > 0  # auto under threshold
+    assert np.count_nonzero(at_15[:, 10:20]) == 0  # above threshold excluded
+    assert np.count_nonzero(at_15[:, 20:30]) > 0  # "always" forces
+    assert np.count_nonzero(at_15[:, 30:50]) == 0  # "never" + mask-None
+
+    # Threshold change = pure recomposition of the SAME stored masks.
+    at_50 = compose_auto_binary(boxes, threshold=50.0, page_size=(50, 10))
+    assert np.count_nonzero(at_50[:, 10:20]) > 0  # now admitted, no re-fit
+
+
+@pytest.mark.unit
+def test_derive_zero_boxes_empty_auto_and_dilate_auto_mask() -> None:
+    """Boxes-mode with zero boxes discards EVERYTHING (auto binary empty,
+    raw heatmap retained); ``dilate_auto_mask`` is the mask-only-mode path —
+    plain grow-by-r on the raw binary (D-03 keeps the full heatmap, MASK-01
+    still applies)."""
+    from manga_ai_studio.core.detection_boxes import (
+        derive_page_mask_state,
+        dilate_auto_mask,
+    )
+
+    image_rgb, heatmap = _uniform_page_with_strokes()
+
+    result = derive_page_mask_state(image_rgb, heatmap, [], cfg.MaskerConfig(), 2)
+
+    assert result.auto_binary.shape == (50, 60)
+    assert np.count_nonzero(result.auto_binary) == 0
+    assert np.count_nonzero(result.raw_binary) > 0  # D-08 retention intact
+
+    raw = np.zeros((50, 60), dtype=np.uint8)
+    raw[20:30, 20:30] = 255
+    grown = dilate_auto_mask(raw, 2)
+    assert grown.dtype == np.uint8
+    assert _bbox(grown) == (18, 18, 31, 31)  # +2 on every side
+    assert np.array_equal(dilate_auto_mask(raw, 0), raw)  # radius 0 unchanged
+
+
+@pytest.mark.unit
+def test_derive_fits_user_origin_boxes_identically() -> None:
+    """All boxes certify: a USER PageBox over heatmap content is fitted
+    identically to a detected one (same union, same fit)."""
+    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+
+    image_rgb, heatmap = _uniform_page_with_strokes()
+    user_box = PageBox(box=st.Box(10, 10, 40, 30), origin=USER)
+
+    result = derive_page_mask_state(image_rgb, heatmap, [user_box], cfg.MaskerConfig(), 0)
+
+    assert result.fits[id(user_box)].mask is not None
+    assert user_box.mask is not None
+    assert user_box.std_dev is not None and np.isfinite(user_box.std_dev)
+    assert np.count_nonzero(result.auto_binary) > 0
