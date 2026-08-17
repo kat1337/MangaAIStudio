@@ -38,6 +38,12 @@ def _blk(x1, y1, x2, y2):
     return SimpleNamespace(xyxy=[x1, y1, x2, y2])
 
 
+def _bbox(arr: np.ndarray) -> tuple[int, int, int, int]:
+    """Bounding box of the non-zero entries as (y1, x1, y2, x2) inclusive."""
+    ys, xs = np.nonzero(arr)
+    return int(ys.min()), int(xs.min()), int(ys.max()), int(xs.max())
+
+
 # ===========================================================================
 # Task 2 — build_detected_pageboxes (headless extraction of the V5 loop)
 # ===========================================================================
