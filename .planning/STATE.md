@@ -5,15 +5,16 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
-stopped_at: Completed 08-09-PLAN.md
-last_updated: "2026-08-18T06:09:21.631Z"
+stopped_at: Phase 08 verification — gaps found (3/5 must-haves); next /gsd:plan-phase 08 --gaps
+last_updated: "2026-08-18T15:24:23.779Z"
 last_activity: 2026-08-18
-last_activity_desc: Phase 08 execution started (all 9 plans complete)
+last_activity_desc: Phase 08 post-execution gates — code review (13 findings) + verification (gaps found); suite 869 passed
 progress:
-  total_phases: 8
-  completed_phases: 8
+  total_phases: 9
+  completed_phases: 7
   total_plans: 68
   completed_plans: 68
+  percent: 78
 ---
 
 # Project State
@@ -27,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 
 ## Current Position
 
-Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 9 of 9 — all 9 plans complete (08-01…08-09 have summaries)
-Status: Ready to execute
-Last activity: 2026-08-18 — Phase 08 execution started
+Phase: 08 (masker-selective-inpaint) — EXECUTING (verification gaps found)
+Plan: 9 of 9 complete — verification: 3/5 must-haves verified, 2 gaps (CR-01..CR-04, see 08-VERIFICATION.md / 08-REVIEW.md)
+Status: Awaiting gap planning — /gsd:plan-phase 08 --gaps
+Last activity: 2026-08-18 — code review + phase verification (gaps found); full suite 869 passed
 
 ## Performance Metrics
 
@@ -334,7 +335,7 @@ Items acknowledged and carried forward from previous milestone close:
 ## Session Continuity
 
 Last session: 2026-08-18T06:09:21.566Z
-Stopped at: Completed 08-09-PLAN.md
+Stopped at: Phase 08 verification — gaps found (3/5 must-haves); next /gsd:plan-phase 08 --gaps
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
