@@ -262,7 +262,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. Project Persistence, Image Ops & Export | 10/10 | Complete    | 2026-08-08 |
 | 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
 | 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
-| 8. Masker & Selective Inpaint | 7/9 | In Progress|  |
+| 8. Masker & Selective Inpaint | 8/9 | In Progress|  |
 | 9. UI Rework | 0/0 | Not started | - |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
@@ -366,7 +366,7 @@ Plans:
   4. User can paint mask under text boxes — when a paint tool is active, box items do not block brush strokes in box-overlapped regions
   5. The Phase 3 D-15 seam (`PageBox.mask` / `PageBox.std_dev`) is populated by the vendored `masker.py` machinery and round-trips through `.mas` project save/load
 
-**Plans:** 7/9 plans executed
+**Plans:** 8/9 plans executed
 
 - [x] 08-01-PLAN.md
 - [x] 08-02-PLAN.md
@@ -375,7 +375,7 @@ Plans:
 - [x] 08-05-PLAN.md
 - [x] 08-06-PLAN.md
 - [x] 08-07-PLAN.md
-- [ ] 08-08-PLAN.md
+- [x] 08-08-PLAN.md
 - [ ] 08-09-PLAN.md
 
 **UI hint**: yes

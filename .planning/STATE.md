@@ -5,15 +5,15 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08
 current_phase_name: masker-selective-inpaint
 status: executing
-stopped_at: Completed 08-07-PLAN.md
-last_updated: "2026-08-17T23:59:30.650Z"
+stopped_at: Completed 08-08-PLAN.md
+last_updated: "2026-08-18T05:19:55.811Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 08 execution started
 progress:
   total_phases: 8
   completed_phases: 7
   total_plans: 68
-  completed_plans: 66
+  completed_plans: 67
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-11)
 ## Current Position
 
 Phase: 08 (masker-selective-inpaint) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-08-17 — Phase 08 execution started
 
@@ -122,6 +122,7 @@ Last activity: 2026-08-17 — Phase 08 execution started
 | Phase 08 P05 | 45min | 2 tasks | 3 files |
 | Phase 08-masker-selective-inpaint P06 | 6 min | 1 tasks | 2 files |
 | Phase 08 P07 | 1h 6m | 3 tasks | 4 files |
+| Phase 08-masker-selective-inpaint P08 | 1h 38m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -294,6 +295,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-07: boxes_snapshot carries mask/std_dev/inpaint_override (Task 1, dependency-forward from Task 2) - the D-03 re-detect user-box merge, BOXES undo and save all preserve per-box inpaint state
 - [Phase 08]: 08-07: mode-ON composed auto saturates to the fitted box (vendored pick_best_mask) so radius monotonicity is only observable in mode OFF - live re-dilate tests use the deterministic dilate_auto_mask path + a spy/reference-equality on the boxed re-derive
 - [Phase 08]: 08-07: _display_page_state restores the planes at the embedded-image dims (imf.current_image.shape[:2]), NOT canvas.get_mask() - a fresh project-open re-seeds the planes but the composite _mask is still None
+- [Phase ?]: Recompose-after-undo is guarded: only BOXES-only restores recompose from restored boxes; geometry records restore the authoritative composite via apply_undo_mask and never get overwritten; pages whose boxes carry no fit data (post-geometry invalidation) never recompose (08-08)
 
 ### Roadmap Evolution
 
@@ -327,8 +329,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-17T23:58:45.349Z
-Stopped at: Completed 08-07-PLAN.md
+Last session: 2026-08-18T05:19:55.751Z
+Stopped at: Completed 08-08-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
