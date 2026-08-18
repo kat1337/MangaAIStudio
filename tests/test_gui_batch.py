@@ -30,18 +30,23 @@ is that each test module owns its helpers).
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
 
+from PIL import Image  # noqa: E402
+
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QFileDialog  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core import batch_runner  # noqa: E402
+from manga_ai_studio.core.box_model import DETECTED, USER  # noqa: E402
 from manga_ai_studio.core.mask_editor import mask_to_numpy_binary  # noqa: E402
+from manga_ai_studio.core.mask_planes import unpack_binary  # noqa: E402
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 
@@ -363,7 +368,7 @@ def test_batch_sets_op_running(qtbot, tmp_path, monkeypatch) -> None:
 
     recorded: list = []
 
-    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
         recorded.append((pages, cleaned_dir))
         time.sleep(0.1)
         return {"ok": len(pages), "failed": [], "total": len(pages)}
@@ -463,7 +468,7 @@ def test_batch_detect_status_label_says_detecting(qtbot, tmp_path, monkeypatch) 
     _load_two_pages(window, tmp_path)
     assert len(window.image_files) == 2
 
-    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
         return {"ok": len(pages), "failed": [], "total": len(pages)}
 
     monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
@@ -769,7 +774,7 @@ def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monk
     # the actual ImageFile state, exactly like the Bug D test does for clean.
     detected_block_value = 255
 
-    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
         import numpy as np
 
         from manga_ai_studio.core.batch_runner import _run_batch_task
@@ -782,7 +787,9 @@ def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monk
                 h, w = 16, 16
                 mask = np.zeros((h, w), dtype=np.uint8)
                 mask[2:6, 2:6] = detected_block_value  # a 4x4 detected block
-                return mask, []
+                # D-04 (plan 08-09): the loop builds boxes from the blk_list —
+                # return a full-page box so the derived mask keeps content.
+                return mask, [SimpleNamespace(xyxy=[0, 0, w, h])]
 
         return _run_batch_task(
             pages,
@@ -790,6 +797,7 @@ def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monk
             det_model=_FakeDetector(),
             inp_model=None,
             cleaned_dir=cleaned_dir,
+            masker_conf=masker_conf,
             progress_callback=progress_callback,
             abort_flag=abort_flag,
         )
@@ -843,7 +851,7 @@ def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkey
 
     detected_block_value = 255
 
-    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
         import numpy as np
 
         from manga_ai_studio.core.batch_runner import _run_batch_task
@@ -856,7 +864,7 @@ def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkey
                 h, w = 16, 16
                 mask = np.zeros((h, w), dtype=np.uint8)
                 mask[2:6, 2:6] = detected_block_value
-                return mask, []
+                return mask, [SimpleNamespace(xyxy=[0, 0, w, h])]
 
         return _run_batch_task(
             pages,
@@ -864,6 +872,7 @@ def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkey
             det_model=_FakeDetector(),
             inp_model=None,
             cleaned_dir=cleaned_dir,
+            masker_conf=masker_conf,
             progress_callback=progress_callback,
             abort_flag=abort_flag,
         )
@@ -1020,3 +1029,171 @@ def test_toolbar_open_folder_triggered_opens_folder(qtbot, tmp_path, monkeypatch
     window.action_open_folder.triggered.connect(lambda: fired.append(True))
     window.action_open_folder.trigger()
     assert fired == [True]
+
+
+# ===========================================================================
+# Phase 8 (plan 08-09): batch dispatch supplies the profile masker conf +
+# mode-aware post-batch refresh extended to boxes/planes/states
+#
+# D-04 adopt-the-rule in the GUI layer: _dispatch_batch threads the profile
+# MaskerConfig into the detect-mode worker args, and after a detect-only batch
+# the current page's canvas must restore the persisted boxes (under the
+# _suppress_boxes_push guard — RESEARCH §5 item 5: batch is headless, so the
+# 03-04 D-04 replace gate does NOT apply), the packed auto plane, and the
+# per-box border states (the 02-04 Bug-D-family desync lesson). Clean mode is
+# unchanged (reload + clear).
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_batch_detect_dispatch_passes_profile_masker_conf(qtbot, tmp_path, monkeypatch) -> None:
+    """Bug root: _dispatch_batch("detect") hands the profile's MaskerConfig
+    (with the CURRENT radius) to the worker args — the worker derives the
+    constrained mask from it (mask_dilation_radius + the masker fit params)."""
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        captured["masker_conf"] = masker_conf
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    window.batch_detect()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The worker received the profile's live MaskerConfig (same object —
+    # detection-time params are read from current_profile.masker).
+    assert "masker_conf" in captured
+    assert captured["masker_conf"] is window.profile_manager.config.current_profile.masker
+    assert captured["masker_conf"].mask_dilation_radius == 2  # the default radius
+
+
+@pytest.mark.gui
+def test_batch_detect_and_clean_dispatch_passes_profile_masker_conf(qtbot, tmp_path, monkeypatch) -> None:
+    """The one-shot detect_and_clean dispatches the profile masker conf too."""
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_batch_detect_and_clean(pages, det_model_path, inp_model_path, det_backend, inp_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        captured["masker_conf"] = masker_conf
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_detect_and_clean", _fake_batch_detect_and_clean)
+
+    window.batch_detect_and_clean()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    assert "masker_conf" in captured
+    assert captured["masker_conf"] is window.profile_manager.config.current_profile.masker
+
+
+@pytest.mark.gui
+def test_batch_detect_refresh_restores_boxes_auto_plane_and_borders(qtbot, tmp_path, monkeypatch) -> None:
+    """After a detect-only batch, _refresh_current_page_after_batch("detect")
+    restores the CURRENT page's boxes onto the canvas (set_boxes under the
+    _suppress_boxes_push guard — no history push), the composite mask equals
+    the persisted auto plane, and the border states render from the per-box
+    fields via refresh_box_inpaint_states (no current-page desync — the 02-04
+    Bug-D family lesson)."""
+    window = _make_window(qtbot, tmp_path)
+    _load_two_pages(window, tmp_path)
+    assert window._current_page_index() == 0, "precondition: page_a is current"
+    assert window.canvas.has_boxes() is False, "precondition: no boxes yet"
+
+    def _fake_batch_detect(pages, det_model_path, det_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        import numpy as np
+
+        from manga_ai_studio.core.batch_runner import _run_batch_task
+
+        class _FakeDetector:
+            def load(self, *a, **k):
+                pass
+
+            def detect(self, image_bgr):  # noqa: ARG002
+                h, w = image_bgr.shape[:2]
+                mask = np.zeros((h, w), dtype=np.uint8)
+                mask[2:6, 2:6] = 255  # in-box content (full-page box)
+                return mask, [SimpleNamespace(xyxy=[0, 0, w, h])]
+
+        # The REAL constrained detect path (D-04) — persists page.boxes +
+        # auto_mask exactly like production.
+        return _run_batch_task(
+            pages,
+            mode="detect",
+            det_model=_FakeDetector(),
+            inp_model=None,
+            cleaned_dir=cleaned_dir,
+            masker_conf=masker_conf,
+            progress_callback=progress_callback,
+            abort_flag=abort_flag,
+        )
+
+    monkeypatch.setattr(batch_runner, "batch_detect", _fake_batch_detect)
+
+    window.batch_detect()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+
+    # The loop persisted the current page's boxes + packed auto plane.
+    imf = window.image_files[0]
+    assert imf.boxes is not None and len(imf.boxes) == 1
+    assert imf.boxes[0].origin == DETECTED
+    assert imf.boxes[0].mask is not None  # fit data survived the worker
+    assert imf.auto_mask is not None
+
+    # The refresh restored the boxes onto the canvas (same PageBox instances).
+    assert len(window.canvas._box_items) == 1
+    restored_item = window.canvas._box_items[0]
+    assert restored_item.pagebox is imf.boxes[0]
+    # The restore ran under the suppression guard: no BOXES history push.
+    assert window._suppress_boxes_push is False  # guard restored
+    assert window.history.can_undo_boxes() is False
+
+    # The composite mask equals the persisted auto plane (unpacked at the
+    # page dims — the D-04 content contract restored to the canvas).
+    canvas_binary = mask_to_numpy_binary(window.canvas.get_mask())
+    auto = unpack_binary(imf.auto_mask, 16, 16)
+    assert np.array_equal(canvas_binary, auto)
+
+    # Border states render from the per-box fields (refresh_box_inpaint_states).
+    threshold = (
+        window.profile_manager.config.current_profile.masker
+        .mask_max_standard_deviation
+    )
+    expected_state = restored_item.pagebox.inpaint_state(threshold)
+    assert expected_state == "will_inpaint"  # std 0 <= gate, content present
+    assert restored_item._inpaint_state == expected_state
+
+    # Manual/erase planes are empty for batch pages (no strokes) — the auto
+    # plane alone drives the composite.
+    assert imf.mask_manual is None and imf.mask_erase is None
+
+
+@pytest.mark.gui
+def test_batch_clean_refresh_branch_unchanged(qtbot, tmp_path) -> None:
+    """The clean-mode refresh branch is UNCHANGED by the Phase 8 extension:
+    it still reloads the cleaned output + clears the consumed mask overlay."""
+    window = _make_window(qtbot, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+
+    # A distinct cleaned fill so the refreshed canvas is distinguishable from
+    # the original solid-white page.
+    cleaned_dir = page_a.parent / "cleaned"
+    cleaned_dir.mkdir(exist_ok=True)
+    arr = np.full((16, 16, 3), 123, dtype=np.uint8)
+    Image.fromarray(arr, mode="RGB").save(cleaned_dir / page_a.name)
+    _paint_mask_on_canvas(window.canvas)
+    assert window.canvas.has_mask() is True, "precondition: mask overlay present"
+
+    window._refresh_current_page_after_batch("clean")
+
+    # Reloaded the cleaned page (mean ~123, not the original 255)…
+    after = window.canvas.get_image_numpy()
+    assert after is not None
+    assert abs(float(after.mean()) - 123) < 2
+    # …and cleared the consumed mask overlay.
+    assert window.canvas.has_mask_content() is False
