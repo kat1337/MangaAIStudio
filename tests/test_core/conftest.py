@@ -14,6 +14,7 @@ adapters and adds hooks for the per-page-failure and abort-between-pages tests.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -70,7 +71,14 @@ class FakeDetectionModel:
                 self._flag.set(True)
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
         mask[1:3, 1:3] = 255  # a small detected region -> has_mask_content True
-        return mask, []
+        # D-04 (plan 08-09): the detect loop NO LONGER discards the blk_list —
+        # it builds boxes via build_detected_pageboxes and constrains the mask
+        # to box interiors. Return a full-page detected box so the derived
+        # mask keeps content (an empty blk_list would derive an empty mask and
+        # the D-03 gate would passthrough every page, gutting the pre-Phase-8
+        # batch behavior these contracts lock).
+        h, w = image.shape[:2]
+        return mask, [SimpleNamespace(xyxy=[0, 0, w, h])]
 
 
 class FakeInpaintModel:
