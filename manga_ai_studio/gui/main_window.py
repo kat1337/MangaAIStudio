@@ -6070,10 +6070,15 @@ class MainWindow(QMainWindow):
             batch_detect_and_clean,
         )
 
+        # D-04 (plan 08-09): thread the profile's live MaskerConfig into the
+        # detect-mode worker args — the batch loop derives the box-constrained
+        # mask from it (mask_dilation_radius + every masker fit param).
+        masker_conf = self.profile_manager.config.current_profile.masker
+
         if mode == "detect":
             task_fn = batch_detect
             det_path = self._resolve_detection_model_path()
-            args = (list(self.image_files), det_path, det_backend, cleaned_dir)
+            args = (list(self.image_files), det_path, det_backend, cleaned_dir, masker_conf)
         elif mode == "clean":
             task_fn = batch_clean
             inp_path = self._resolve_inpainting_model_path()
@@ -6089,6 +6094,7 @@ class MainWindow(QMainWindow):
                 det_backend,
                 inp_backend,
                 cleaned_dir,
+                masker_conf,
             )
         else:  # pragma: no cover - defensive; the three handlers are the only callers
             raise ValueError(f"unknown batch mode: {mode}")
@@ -6295,11 +6301,17 @@ class MainWindow(QMainWindow):
           now-cleaned page.
         * **Detect-only batch** (``batch_mode`` is ``"detect"``): there is no
           cleaned output to load, so do NOT clear the canvas. Instead RESTORE
-          the current page's just-detected ``ImageFile.mask`` onto the canvas
-          (mirroring the D-11 seam step 4 at ``on_page_selected``), so the user
-          sees the detected mask and the data model + canvas stay in sync. If
-          the page has no detected mask (``ImageFile.mask`` is None/empty),
-          clear the canvas overlay (the page had no detected text).
+          the current page's just-detected state onto the canvas, so the user
+          sees the results and the data model + canvas stay in sync. Phase 8
+          (plan 08-09, D-04) extends the restore: the detected mask (mirroring
+          the D-11 seam step 4), the persisted boxes (``set_boxes`` split by
+          origin under the ``_suppress_boxes_push`` guard — batch is headless,
+          no D-04 replace gate per RESEARCH §5 item 5), the packed auto plane
+          (``set_planes`` with explicit-empty manual/erase — batch pages carry
+          no strokes), and the per-box border states via
+          ``refresh_box_inpaint_states``. If the page has no detected mask
+          (``ImageFile.mask`` is None/empty), clear the canvas overlay (the
+          page had no detected text).
 
         The mode distinction is load-bearing for Bug D1: the previous
         unconditional clear left the canvas desynced from the correctly-written
@@ -6346,6 +6358,50 @@ class MainWindow(QMainWindow):
                 if canvas_mask is not None and not canvas_mask.isNull():
                     canvas_mask.fill(Qt.GlobalColor.transparent)
                     self.canvas.update_mask_display()
+
+            # D-04 (plan 08-09): Phase 8 detect runs ALSO persist reviewable
+            # per-page boxes + the packed auto plane. Restore them onto the
+            # current page's canvas or the data model + canvas desync (the
+            # 02-04 Bug-D family lesson — RESEARCH §5 item 5). Batch is
+            # headless, so the 03-04 D-04 replace gate does NOT apply here:
+            # replacing the page's boxes with the batch's detected boxes IS
+            # the point of a batch detect.
+            imf = (
+                self.image_files[idx]
+                if idx is not None and 0 <= idx < len(self.image_files)
+                else None
+            )
+            if imf is not None:
+                # Step 4b discipline: split by origin and rebuild the layer
+                # under the _suppress_boxes_push guard (WR-05 — a pure restore
+                # must not push a BOXES history entry).
+                user_pbs = [pb for pb in (imf.boxes or []) if pb.origin == USER]
+                detected_pbs = [pb for pb in (imf.boxes or []) if pb.origin == DETECTED]
+                self._suppress_boxes_push = True
+                try:
+                    self.canvas.set_boxes(user_pbs, detected_pbs)
+                finally:
+                    self._suppress_boxes_push = False
+                # Restore the auto plane from the packed slot at the canvas
+                # dims (mirrors the on_page_selected Step 4 plane restore).
+                # Batch pages have no hand strokes: manual/erase are passed as
+                # EXPLICIT EMPTY planes (not None) for the API that
+                # distinguishes empty-from-absent, so the composite stays the
+                # auto plane alone. A legacy page without plane data keeps the
+                # flat-mask restore above.
+                if imf.auto_mask is not None:
+                    page_mask = self.canvas.get_mask()
+                    h, w = page_mask.height(), page_mask.width()
+                    empty_bin = np.zeros((h, w), dtype=np.uint8)
+                    auto_bin = unpack_binary(imf.auto_mask, h, w)
+                    self.canvas.set_planes(
+                        numpy_binary_to_mask_qimage(empty_bin),
+                        numpy_binary_to_mask_qimage(empty_bin),
+                        auto_bin,
+                    )
+                # Border states render from the per-box fields (the SINGLE
+                # derivation site — refresh_box_inpaint_states).
+                self.refresh_box_inpaint_states()
             return
 
         # --- Bug C: clean-containing branch — reload + clear consumed mask. --
