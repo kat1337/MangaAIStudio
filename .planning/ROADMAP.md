@@ -376,7 +376,7 @@ Plans:
 - [x] 08-06-PLAN.md
 - [x] 08-07-PLAN.md
 - [x] 08-08-PLAN.md
-- [ ] 08-09-PLAN.md
+- [x] 08-09-PLAN.md
 
 **UI hint**: yes
 
