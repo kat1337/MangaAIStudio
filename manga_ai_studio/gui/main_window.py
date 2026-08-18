@@ -3185,6 +3185,10 @@ class MainWindow(QMainWindow):
             on_style_color=self._on_inspector_style_color_committed,
             on_style_align=self._on_inspector_style_align_committed,
             on_style_effect=self._on_inspector_style_effect_committed,
+            # Plan 08-08 (D-13/D-14): the Inpaint override combo's grouped
+            # commit (UI-SPEC §38 — ONE snapshot, recompose, border refresh,
+            # status flash).
+            on_inpaint_override=self._on_inspector_inpaint_committed,
         )
         # G-07-3 (plan 07-11): the Set-as-Default affordance -> the
         # 'defaultFontFamily' writer (the QSettings persistence chain).
@@ -3669,6 +3673,78 @@ class MainWindow(QMainWindow):
             lambda item: self._replace_effect(item.pagebox, key, changes)
         )
 
+    # ------------------------------------------------- plan 08-08 inpaint override
+    # The Inspector "Inpaint" combo commit (D-13/D-14 — UI-SPEC §38). Mirrors
+    # `_inspector_style_commit`: captures ONE before-snapshot (the
+    # boxes_snapshot — which carries per-box mask/std_dev/inpaint_override
+    # per 08-07), maps the display text to the model tri-state, sets
+    # `inpaint_override` on EVERY selected pagebox, records the op name
+    # "inpaint override" (D-09 consumes it for the Ctrl+Z flash), emits
+    # `boxes_modified` ONCE, then recomposes the auto plane (Never content
+    # leaves the mask; Always content joins it), refreshes every border, and
+    # flashes the transient status. One Ctrl+Z reverses BOTH the overrides and
+    # the recomposed mask (the BOXES apply path recomposes — see
+    # `apply_undo_boxes`). Never mutates a PageBox outside the commit handler
+    # (the pure-follower rule, 04-04).
+    _INPAINT_OVERRIDE_TO_MODEL = {"Auto": None, "Always": "always", "Never": "never"}
+
+    def _on_inspector_inpaint_committed(self, value: str) -> None:
+        selected = self._selected_box_items()
+        if not selected:
+            return
+        mapped = self._INPAINT_OVERRIDE_TO_MODEL.get(value)
+        if value not in self._INPAINT_OVERRIDE_TO_MODEL:
+            return  # defensive — only the three real display values commit
+        before = self.canvas.boxes_snapshot()
+        self._boxes_interaction_start_snapshot = before
+        for item in selected:
+            item.pagebox.inpaint_override = mapped
+        self.canvas.set_pending_boxes_op_name("inpaint override")
+        self.canvas.boxes_modified.emit(before)
+        # Live effects (D-12): pure recompose from the stored fits + every
+        # border re-derives; the dirty mark rides boxes_modified.
+        self._recompose_boxes_auto_plane()
+        self._show_transient_status(
+            f"Inpaint: {value} \u2014 {len(selected)} box(es)."
+        )
+        self._on_canvas_selection_changed()
+
+    def _recompose_boxes_auto_plane(self) -> None:
+        """Recompose the auto plane from the CURRENT boxes + refresh borders.
+
+        Plan 08-08 (D-12): the pure-recomposition half shared by the override
+        commit and the BOXES undo restore — ``compose_auto_binary`` from the
+        STORED per-box fits (never re-fits, never a model call), only in the
+        boxed mode with a current page + boxes. Border states re-derive
+        through ``refresh_box_inpaint_states`` (the SINGLE-derivation site).
+        This is the mask-follows-overrides path of the §37 trigger set.
+
+        Guard: at least one box must carry a fit (``mask`` not None) — a page
+        whose boxes were all invalidated by a geometry op (08-01 policy) has
+        NO derivable composition, so any auto content present came from the
+        geometry-transformed planes and must NOT be clobbered by an empty
+        boxes-based recomposition.
+        """
+        if not self.action_detect_boxes_mode.isChecked():
+            return
+        current_boxes = [it.pagebox for it in self.canvas._box_items]
+        if not current_boxes:
+            return
+        if not any(pb.mask is not None for pb in current_boxes):
+            return  # no fit data to derive from (post-geometry invalidation)
+        image_np = self.canvas.get_image_numpy()
+        if image_np is None:
+            return
+        threshold = (
+            self.profile_manager.config.current_profile.masker
+            .mask_max_standard_deviation
+        )
+        page_size = (int(image_np.shape[1]), int(image_np.shape[0]))
+        auto = compose_auto_binary(current_boxes, float(threshold), page_size)
+        self.canvas.set_auto_binary(auto)
+        self.refresh_box_inpaint_states()
+
+
     def _on_inspector_default_font_requested(self, family: str) -> None:
         """G-07-3: persist the Set-as-Default family + flash the status.
 
@@ -3999,14 +4075,27 @@ class MainWindow(QMainWindow):
                 self.canvas.apply_undo_mask(value)
             elif kind == "boxes":
                 # value is a list of PageBox (or None).
-                self.apply_undo_boxes(value)
+                # Plan 08-08 (D-12): a BOXES-only restore recomposes the auto
+                # plane from the restored overrides — but a geometry record
+                # (which also restores the mask via apply_undo_mask above) must
+                # NOT be overwritten by a boxes-derived recomposition (the
+                # exact pre-op composite is authoritative there).
+                self.apply_undo_boxes(value, recompose=("mask" not in entries))
 
-    def apply_undo_boxes(self, boxes_snapshot_list) -> None:
+    def apply_undo_boxes(
+        self, boxes_snapshot_list, *, recompose: bool = True
+    ) -> None:
         """Restore a boxes snapshot from the history (Surface 13 BOXES apply).
 
         Mirrors ``apply_undo_mask`` / ``apply_undo_image``: rebuilds the box
         layer from the snapshot via ``set_boxes``, splitting by origin (the
         snapshot preserved origin per item — plan 03-03's boxes_snapshot).
+
+        ``recompose`` (plan 08-08, D-12): a BOXES restore changes the box
+        layer's override state, so the mask layer must follow — the caller
+        passes ``recompose=False`` for a geometry record (which also restored
+        the full pre-op mask composite via ``apply_undo_mask``; that composite
+        is authoritative and must not be overwritten).
 
         WR-05 guard: ``set_boxes`` always emits ``boxes_modified`` (for the
         canvas-internal refresh). Because the BOXES push hook is now wired to
@@ -4023,12 +4112,20 @@ class MainWindow(QMainWindow):
             if not boxes_snapshot_list:
                 # Empty snapshot = restore the empty-boxes state (clear layer).
                 self.canvas.set_boxes([], [])
-                return
-            user_pbs = [pb for pb in boxes_snapshot_list if pb.origin == USER]
-            detected_pbs = [pb for pb in boxes_snapshot_list if pb.origin == DETECTED]
-            self.canvas.set_boxes(user_pbs, detected_pbs)
+            else:
+                user_pbs = [pb for pb in boxes_snapshot_list if pb.origin == USER]
+                detected_pbs = [pb for pb in boxes_snapshot_list if pb.origin == DETECTED]
+                self.canvas.set_boxes(user_pbs, detected_pbs)
         finally:
             self._suppress_boxes_push = False
+        if recompose:
+            # Plan 08-08 (D-12): the mask layer must follow the restored
+            # overrides (a BOXES undo restores the PageBox objects incl.
+            # per-box mask/std_dev/inpaint_override). Pure recompose + border
+            # refresh — one Ctrl+Z restores both the overrides AND the
+            # recomposed composite (the 08-07 seam discipline: every path that
+            # changes overrides recomposes).
+            self._recompose_boxes_auto_plane()
 
     def _show_transient_status(self, message: str) -> None:
         """Show ``message`` in status_bar_left for ~3 s, then revert to the
