@@ -101,6 +101,7 @@ from manga_ai_studio.core.text_style import TextStyle
 _INSPECTOR_QSS = """
 QLabel { color: #e8e8ea; }
 QLabel#styleHeaderLabel { color: #9a9aa2; font-size: 12px; font-weight: 600; }
+QLabel#stdDevLabel { color: #9a9aa2; }
 QTextEdit {
     background: #2d2d33;
     border: 1px solid #3a3a42;
@@ -180,6 +181,13 @@ _TRANSLATION_PLACEHOLDER = "No translation — type one, or use Load Translation
 # (UI-SPEC §18). Module constants keep the hex in one place.
 _ORIGIN_HUE_HEX = {DETECTED: "#5fd068", USER: "#f5a623"}
 _ORIGIN_LABEL = {DETECTED: "Detected", USER: "User"}
+
+# Inpaint override display strings <-> PageBox.inpaint_override model values
+# (UI-SPEC §38: the combo shows Auto/Always/Never; the model stores
+# None/"always"/"never" — RESEARCH Q3's tri-state encoding).
+_INPAINT_DISPLAY = {None: "Auto", "always": "Always", "never": "Never"}
+# The Inpaint combo's canonical entry order (Auto default first).
+_INPAINT_ITEMS = ["Auto", "Always", "Never"]
 
 # Align display strings <-> TextStyle model values (UI-SPEC §33: the combos
 # show Left/Center/Right and Top/Middle/Bottom; the model stores lowercase).
@@ -297,6 +305,10 @@ class InspectorPanel(QWidget):
     # G-07-3 (plan 07-11): the Set-as-Default affordance's family emission —
     # MainWindow persists it under QSettings 'defaultFontFamily'.
     default_font_requested = Signal(str)
+    # Plan 08-08 (D-13/D-14, UI-SPEC §38): the Inpaint override combo's commit
+    # signal — carries the display text "Auto"/"Always"/"Never" (the "Mixed"
+    # sentinel NEVER leaves the widget layer, Pitfall 7).
+    inpaint_override_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -339,6 +351,32 @@ class InspectorPanel(QWidget):
         # Origin — read-only, hue-coloured on load_box.
         self.origin_label = QLabel("\u2014")  # em dash placeholder
         form.addRow("Origin", self.origin_label)
+
+        # Inpaint override + Std dev (plan 08-08, D-13/D-14 — UI-SPEC §38):
+        # the Auto/Always/Never tri-state combo + its read-only companion row,
+        # placed after Origin (decision metadata before the content fields).
+        # The combo is the Phase 7 font-combo precedent: a non-editable
+        # "Mixed" sentinel entry is added/removed dynamically for a
+        # multi-selection whose values differ, is NEVER committed (Pitfall 7 —
+        # the sentinel never leaves the widget layer), and the row stays
+        # ENABLED in multi-select (A5 — an edit-all flag, unlike the per-box
+        # content fields). Std dev is read-only always (per-box data, not
+        # editable-all).
+        self.inpaint_combo = QComboBox()
+        self.inpaint_combo.setToolTip(
+            "Whether Inpaint (C) cleans this box's detected text: Auto uses "
+            "the std-dev gate (solid border = will clean, dashed = skipped), "
+            "Always forces it, Never skips it."
+        )
+        form.addRow("Inpaint", self.inpaint_combo)
+
+        self.std_dev_label = QLabel("\u2014")  # em dash placeholder (muted)
+        self.std_dev_label.setObjectName("stdDevLabel")
+        self.std_dev_label.setToolTip(
+            "Color variation along this box's detected mask edge. Skipped when "
+            "above the Std-dev threshold (Tools dock \u2192 Detection settings)."
+        )
+        form.addRow("Std dev", self.std_dev_label)
 
         # Recognized + Translation — multi-line commit-on-focus-loss text edits.
         self.recognized_edit = _CommitTextEdit()
@@ -534,6 +572,9 @@ class InspectorPanel(QWidget):
             "outline": False, "glow": False, "shadow": False,
         }
         self._loaded_vertical = False
+        # Plan 08-08: the Inpaint combo's loaded-commit guard (WR-01 — a
+        # currentIndexChanged whose value equals the loaded value is a no-op).
+        self._loaded_inpaint = ""
         # Wired style callbacks (for the direct test hooks — the real commit
         # paths are the widget signals wired in connect_commit_handlers).
         self._cb_style_color = None
@@ -572,6 +613,16 @@ class InspectorPanel(QWidget):
         text = _ORIGIN_LABEL.get(origin, origin.capitalize())
         self.origin_label.setText(text)
         self.origin_label.setStyleSheet(f"color: {hue}; font-weight: 600;")
+
+        # Inpaint override (plan 08-08) — the box's tri-state mapping
+        # (None -> "Auto", "always" -> "Always", "never" -> "Never") with
+        # blockSignals, then the WR-01 loaded-memory guard; Std dev shows the
+        # box's computed value or the em dash (read-only).
+        self._set_inpaint_combo(
+            _INPAINT_DISPLAY.get(pagebox.inpaint_override, "Auto"), mixed=False
+        )
+        self._loaded_inpaint = self.inpaint_combo.currentText()
+        self._set_std_dev_text(pagebox.std_dev)
 
         # Recognized text (str/list aware — TextBlock.text may be a list).
         recognized = ""
@@ -784,6 +835,21 @@ class InspectorPanel(QWidget):
             self._loaded_vertical = None
         self.vertical_check.blockSignals(was)
 
+        # Inpaint override (plan 08-08, A5 — the row stays ENABLED in
+        # multi-select as an edit-all flag): common value -> that value;
+        # differing values -> the non-editable "Mixed" sentinel entry (added
+        # dynamically, never committed — Pitfall 7). Std dev is per-box data
+        # (not editable-all) -> always the em dash.
+        overrides = {
+            _INPAINT_DISPLAY.get(pb.inpaint_override, "Auto") for pb in pageboxes
+        }
+        if len(overrides) == 1:
+            self._set_inpaint_combo(next(iter(overrides)), mixed=False)
+        else:
+            self._set_inpaint_combo("Mixed", mixed=True)
+        self._loaded_inpaint = self.inpaint_combo.currentText()
+        self._set_std_dev_text(None)
+
         self._apply_auto_fit_spin_state()
         for key in self._effect_checks:
             self._apply_effect_row_state(key)
@@ -947,6 +1013,29 @@ class InspectorPanel(QWidget):
         combo.setCurrentIndex(idx)
         combo.blockSignals(was)
 
+    def _set_inpaint_combo(self, select: str, mixed: bool) -> None:
+        """Set the Inpaint combo's entries + selection (signals blocked).
+
+        Plan 08-08 (D-13/D-14): the Phase 7 font-combo pattern — the entry set
+        is exactly Auto/Always/Never, with the non-editable "Mixed" sentinel
+        entry ADDED dynamically (prepended) when ``mixed`` is True and REMOVED
+        otherwise. The sentinel NEVER leaves the widget layer (Pitfall 7 — the
+        commit guard in :meth:`_emit_inpaint_if_changed` drops it).
+        """
+        items = ["Mixed"] + _INPAINT_ITEMS if mixed else list(_INPAINT_ITEMS)
+        self._select_combo(self.inpaint_combo, items, select)
+
+    def _set_std_dev_text(self, std_dev) -> None:
+        """The read-only Std dev label: ``f"{value:.1f}"`` or the em dash.
+
+        The muted ``#9a9aa2`` style comes from ``QLabel#stdDevLabel`` in the
+        panel QSS (applied at construction).
+        """
+        if std_dev is None:
+            self.std_dev_label.setText("\u2014")
+        else:
+            self.std_dev_label.setText(f"{float(std_dev):.1f}")
+
     def _set_swatch_color(self, swatch: _ColorSwatchButton, color) -> None:
         """Set a swatch's color (``None`` = the D-10 split/Mixed fill)."""
         swatch.color = color
@@ -1020,6 +1109,11 @@ class InspectorPanel(QWidget):
         self.origin_label.setText("\u2014")
         self.origin_label.setStyleSheet("")
         self.language_label.setText("\u2014")
+        # Plan 08-08: the Inpaint combo resets to Auto (no Mixed sentinel) and
+        # Std dev to the em dash; the WR-01 guard follows the display.
+        self._set_inpaint_combo("Auto", mixed=False)
+        self._loaded_inpaint = self.inpaint_combo.currentText()
+        self._set_std_dev_text(None)
         was_v = self.vertical_check.blockSignals(True)
         self.vertical_check.setTristate(False)
         self.vertical_check.setChecked(False)
@@ -1041,6 +1135,8 @@ class InspectorPanel(QWidget):
             self.color_swatch,
             self.align_combo,
             self.align_v_combo,
+            self.inpaint_combo,
+            self.std_dev_label,
             *self._effect_checks.values(),
             *self._effect_swatches.values(),
             *self._effect_spins.values(),
@@ -1077,6 +1173,7 @@ class InspectorPanel(QWidget):
         on_style_color=None,
         on_style_align=None,
         on_style_effect=None,
+        on_inpaint_override=None,
     ) -> None:
         """Wire each field's commit signal to the MainWindow-supplied callbacks.
 
@@ -1145,6 +1242,12 @@ class InspectorPanel(QWidget):
                 self._effect_spins[key].editingFinished.connect(
                     lambda k=key: self._commit_effect_value(k, on_style_effect)
                 )
+        # Plan 08-08 (D-13/D-14): the Inpaint override combo commit (WR-01
+        # gated — an unchanged focus cycle is a no-op; "Mixed" never commits).
+        if on_inpaint_override is not None:
+            self.inpaint_combo.currentIndexChanged.connect(
+                lambda _i: self._emit_inpaint_if_changed(on_inpaint_override)
+            )
 
     # -------------------------------------------------- no-op commit guards
     # WR-01: a focus-out / editingFinished commit whose field value equals the
@@ -1162,6 +1265,22 @@ class InspectorPanel(QWidget):
         text = self.translation_edit.toPlainText()
         if text != self._loaded_translation:
             on_translation(text)
+
+    def _emit_inpaint_if_changed(self, on_inpaint_override) -> None:
+        """Forward the Inpaint combo's value only on a REAL user change.
+
+        WR-01: an unchanged commit (text == the loaded-memory guard) is a
+        no-op. The "Mixed" sentinel — selectable in the widget (the A5 edit-all
+        affordance keeps the real options pickable) — NEVER leaves the widget
+        layer (Pitfall 7): committing it would push a before==after BOXES undo
+        entry. Only "Auto"/"Always"/"Never" carry a real override.
+        """
+        text = self.inpaint_combo.currentText()
+        if text == self._loaded_inpaint:
+            return  # WR-01: an unchanged focus cycle is a no-op
+        if text == "Mixed":
+            return  # the sentinel never leaves the widget layer (Pitfall 7)
+        on_inpaint_override(text)
 
     def _emit_bubble_if_changed(self, on_bubble) -> None:
         """Forward the bubble-spin commit only if the value changed since load_box.
