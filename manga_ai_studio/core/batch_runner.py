@@ -47,6 +47,15 @@ adapters + the plain dataclass attribute ``ImageFile.mask``. No Qt widgets are
 imported (the QImage round-trip for the detected mask goes through the
 ``mask_editor`` numpy<->QImage helpers, not direct Qt construction); this keeps
 the task fn safe to run off the GUI thread on the Phase 1 worker thread.
+
+Phase 8 (plan 08-09, D-04): the detect branch adds the box-constrained
+derivation (``build_detected_pageboxes`` + ``derive_page_mask_state``, the
+08-03 seam core) INSIDE the worker loop. That computation is PIL/numpy only
+(detection_boxes.py is headless by construction and hermetic-tested); the
+single off-thread QImage construction (``numpy_binary_to_mask_qimage``) remains
+the existing precedented site at :156. The new per-page state
+(``ImageFile.boxes``, the packed ``raw_detected_mask`` / ``auto_mask`` slots)
+is numpy/PIL/Python dataclasses — no Qt crosses the worker boundary.
 """
 
 from __future__ import annotations
@@ -57,12 +66,17 @@ from loguru import logger
 from pathlib import Path
 
 from manga_ai_studio.adapters.factory import backend_factory
+from manga_ai_studio.core.detection_boxes import (
+    build_detected_pageboxes,
+    derive_page_mask_state,
+)
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.image_io import passthrough_original, save_image_optimized
 from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
 )
+from manga_ai_studio.core.mask_planes import pack_binary
 from manga_ai_studio.gui.worker_thread import Abort
 
 
@@ -92,6 +106,7 @@ def _run_batch_task(
     det_model,
     inp_model,
     cleaned_dir: Path,
+    masker_conf=None,
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
@@ -106,6 +121,13 @@ def _run_batch_task(
     ``det_model`` / ``inp_model`` are ALREADY-LOADED adapter instances (Pitfall
     3): the entry-point wrappers call ``.load()`` exactly once each before this
     fn runs. Pass ``None`` for a model a mode does not use.
+
+    Phase 8 (plan 08-09, D-04): ``masker_conf`` is the active vendored
+    ``MaskerConfig`` required by the detect modes — the detect branch builds
+    per-page boxes from the SAME detect pass and derives the box-constrained
+    mask from it (``mask_dilation_radius`` comes from the conf). ``None`` in a
+    detect mode is a programming error and raises ``TypeError`` (the clean
+    mode never uses it).
 
     ``progress_callback`` / ``abort_flag`` are auto-injected by ``Worker`` when
     the entry point is handed to ``Worker(fn, ...abort_signal=...)`` (see
@@ -147,13 +169,43 @@ def _run_batch_task(
         # is logged and recorded in the summary, then the loop continues.
         try:
             if mode in ("detect", "detect_and_clean"):
+                if masker_conf is None:
+                    raise TypeError(
+                        "masker_conf is required for detect modes (plan 08-09, D-04)"
+                    )
                 image = _read_image_bgr(page.path)
-                mask_refined, _blk_list = det_model.detect(image)
-                # Persist the detected mask onto the page's D-11 slot via the
-                # numpy->QImage serializer. The trailing .copy() is belt-and-
-                # suspenders detachment (Pitfall 2; numpy_binary_to_mask_qimage
-                # already .copy()s internally).
-                page.mask = numpy_binary_to_mask_qimage(mask_refined).copy()
+                mask_refined, blk_list = det_model.detect(image)
+                # D-04 (Phase 8): box-constrained detect — build the per-page
+                # boxes from the SAME detect pass and derive the constrained
+                # mask via the 08-03 seam core (build_detected_pageboxes +
+                # derive_page_mask_state — the exact interactive-path core,
+                # PIL/numpy only, thread-safe). Dims come from the decoded
+                # image (no canvas exists in the worker); the radius is read
+                # from the threaded masker_conf (MASK-01).
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                img_h, img_w = image.shape[0], image.shape[1]
+                boxes = build_detected_pageboxes(blk_list, img_w, img_h)
+                derivation = derive_page_mask_state(
+                    image_rgb,
+                    mask_refined,
+                    boxes,
+                    masker_conf,
+                    int(masker_conf.mask_dilation_radius),
+                )
+                # Persist per-page state (D-04): reviewable boxes + fits, the
+                # packed raw (pre-dilation) + auto binaries, and the composite
+                # QImage (the existing precedented off-thread construction).
+                # A page with zero boxes derives an EMPTY auto binary — the
+                # same persistence shape, so the clean-stage D-03 passthrough
+                # extends naturally. manual/erase stay None (batch pages have
+                # no hand strokes).
+                page.boxes = boxes
+                page.raw_detected_mask = pack_binary(derivation.raw_binary)
+                page.auto_mask = pack_binary(derivation.auto_binary)
+                # The trailing .copy() is belt-and-suspenders detachment
+                # (Pitfall 2; numpy_binary_to_mask_qimage already .copy()s
+                # internally).
+                page.mask = numpy_binary_to_mask_qimage(derivation.auto_binary).copy()
 
             if mode in ("clean", "detect_and_clean"):
                 # D-03 GATE: a page whose mask is empty (detection found no
@@ -193,6 +245,7 @@ def batch_detect(
     det_model_path: Path,
     det_backend: str,
     cleaned_dir: Path,
+    masker_conf,
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
@@ -203,6 +256,12 @@ def batch_detect(
     masks are persisted onto each page's ``ImageFile.mask`` slot (D-11) for the
     subsequent review + ``batch_clean`` stage. No inpainting and no file output
     (the ``cleaned_dir`` name guard still runs but nothing is written).
+
+    Phase 8 (plan 08-09, D-04): ``masker_conf`` is the active vendored
+    ``MaskerConfig`` (supplied by ``MainWindow._dispatch_batch`` from the
+    profile) — the detect branch also persists per-page boxes + the packed
+    raw/auto plane slots so batch-detect-only runs are reviewable in the
+    editor. The mask_dilation_radius and every masker fit param come from it.
 
     ``det_model_path`` / ``det_backend`` are supplied by ``MainWindow`` via
     ``_resolve_detection_model_path`` + ``_detection_backend()`` (plan 04); the
@@ -217,6 +276,7 @@ def batch_detect(
         det_model=det_model,
         inp_model=None,
         cleaned_dir=cleaned_dir,
+        masker_conf=masker_conf,
         progress_callback=progress_callback,
         abort_flag=abort_flag,
     )
@@ -260,6 +320,7 @@ def batch_detect_and_clean(
     det_backend: str,
     inp_backend: str,
     cleaned_dir: Path,
+    masker_conf,
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
@@ -268,8 +329,17 @@ def batch_detect_and_clean(
     The convenience one-shot: detection writes each mask onto the page's
     ``ImageFile.mask`` slot and the clean stage consumes it in the same loop
     iteration. Both adapters are resolved + loaded ONCE (Pitfall 3) before the
-    loop. The same D-03 empty-mask gate applies (a page that detects no text is
-    copied through unchanged rather than inpainted).
+    loop. The same D-03 empty-mask gate applies (a page that detects no text —
+    or whose boxes all fail the Phase 8 std-dev gate — is copied through
+    unchanged rather than inpainted).
+
+    Phase 8 (plan 08-09, D-04): the detect stage persists per-page boxes +
+    the packed raw/auto plane slots and the composite ``ImageFile.mask`` is the
+    BOX-CONSTRAINED derivation (D-02: detected content outside boxes never
+    reaches the saved mask). The clean stage is UNCHANGED — it reads
+    ``mask_to_numpy_binary(page.mask)``, which is now the constrained
+    composite, so the LaMa call is untouched. ``masker_conf`` is supplied by
+    ``MainWindow._dispatch_batch`` from the profile.
     """
     det_model = backend_factory("detection", det_backend)
     det_model.load(det_model_path, device="auto")
@@ -281,6 +351,7 @@ def batch_detect_and_clean(
         det_model=det_model,
         inp_model=inp_model,
         cleaned_dir=cleaned_dir,
+        masker_conf=masker_conf,
         progress_callback=progress_callback,
         abort_flag=abort_flag,
     )
