@@ -1,329 +1,234 @@
 ---
 phase: 08-masker-selective-inpaint
-reviewed: 2026-08-18T00:00:00Z
+reviewed: 2026-08-18T13:40:00Z
 depth: standard
-files_reviewed: 31
+files_reviewed: 7
 files_reviewed_list:
-  - manga_ai_studio/__main__.py
-  - manga_ai_studio/config/profile_manager.py
-  - manga_ai_studio/core/batch_runner.py
-  - manga_ai_studio/core/box_model.py
-  - manga_ai_studio/core/detection_boxes.py
-  - manga_ai_studio/core/history_manager.py
-  - manga_ai_studio/core/image_file.py
-  - manga_ai_studio/core/image_ops.py
-  - manga_ai_studio/core/mask_planes.py
-  - manga_ai_studio/core/project_io.py
-  - manga_ai_studio/gui/box_item.py
-  - manga_ai_studio/gui/canvas.py
-  - manga_ai_studio/gui/inspector_panel.py
   - manga_ai_studio/gui/main_window.py
-  - manga_ai_studio/gui/tools_panel.py
-  - panelcleaner/config.py
-  - tests/test_box_persistence.py
-  - tests/test_core/conftest.py
-  - tests/test_core/test_batch_runner.py
-  - tests/test_core/test_box_model.py
+  - manga_ai_studio/gui/canvas.py
+  - manga_ai_studio/core/detection_boxes.py
+  - manga_ai_studio/core/batch_runner.py
+  - tests/test_gui_gap_closure.py
   - tests/test_core/test_detection_boxes.py
-  - tests/test_core/test_image_ops.py
-  - tests/test_core/test_masker_config_roundtrip.py
-  - tests/test_core/test_masker_machinery.py
-  - tests/test_core/test_project_io.py
-  - tests/test_gui_batch.py
-  - tests/test_gui_border_states.py
-  - tests/test_gui_detection_boxes.py
-  - tests/test_gui_detection_settings.py
-  - tests/test_gui_inspector_override.py
-  - tests/test_gui_mask_planes.py
+  - tests/test_core/test_batch_runner.py
 findings:
-  critical: 4
-  warning: 5
-  info: 4
-  total: 13
+  critical: 0
+  warning: 2
+  info: 2
+  total: 4
 status: issues_found
 ---
 
-# Phase 8: Code Review Report
+# Phase 8: Code Review Report — gap-closure (plan 08-10)
 
 **Reviewed:** 2026-08-18
 **Depth:** standard
-**Files Reviewed:** 31
+**Files Reviewed:** 7
 **Status:** issues_found
 
 ## Summary
 
-Phase 8 introduces a three-plane mask model, std-dev-gated selective inpaint,
-per-box override tri-state, live detection settings, and batch adoption. The
-headless core (`detection_boxes.py`, `mask_planes.py`, `project_io.py`,
-`image_ops.py`, `box_model.py`, `history_manager.py`) is well-guarded: V5 input
-validation, buffer-detachment discipline, and tamper checks on the `.mas` load
-path are consistently applied and well tested.
+This review covers the 08-10 gap-closure commits (`22fafc3..HEAD`, commits
+`ec66804`..`8c4b46d`) that fix the six verified defects from
+`08-VERIFICATION.md`: CR-01 (recompose consumers read `canvas.boxes_snapshot()`
+instead of stale live `pagebox.box`), CR-03 (no-fit guard in
+`_on_std_dev_threshold_changed` + WR-03 zero-boxes guard in
+`_rederive_auto_layer`), CR-04 (new `canvas.consume_mask_display()` clears all
+three planes signal-silently at both consumption sites), CR-02 (detect-mode
+batch refresh uses `set_auto_binary` instead of `set_planes` with explicit
+empty manual/erase), WR-01 (new headless `merge_page_boxes_for_detect()` in
+detection_boxes.py; the batch worker assigns `page.boxes = merged`), and WR-02
+(`_on_batch_finished` dirties `ImageFile.dirty` in detect/detect_and_clean
+modes).
 
-The defects cluster at the **GUI seams** where the new plane/override machinery
-meets the pre-existing canvas data model. The central structural weakness: the
-live `PageBox.box` attribute is *birth geometry* (the canvas only
-re-materializes it inside `boxes_snapshot()`), and several new Phase 8 paths
-read `it.pagebox` directly instead of a snapshot — after a move/resize those
-consumers paste/refit mask content at the wrong (pre-move) location. Related
-seams: the post-batch refresh wipes the current page's manual-stroke planes;
-the mask-consumption clear after Inpaint only clears the display composite,
-not the planes; and the std-dev threshold slot lacks the no-fit guard its
-sibling `_recompose_boxes_auto_plane` has, letting it silently destroy the
-auto plane after geometry ops. No security vulnerabilities were found (no
-secrets, no eval/subprocess, no injection paths; the persistence boundary is
-hardened).
+**The six headline defects are correctly fixed.** The diffs match the plan's
+intent line-for-line: all three recompose consumers compose from
+`boxes_snapshot()` (which materializes current int geometry AND carries
+`mask`/`std_dev`/`inpaint_override` — canvas.py:2141-2196); the threshold slot
+gains the byte-mirrored no-fit guard; the re-derive gains the `if not boxes`
+guard plus the `_refit_changed_boxes`-style live write-back; the new
+`consume_mask_display()` clears manual/erase/auto planes and never emits
+`mask_modified` (no spurious mask-undo entry, CR-16 contract preserved); the
+detect-batch restore replaces only the auto plane (live manual/erase survive);
+the batch worker merges kept-user boxes before deriving and persists
+`page.boxes = merged`; and detect-mode batch completion dirties the pages so
+Close prompts save. Both headless suites (22 passed) and the 6 new GUI probes
+all pass on the fixed code, and the probes' assertions reproduce the recorded
+pre-fix failure signatures (moved-rect regressions, wiped plane, wiped
+strokes).
 
-## Critical Issues
+No security vulnerabilities were introduced by the change set: the new code
+adds no input surfaces, no injection sinks, no new file writes, and
+`detection_boxes.py` stays headless/Qt-free (locked by a hermetic subprocess
+test).
 
-### CR-01: Stale `PageBox.box` after move/resize corrupts the recomposed auto mask
+The residual findings below are **edge cases in the same root-cause family**
+the plan explicitly scoped around:
 
-**File:** `manga_ai_studio/gui/main_window.py:3064-3073, 3111-3119, 3418-3420, 3730-3744`
-**Issue:** The canvas never refreshes `item.pagebox.box` after a move
-(`canvas.py:1434` only `setRect`s) or resize (`canvas.py:2435, 2456`); the
-current geometry is only materialized inside `canvas.boxes_snapshot()`
-(`canvas.py:2150`). Phase 8's live recompose/refit consumers read the live
-pageboxes directly:
+1. **WR-02's dirty fix does not cover the cancel/abort path** — a canceled
+   detect batch leaves already-processed pages mutated-but-clean, so Close
+   still silently drops freshly detected boxes.
+2. **The WR-03 guard is incomplete for the stale retained-raw case** — the
+   re-derive (and the refit path) can still silently wipe the auto plane after
+   a dims-preserving geometry op (e.g. a 180° rotate) because the retained
+   `raw_detected_mask` is never invalidated by `_apply_geometry_op`.
 
-- `_on_std_dev_threshold_changed` (`main_window.py:3064`) and
-  `_recompose_boxes_auto_plane` (`main_window.py:3730`) call
-  `compose_auto_binary`, which pastes each stored `pb.mask` at
-  `(pb.box.x1, pb.box.y1)` (`detection_boxes.py:360-362`) — the *birth*
-  origin.
-- `_rederive_auto_layer` (`main_window.py:3112-3115`) passes the stale boxes
-  into `derive_page_mask_state`, which re-crops `cut` at the stale box
-  (`detection_boxes.py:291, 295`).
-
-`_refit_changed_boxes` correctly fits against the *snapshot* (current
-geometry) but then writes only `mask`/`std_dev` back onto the live pagebox
-(`main_window.py:3418-3420`), leaving `pagebox.box` stale while its mask is
-cropped to the *new* geometry — a poisoned (box, mask) pair. Reproduction:
-Detect (mode ON) → move a box → change the dilation radius, the std-dev
-threshold, or commit any Inpaint override → the box's mask content is pasted
-at its pre-move location. The misplaced composite is what Inpaint (C)
-consumes, so LaMa inpaints the wrong region. Existing tests never combine a
-move with a threshold/radius/override change, so this is unguarded
-(`test_move_commit_refits_box_and_border` checks `current_box()` and
-`std_dev` only).
-
-**Fix:** Re-materialize the live geometry at commit time — either in
-`_refit_changed_boxes`, also write `live_item.pagebox.box = fitted.box` (and
-add the same write to `_commit_resize`/move-commit), or make every recompose
-consumer use `self.canvas.boxes_snapshot()` instead of
-`[it.pagebox for it in self.canvas._box_items]`:
-
-```python
-# main_window.py _refit_changed_boxes
-for live_item, fitted in zip(self.canvas._box_items, current):
-    live_item.pagebox.box = fitted.box          # keep (box, mask) consistent
-    live_item.pagebox.mask = fitted.mask
-    live_item.pagebox.std_dev = fitted.std_dev
-```
-
-### CR-02: Batch Detect refresh destroys the current page's manual strokes and erase ledger
-
-**File:** `manga_ai_studio/gui/main_window.py:6392-6401`
-**Issue:** `_refresh_current_page_after_batch("detect")` restores the packed
-auto plane via `canvas.set_planes(empty, empty, auto_bin)` with *explicitly
-empty* manual/erase planes. The dispatch-time flush
-(`_flush_current_canvas_mask_to_data_model`, `main_window.py:6133-6164`) only
-persists the flat composite `ImageFile.mask` — the manual/erase planes live
-only on the canvas for the current page. Running Batch → Detect from a page
-with hand-painted strokes therefore wipes those strokes (and the erase ledger)
-from the canvas, and the next outgoing flush packs the now-empty planes back
-into `ImageFile.mask_manual`/`mask_erase`, destroying any persisted copy too.
-Nothing consumed the strokes (detect-mode batches never use them), no undo
-entry is pushed, and the wipe directly violates the D-01/A10 "hand strokes
-always survive (re-)detection" contract that the interactive
-`_on_detection_finished` honors (it replaces only the auto plane via
-`set_auto_binary`). The comment "batch pages have no strokes" is true only for
-non-current pages; the current page is one of the batch's pages.
-
-**Fix:** Only replace the AUTO plane in the detect refresh, leaving the live
-manual/erase planes untouched:
-
-```python
-if imf.auto_mask is not None:
-    page_mask = self.canvas.get_mask()
-    h, w = page_mask.height(), page_mask.width()
-    self.canvas.set_auto_binary(unpack_binary(imf.auto_mask, h, w))
-```
-
-### CR-03: Std-dev threshold change can silently wipe the whole auto plane (missing no-fit guard)
-
-**File:** `manga_ai_studio/gui/main_window.py:3047-3073`
-**Issue:** `_on_std_dev_threshold_changed` composes from the live boxes
-without the `any(pb.mask is not None)` guard its sibling
-`_recompose_boxes_auto_plane` has (`main_window.py:3733-3734`). After a
-geometry op (rotate/crop/resize), `_clip_box`/`transform_box_payload`
-deliberately invalidate per-box masks (`image_ops.py:177-189, 326-331`) and
-`_apply_geometry_op` rebuilds the auto plane from the transformed composite
-(`main_window.py:1319-1329`). On such a page, any std-dev threshold tweak
-composes an EMPTY binary (`contributing == []`) and
-`set_auto_binary(empty)` clobbers the transformed auto plane — a silent,
-non-undoable mask loss (the slot is documented as a pure recompose). The same
-hazard exists for boxes that never received a fit (e.g. a user-drawn box on a
-page detected in mode OFF, then mode switched ON).
-
-**Fix:** Mirror the sibling guard before composing:
-
-```python
-current_boxes = [it.pagebox for it in self.canvas._box_items]
-if not current_boxes:
-    return
-if not any(pb.mask is not None for pb in current_boxes):
-    return  # no fit data to derive from (post-geometry invalidation)
-```
-
-### CR-04: Inpaint/batch-clean mask consumption clears only the display composite — planes resurrect the consumed overlay
-
-**File:** `manga_ai_studio/gui/main_window.py:4990-4993, 6420-6423`
-**Issue:** The CR-16 "clear the consumed mask" logic fills the composite
-`QImage` transparent (`canvas_mask.fill(Qt.GlobalColor.transparent)` +
-`update_mask_display()`), which under the Phase 8 plane model edits only the
-*display*. `self._mask_manual`, `self._mask_erase`, and `self._auto_bin` keep
-their content, and every later `recompose_mask()` rebuilds the composite from
-the planes (`canvas.py:1604-1610`): the consumed overlay reappears as soon as
-the user paints one more stroke, undoes a stroke, or switches pages (the
-outgoing flush packs the content-bearing planes, and Step 4's
-`has_mask_planes()` restore recomposes them — `main_window.py:1762-1778,
-1858-1888`). A resurrected overlay over the already-cleaned region causes a
-re-run of Inpaint (C) to re-process the cleaned area — exactly the regression
-CR-16 was written to prevent. (The batch-clean branch is safe only when
-`cleaned.exists()` triggers `set_image_from_path`, which re-seeds the planes.)
-
-**Fix:** Clear the planes (signal-silently) instead of the composite, e.g. in
-`EditorCanvas`:
-
-```python
-def consume_mask_display(self) -> None:
-    """Clear all three planes without emitting mask_modified (consumption)."""
-    if self._mask_manual is not None and not self._mask_manual.isNull():
-        self._mask_manual.fill(Qt.GlobalColor.transparent)
-    if self._mask_erase is not None and not self._mask_erase.isNull():
-        self._mask_erase.fill(Qt.GlobalColor.transparent)
-    self._auto_bin = None
-    self.recompose_mask()
-```
-
-and call that from both consumption sites.
+Two Info items document a pre-existing stale-geometry residual in the OCR path
+and imprecise over-dirtying.
 
 ## Warnings
 
-### WR-01: Batch detect silently deletes USER boxes on every page (no D-03 merge in the worker)
+### WR-01: WR-02 dirty-marking is skipped on batch cancel/abort/error — detected boxes still silently lost
 
-**File:** `manga_ai_studio/core/batch_runner.py:187, 202`
-**Issue:** The interactive path preserves user-drawn boxes on re-detect
-(`_build_detected_boxes`, D-03 replace-detected-keep-user,
-`main_window.py:4603-4611`). The batch loop builds *only* detected boxes
-(`build_detected_pageboxes`) and assigns `page.boxes = boxes`, overwriting any
-persisted user boxes on non-current pages with no gate, no merge, and no
-notification. A user who hand-drew boxes on other pages loses them by running
-Batch → Detect. (The headless no-D-04-gate decision is documented, but the
-keep-user half of D-03 was dropped with it.)
+**File:** `manga_ai_studio/gui/main_window.py:6257-6260` (`_on_batch_finished`); `6275-6321` (`_on_batch_cleanup`)
+**Issue:** The dirty loop lives only in `_on_batch_finished`, which the Worker
+fires exclusively on the successful `result` path
+(`worker_thread.py:152-165`: on `Abort` it emits `aborted`, on exception it
+emits `error`, neither emits `result`). `_on_batch_cleanup` (connected to
+`aborted` **and** `finished`) never marks dirty. A user who cancels a
+multi-page detect batch mid-run (`Esc` → `_cancel_batch`, a first-class
+affordance) leaves every already-processed page with `page.boxes`/`auto_mask`/
+`mask` mutated in memory (the loop writes each page's state before the next
+loop-top abort check — `batch_runner.py:193-215` sets `page.boxes = merged`
+before the *next* page's abort gate), but no `ImageFile.dirty` is set. Closing
+the window then skips the Unsaved-Changes prompt and the freshly detected
+boxes/masks on those pages are dropped with no warning — exactly the WR-02
+data-loss class, still reachable through the cancel path.
 
-**Fix:** Merge persisted USER boxes into the batch result per page:
+**Fix:** Mark dirty in the mode-aware cleanup path too, so both the result and
+the abort/error endpoints dirty the processed pages (`_on_batch_cleanup`
+already captures `batch_mode` before resetting it). Because the summary (and
+therefore `ok`) is unavailable on abort, mark every page dirty in
+detect/detect_and_clean modes whenever the worker actually started — this is
+conservative (a page the abort skipped never gets new state, so dirtying it
+only prompts an unnecessary save prompt, never data loss) and closes the hole:
 
 ```python
-user_pbs = [pb for pb in (page.boxes or []) if pb.origin == USER]
-boxes = user_pbs + build_detected_pageboxes(blk_list, img_w, img_h)
+def _on_batch_cleanup(self, _args) -> None:
+    cancelled = self._batch_cancelled
+    batch_mode = self._batch_mode
+    if not cancelled:
+        self._refresh_current_page_after_batch(batch_mode)
+    if batch_mode in ("detect", "detect_and_clean"):
+        for imf in self.image_files:
+            imf.dirty = True
+        self._update_title()
+    self._op_running = False
+    ...
 ```
 
-### WR-02: Batch detect never marks pages dirty — close loses detected boxes without a prompt
+(Alternatively, keep the loop in `_on_batch_finished` AND add it to the
+`aborted`-only cleanup path; either way the abort endpoint must dirty.)
 
-**File:** `manga_ai_studio/gui/main_window.py:6197-6226`
-**Issue:** `_on_detection_finished` explicitly calls `_set_session_dirty()`
-after the interactive detect (`main_window.py:4539`), but the batch path
-(`_on_batch_finished` / `_on_batch_cleanup`) sets no `ImageFile.dirty`, and
-the refresh's `set_boxes` runs under `_suppress_boxes_push` which also
-suppresses the dirty hook (`main_window.py:2103-2104`). After a detect-only
-batch (whose only output is in-memory boxes/masks), closing the window skips
-the unsaved-changes prompt and all detected state is lost.
+### WR-02: Stale retained raw + dims-preserving geometry op → silent auto-plane wipe via `_rederive_auto_layer`/`_refit_changed_boxes`
 
-**Fix:** In `_on_batch_cleanup` (or `_on_batch_finished`), mark the touched
-pages dirty: `for imf in self.image_files: imf.dirty = True` for detect /
-detect_and_clean modes (or at least the current page in the refresh).
+**File:** `manga_ai_studio/gui/main_window.py:3110-3150` (`_rederive_auto_layer`), `3421-3453` (`_refit_changed_boxes`), `1357-1358` (`_apply_geometry_op`)
+**Issue:** `_apply_geometry_op` transforms the auto plane (rotate-180 →
+`set_planes(None, None, new_mask_bin)` — the composite becomes the auto plane)
+and rotates every box (whose `mask`/`std_dev` are deliberately reset to `None`
+— `image_ops.py:144-148, 180-188`), **but never invalidates
+`ImageFile.raw_detected_mask`**. The retained raw is only set by detection and
+loaded by project-load (`main_window.py:4563/4586/2560`); nothing clears it on
+a geometry op.
 
-### WR-03: Dilation change in mode ON with zero boxes wipes the auto plane (inconsistent with the threshold slot)
+The 08-10 re-derive/refit guards check only the byte length of the packed raw
+(`if len(imf.raw_detected_mask) != (h * w + 7) // 8`, lines 3116/3427), which
+**passes for a 180° rotate** (and for any 90° rotate on a square page) because
+the dims are preserved while the raw content is now misaligned. So the
+reachable sequence is:
 
-**File:** `manga_ai_studio/gui/main_window.py:3075-3119`
-**Issue:** `_rederive_auto_layer` mode-ON branch has no `if not boxes:
-return` guard: with zero boxes, `derive_page_mask_state` builds an empty box
-union, the cut is empty, and `set_auto_binary` receives an all-zero binary —
-destroying existing auto content (e.g. a mode-OFF detection's full-heatmap
-layer after the user switches Detect Boxes on) just by nudging the radius
-slider. The threshold slot guards exactly this case (`if not current_boxes:
-return`, line 3065-3066). The two live slots should agree.
+1. Detect (mode ON): `raw_detected_mask` retained in the original orientation.
+2. Rotate 180° (Tools → Rotate, D-14 silent apply): the canvas auto plane
+   holds the correctly-rotated content, per-box masks are `None`, boxes are at
+   rotated positions, `raw_detected_mask` is untouched (still unrotated).
+3. Nudge the dilation radius (Tools dock slider, a live D-10 parameter) →
+   `_on_dilation_changed` → `_rederive_auto_layer` mode-ON:
+   - zero-boxes guard passes (boxes exist);
+   - dims guard passes (w·h unchanged);
+   - `derive_page_mask_state(rotated_img, unrotated_raw, rotated_boxes, ...)`
+     → the unrotated raw content overlaps none (or wrongly) of the rotated
+     boxes → every `_fit_one_box` returns `(None, None)` → `compose_auto_binary`
+     returns an all-zero binary → `set_auto_binary(empty)` **silently wipes the
+     rotated auto plane, non-undoably** (settings changes push no history).
 
-**Fix:** Add `if not boxes: return` (or a documented deliberate wipe +
-border-status message) in the mode-ON branch of `_rederive_auto_layer`.
+This is the same CR-03 silent-wipe class the plan closed for the threshold slot
+(its `any(pb.mask is not None)` guard) but the WR-03 guard added to the
+re-derive only covers the **zero-boxes** case, not the **all-no-fit /
+misaligned-raw** case. The identical hazard exists in `_refit_changed_boxes`
+(a box move after the rotate re-fits against the same misaligned raw).
+`_recompose_boxes_auto_plane` and `_on_std_dev_threshold_changed` are safe
+(pure recompose of stored fits, and their no-fit guard returns early), which
+is why the CR-03 probes cannot catch this — no probe combines a dims-preserving
+geometry op with a live parameter change (the plan itself notes WR-03 is
+source-asserted only).
 
-### WR-04: `set_masker_values` silently clamps out-of-range profile values — UI display and active profile desync
+**Fix:** Invalidate the retained raw when a geometry op runs — the honest
+root-cause fix that also covers `_refit_changed_boxes` and matches the 08-01
+invalidation policy. In `_apply_geometry_op`, when `geometry` is True (or
+whenever `transform_fn` touched image dims/geometry), clear the stale raw
+(and the derived-plane slots) on the current `ImageFile`:
 
-**File:** `manga_ai_studio/gui/tools_panel.py:586-627`
-**Issue:** The widgets clamp to their own ranges (dilation 0-10, std-dev
-0-100 with 1 decimal, growth steps 0-50, ...). `MaskerConfig` fields are not
-bounded the same way (`mask_max_standard_deviation` has no upper bound;
-`mask_growth_steps` `GreaterZero`). A hand-edited profile INI with e.g.
-`mask_dilation_radius = 15` or `mask_max_standard_deviation = 200` displays
-as 10 / 100.0 while the profile (authoritative for the gate and batch) keeps
-15 / 200 — the user sees one setting and the app applies another until a
-control is touched.
+```python
+idx = self._current_page_index()
+if idx is not None and 0 <= idx < len(self.image_files):
+    self.image_files[idx].auto_mask = None
+    self.image_files[idx].raw_detected_mask = None  # no longer in page frame
+```
 
-**Fix:** After `setValue`, read back the clamped widget values and write them
-into the `masker_conf` (still inside the `blockSignals` scope), or expand
-widget ranges to match `MaskerConfig.fix()` bounds and normalize the profile
-on load.
+As belt-and-suspenders, mirror the threshold slot's no-fit guard in
+`_rederive_auto_layer` after the derive (skip `set_auto_binary` when the
+derivation produced no participating fits):
 
-### WR-05: `_save_masker_profile`'s error handling is dead — failed persists are silent
+```python
+if not any(pb.mask is not None for pb in boxes):
+    return  # every box failed the fit — do not clobber the plane with empty
+```
 
-**File:** `manga_ai_studio/config/profile_manager.py:31-39` and `manga_ai_studio/gui/main_window.py:2995-3007`; `panelcleaner/config.py:986-1008`
-**Issue:** `Profile.safe_write` catches *all* exceptions internally and
-returns a bool; it never raises `OSError`. `ProfileManager.save_profile`
-ignores the return value, so `_save_masker_profile`'s `except OSError` branch
-is unreachable and a read-only config dir produces no user-visible signal —
-the user believes their detection settings persisted when they did not.
-
-**Fix:** Propagate the outcome: have `save_profile` return the bool (or raise
-on False), and in `_save_masker_profile` surface a status-bar warning when
-the write fails.
+and add a probe covering "rotate 180 → dilation nudge → auto plane retains
+content" (the gap-closure suite currently has no probe for the re-derive path).
 
 ## Info
 
-### IN-01: Dead code — `ToolsPanel._on_tool_triggered` is never connected
+### IN-01: OCR dispatch still crops at birth geometry after a move (CR-01 root cause residual, pre-existing)
 
-**File:** `manga_ai_studio/gui/tools_panel.py:308-311`
-**Issue:** The `group.triggered` path was superseded by the per-action
-`toggled` connection (:230-231); `_on_tool_triggered` is unreachable.
-**Fix:** Delete the method (or connect it and drop the toggled path).
+**File:** `manga_ai_studio/gui/main_window.py:5191` (`_dispatch_ocr_for_box`), `5288` (`run_ocr_all`)
+**Issue:** The gap-closure plan deliberately keeps `pagebox.box` as birth
+geometry (no `.box` write-back, to preserve `id(box)` routing in
+`_on_ocr_finished`, `main_window.py:5384`). The single-box and OCR-All paths
+pass `it.pagebox.box` into the worker, which crops
+`image[y1:y2, x1:x2]` at that stale (pre-move) rect (`_run_ocr_task` /
+`_run_ocr_all_task`). So after Detect + move a box, **Run OCR and OCR All
+recognize the pre-move region** — the same stale-geometry family the plan
+fixed for the recompose consumers was not extended to the OCR crop. Pre-existing
+(reachability predates plan 08-10) and out of the six-fix scope, but it shares
+the CR-01 root cause and is user-reachable.
+**Fix:** Pass a materialized box into the worker instead of the live pagebox:
+`self.canvas.boxes_snapshot()` for `run_ocr_all`, or a per-item
+`box_item.current_box()` — and keep the identity for the result routing via
+`id(it.pagebox)` (the OCR-All path already passes `id(it.pagebox)` separately,
+so only the crop geometry needs to come from `current_box()`).
 
-### IN-02: Redundant local `import numpy as np` shadows the module-level import
+### IN-02: WR-02 dirty loop over-marks pages that `failed` (untouched by the batch)
 
-**File:** `manga_ai_studio/gui/main_window.py:4352, 4484, 5204, 5298`
-**Issue:** `numpy as np` is already imported at line 38; the four function-
-local re-imports are noise that hides the real dependency surface.
-**Fix:** Remove the local imports.
+**File:** `manga_ai_studio/gui/main_window.py:6257-6260`
+**Issue:** `_on_batch_finished` sets `imf.dirty = True` for **every**
+`ImageFile` when `ok > 0`, including pages recorded in the summary's `failed`
+list (whose `page.boxes`/`mask` were never mutated) and — in the detectable
+case — pages that were skipped. In the normal all-succeed case this is exact,
+and over-dirtying is only conservative (it prompts a save that has nothing to
+persist); it never loses data. Low impact, but the loop could be scoped to the
+succeeded pages via the failed-path set for precision.
+**Fix:** Set dirty only for pages whose path is not in
+`{p for p, _ in summary.get("failed", [])}`:
 
-### IN-03: Duplicate Inspector reload in `_on_inspector_inpaint_committed`
-
-**File:** `manga_ai_studio/gui/main_window.py:3710`
-**Issue:** `boxes_modified.emit(before)` triggers `_on_boxes_modified`, which
-already ends with `self._on_canvas_selection_changed()` (line 3343); the
-explicit call at line 3710 re-populates the panel a second time per commit.
-Harmless (population is signal-blocked) but doubles the work on every
-override commit.
-**Fix:** Drop the trailing `self._on_canvas_selection_changed()` from the
-commit handler.
-
-### IN-04: `json_to_pagebox` does not validate `origin`
-
-**File:** `manga_ai_studio/core/project_io.py:270-278, 342-344`
-**Issue:** `std_dev`/`inpaint_override`/`mask` are structurally validated on
-load, but `origin` is passed through unvalidated — a crafted `.mas` can
-inject an arbitrary string that flows into `PageBox.origin`,
-`_ORIGIN_HUES.get(origin, ...)` fallbacks, and `set_boxes` origin-splitting.
-Not exploitable (no injection sink; downstream falls back to detected hues),
-but inconsistent with the T-08-08 stance applied to the sibling fields.
-**Fix:** `if origin not in ("detected", "user"): raise ProjectFormatError(...)`.
+```python
+if ok > 0 and self._batch_mode in ("detect", "detect_and_clean"):
+    failed_paths = {p for p, _ in summary.get("failed", [])}
+    for imf in self.image_files:
+        if imf.path not in failed_paths:
+            imf.dirty = True
+    self._update_title()
+```
 
 ---
 
