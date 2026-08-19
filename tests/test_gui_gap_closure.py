@@ -335,3 +335,43 @@ def test_batch_clean_refresh_clears_planes(qtbot, tmp_path) -> None:
         "CR-04: the clean-path consume must clear the auto plane"
     )
     assert np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask())) == 0
+
+
+# ===========================================================================
+# Task 3 — WR-02: a detect-mode batch marks every touched page dirty
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_detect_batch_marks_pages_dirty(qtbot, tmp_path) -> None:
+    """WR-02 (plan 08-10): a detect-mode batch completion marks EVERY touched
+    page dirty (ok > 0), so Close prompts save instead of silently dropping
+    the freshly detected boxes; the title reflects the dirty state. Clean-only
+    mode must NOT dirty (behavior unchanged).
+
+    Pre-fix: ``_on_batch_finished`` never marks dirty -> RED.
+    """
+    from manga_ai_studio.core.image_file import ImageFile
+
+    window = _window_with_page(qtbot, tmp_path)
+    window.image_files.append(ImageFile(path=tmp_path / "page2.png"))
+    assert not any(imf.dirty for imf in window.image_files)
+
+    window._batch_mode = "detect"
+    window._on_batch_finished({"ok": 2, "failed": [], "total": 2})
+
+    assert all(imf.dirty for imf in window.image_files), (
+        "WR-02: every page a detect batch touched must be marked dirty so "
+        "Close prompts save"
+    )
+    assert "*" in window.windowTitle(), (
+        "the title must reflect the dirty state (the * suffix)"
+    )
+
+    # Clean-only mode: no spurious dirty marking.
+    window2 = _window_with_page(qtbot, tmp_path)
+    window2._batch_mode = "clean"
+    window2._on_batch_finished({"ok": 1, "failed": [], "total": 1})
+    assert not any(imf.dirty for imf in window2.image_files), (
+        "clean-only batches must not mark pages dirty"
+    )

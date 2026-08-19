@@ -333,3 +333,44 @@ def test_derive_fits_user_origin_boxes_identically() -> None:
     assert user_box.mask is not None
     assert user_box.std_dev is not None and np.isfinite(user_box.std_dev)
     assert np.count_nonzero(result.auto_binary) > 0
+
+
+# ===========================================================================
+# Plan 08-10 (WR-01) — the headless D-03 merge for the batch detect path
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_merge_page_boxes_keeps_user_replaces_detected() -> None:
+    """WR-01 (plan 08-10): ``merge_page_boxes_for_detect`` applies the
+    interactive D-03 replace-detected-keep-user rule headlessly — every
+    USER-origin box survives with its payload/style/inpaint_override/geometry
+    intact (object identity preserved — the caller's ``derive_page_mask_state``
+    mutates the returned list in place), every DETECTED-origin box is replaced
+    by the fresh detected list, and the result is ``[kept user boxes] +
+    list(fresh_detected)``."""
+    from manga_ai_studio.core.detection_boxes import merge_page_boxes_for_detect
+
+    payload = _blk(5, 5, 25, 20)
+    user_box = PageBox(
+        box=st.Box(1, 1, 10, 10),
+        origin=USER,
+        inpaint_override="never",
+        payload=payload,
+    )
+    stale_detected = PageBox(box=st.Box(20, 20, 30, 30), origin=DETECTED)
+    fresh_detected = [PageBox(box=st.Box(40, 40, 55, 48), origin=DETECTED)]
+
+    merged = merge_page_boxes_for_detect([user_box, stale_detected], fresh_detected)
+
+    assert len(merged) == 2
+    # The USER box object itself survives (identity — the derive mutates it).
+    assert merged[0] is user_box
+    assert merged[0].origin == USER
+    assert merged[0].box.as_tuple == (1, 1, 10, 10)
+    assert merged[0].inpaint_override == "never"
+    assert merged[0].payload is payload
+    # The stale DETECTED box is replaced by the fresh detection.
+    assert stale_detected not in merged
+    assert merged[1].origin == DETECTED
+    assert merged[1].box.as_tuple == (40, 40, 55, 48)

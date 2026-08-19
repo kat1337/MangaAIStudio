@@ -642,3 +642,73 @@ def test_batch_detect_dilation_radius_effect(tmp_path, monkeypatch) -> None:
     # radius 0 keeps the pre-clamp shape unchanged (no growth).
     ys0, xs0 = np.nonzero(auto0)
     assert ys0.min() > 10 and xs0.min() > 10
+
+
+# ---------------------------------------------------------------------------
+# Plan 08-10 (WR-01) — the batch detect worker merges (D-03), never overwrites
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_batch_detect_preserves_user_boxes(tmp_path, monkeypatch) -> None:
+    """WR-01 (plan 08-10): a persisted USER-origin box survives a detect-mode
+    batch — ``page.boxes`` keeps it (with its ``inpaint_override`` + payload
+    intact) while the stale DETECTED box is replaced by the fresh detection,
+    and EVERY box in the merged set (kept user + fresh detected) carries a
+    refreshed ``mask``/``std_dev`` — the derivation ran over the merged list,
+    matching the interactive all-boxes-derive contract.
+
+    Pre-fix (batch_runner.py:202 ``page.boxes = boxes``): the USER box is
+    overwritten away -> RED.
+    """
+    from panelcleaner.structures import Box
+
+    from manga_ai_studio.core.box_model import USER, PageBox
+
+    src = tmp_path / "chapter"
+    src.mkdir(parents=True)
+    # White 60x50 page; heatmap content inside the user box (1,1,10,10) AND
+    # inside the fresh full-page detected box.
+    Image.new("RGB", (60, 50), (240, 240, 240)).save(src / "page1.png")
+    heatmap = np.zeros((50, 60), dtype=np.uint8)
+    heatmap[2:9, 2:9] = 255
+    heatmap[22:29, 22:29] = 255
+
+    user_pb = PageBox(
+        box=Box(1, 1, 10, 10),
+        origin=USER,
+        inpaint_override="always",
+        payload=_blk(1, 1, 10, 10),
+    )
+    stale_detected = PageBox(box=Box(20, 20, 30, 30), origin=DETECTED)
+    page = ImageFile(path=src / "page1.png", boxes=[user_pb, stale_detected])
+
+    det = _FixtureDetector([heatmap], [[_blk(0, 0, 60, 50)]])
+    install_fakes(monkeypatch, det, FakeInpaintModel())
+
+    summary = batch_detect(
+        [page],
+        det_model_path=Path("fake_det.pt"),
+        det_backend="torch",
+        cleaned_dir=src / "cleaned",
+        masker_conf=cfg.MaskerConfig(),
+        progress_callback=None,
+        abort_flag=None,
+    )
+
+    assert summary == {"ok": 1, "failed": [], "total": 1}
+    assert page.boxes is not None and len(page.boxes) == 2, (
+        "WR-01: the user box must survive the batch detect (D-03 merge)"
+    )
+    kept_user = [pb for pb in page.boxes if pb.origin == USER]
+    assert len(kept_user) == 1
+    assert kept_user[0].box.as_tuple == (1, 1, 10, 10)
+    assert kept_user[0].inpaint_override == "always"
+    assert kept_user[0].mask is not None, "the kept user box must be re-fitted"
+    assert kept_user[0].std_dev is not None
+    fresh = [pb for pb in page.boxes if pb.origin == DETECTED]
+    assert len(fresh) == 1
+    assert fresh[0].box.as_tuple == (0, 0, 60, 50), (
+        "the stale DETECTED box must be replaced by the fresh detection"
+    )
+    assert fresh[0].mask is not None and fresh[0].std_dev is not None
