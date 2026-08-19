@@ -683,6 +683,36 @@ class EditorCanvas(QGraphicsView):
         )
         self.recompose_mask()
 
+    def consume_mask_display(self) -> None:
+        """Clear ALL THREE planes signal-silently after a mask consumption.
+
+        Plan 08-10 (CR-04): inpaint and batch-clean CONSUME the mask — the
+        red overlay must leave the display AND the planes, or the next
+        stroke/undo/page-switch recompose would resurrect the consumed
+        overlay and a re-run would re-process the already-cleaned region.
+
+        When a page is loaded (``_mask_manual`` non-null): fill the manual and
+        erase planes fully transparent, drop ``_auto_bin`` to ``None``, and
+        recompose — the rebuilt composite is fully transparent, refreshed
+        through ``update_mask_display``. When no page is loaded, fall back to
+        the pre-existing display-only clear.
+
+        MUST NOT emit ``mask_modified`` — consumption is not a paint action
+        and must never push a mask-undo entry (the CR-16 2-stack contract the
+        call sites at main_window.py invoke).
+        """
+        if self._mask_manual is None or self._mask_manual.isNull():
+            # No page (or no page-sized planes) — the pre-existing
+            # display-only clear.
+            if self._mask is not None and not self._mask.isNull():
+                self._mask.fill(Qt.GlobalColor.transparent)
+                self.update_mask_display()
+            return
+        self._mask_manual.fill(Qt.GlobalColor.transparent)
+        self._mask_erase.fill(Qt.GlobalColor.transparent)
+        self._auto_bin = None
+        self.recompose_mask()
+
     def toggle_mask_overlay(self) -> None:
         """Flip the mask overlay visibility (View -> Toggle Mask Overlay, M)."""
         visible = not self.mask_item.isVisible()

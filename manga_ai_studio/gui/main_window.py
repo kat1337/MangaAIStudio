@@ -5013,19 +5013,16 @@ class MainWindow(QMainWindow):
         # the session dirty + refresh the title (the * suffix).
         self._set_session_dirty()
 
-        # CR-16 (UAT): the mask has been consumed by the inpaint. Clear it so
-        # the red overlay does not sit on top of the now-inpainted region
-        # (which would both look wrong and cause a subsequent inpaint to
-        # re-process the already-cleaned area). Clear the mask internals
-        # directly (fill + update_mask_display) rather than calling
-        # clear_mask(), which emits mask_modified — that would push a
-        # spurious mask-undo entry. The user's action was "inpaint", not
-        # "paint a mask", so the mask-undo stack must not gain an entry for
-        # the consumption.
-        canvas_mask = self.canvas.get_mask()
-        if canvas_mask is not None and not canvas_mask.isNull():
-            canvas_mask.fill(Qt.GlobalColor.transparent)
-            self.canvas.update_mask_display()
+        # CR-16 (UAT) + CR-04 (plan 08-10): the mask has been consumed by the
+        # inpaint. Clear it so the red overlay does not sit on top of the
+        # now-inpainted region (which would both look wrong and cause a
+        # subsequent inpaint to re-process the already-cleaned area).
+        # consume_mask_display clears ALL THREE planes (manual/erase/auto)
+        # signal-silently — the consumed overlay cannot resurrect on the next
+        # stroke/undo/page-switch recompose — and never emits mask_modified,
+        # so no spurious mask-undo entry is pushed (the user's action was
+        # "inpaint", not "paint a mask"; the CR-16 2-stack contract).
+        self.canvas.consume_mask_display()
 
         if self.history is not None and bbox is not None and original_patch_numpy is not None:
             # No bare except Exception: pass here (WR-05 closed at this site).
@@ -6419,21 +6416,20 @@ class MainWindow(QMainWindow):
                     self._suppress_boxes_push = False
                 # Restore the auto plane from the packed slot at the canvas
                 # dims (mirrors the on_page_selected Step 4 plane restore).
-                # Batch pages have no hand strokes: manual/erase are passed as
-                # EXPLICIT EMPTY planes (not None) for the API that
-                # distinguishes empty-from-absent, so the composite stays the
-                # auto plane alone. A legacy page without plane data keeps the
-                # flat-mask restore above.
+                # CR-02 (plan 08-10): replace ONLY the auto plane via
+                # set_auto_binary — the current page's LIVE manual/erase
+                # planes (the hand strokes + the erase ledger, which the
+                # dispatch-time flush at :6133-6164 persists only as the flat
+                # composite) survive the restore. This honors the D-01 "hand
+                # strokes always survive re-detection" contract that the
+                # interactive _on_detection_finished path already honors. A
+                # legacy page without plane data keeps the flat-mask restore
+                # above.
                 if imf.auto_mask is not None:
                     page_mask = self.canvas.get_mask()
                     h, w = page_mask.height(), page_mask.width()
-                    empty_bin = np.zeros((h, w), dtype=np.uint8)
                     auto_bin = unpack_binary(imf.auto_mask, h, w)
-                    self.canvas.set_planes(
-                        numpy_binary_to_mask_qimage(empty_bin),
-                        numpy_binary_to_mask_qimage(empty_bin),
-                        auto_bin,
-                    )
+                    self.canvas.set_auto_binary(auto_bin)
                 # Border states render from the per-box fields (the SINGLE
                 # derivation site — refresh_box_inpaint_states).
                 self.refresh_box_inpaint_states()
@@ -6448,14 +6444,12 @@ class MainWindow(QMainWindow):
             self.canvas.set_image_from_path(cleaned)
         # Clear the consumed mask overlay on the canvas (CR-16 mirror: a red
         # overlay on top of the now-cleaned region looks wrong and would
-        # cause a re-clean to re-process the cleaned area). Mutate the mask
-        # internals directly (fill + update_mask_display) rather than calling
-        # clear_mask(), which would emit mask_modified and push a spurious
-        # mask-undo entry — the user's action was "batch clean", not "paint".
-        canvas_mask = self.canvas.get_mask()
-        if canvas_mask is not None and not canvas_mask.isNull():
-            canvas_mask.fill(Qt.GlobalColor.transparent)
-            self.canvas.update_mask_display()
+        # cause a re-clean to re-process the cleaned area). CR-04 (plan
+        # 08-10): consume_mask_display clears ALL THREE planes signal-silently
+        # (never emits mask_modified, so no spurious mask-undo entry — the
+        # user's action was "batch clean", not "paint") so a re-clean cannot
+        # re-process the cleaned region.
+        self.canvas.consume_mask_display()
 
     def _cancel_batch(self) -> None:
         """Emit the batch abort signal (D-09) and mark the run cancelled (Bug B).
