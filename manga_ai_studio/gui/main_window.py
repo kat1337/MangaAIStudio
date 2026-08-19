@@ -3061,9 +3061,23 @@ class MainWindow(QMainWindow):
         # auto layer; mode OFF's full-heatmap layer does not participate.
         if not self.action_detect_boxes_mode.isChecked():
             return
-        current_boxes = [it.pagebox for it in self.canvas._box_items]
+        # CR-01 (plan 08-10): the live pageboxes keep BIRTH geometry after a
+        # move/resize (the canvas only ever setRect's; materialization lives
+        # in boxes_snapshot) — compose from the snapshot so the recomposed
+        # mask lands at the box's CURRENT position, never the pre-move origin.
+        current_boxes = self.canvas.boxes_snapshot()
         if not current_boxes:
             return
+        # CR-03 (plan 08-10): byte-mirrors _recompose_boxes_auto_plane's
+        # no-fit guard (same relative position: zero-boxes -> no-fit ->
+        # image -> compose) — after a geometry op invalidates every per-box
+        # mask (08-01 policy) while the auto plane keeps the transformed
+        # content, a threshold tweak must NOT compose an all-mask-None empty
+        # binary and silently wipe the plane. The placement relative to the
+        # image check is deliberate, behaviourally identical either way, and
+        # must NOT be "fixed" by a future reader.
+        if not any(pb.mask is not None for pb in current_boxes):
+            return  # no fit data to derive from (post-geometry invalidation)
         image_np = self.canvas.get_image_numpy()
         if image_np is None:
             return
@@ -3109,10 +3123,27 @@ class MainWindow(QMainWindow):
         profile = self.profile_manager.config.current_profile
         radius = int(profile.masker.mask_dilation_radius)
         if self.action_detect_boxes_mode.isChecked():
-            boxes = [it.pagebox for it in self.canvas._box_items]
+            # CR-01 (plan 08-10): the live pageboxes carry BIRTH geometry
+            # after a move/resize — the mode-ON re-derive must fit the
+            # CURRENT geometry (boxes_snapshot materializes the live rects +
+            # carries each box's mask/std_dev/inpaint_override).
+            boxes = self.canvas.boxes_snapshot()
+            # WR-03 (plan 08-10): zero-boxes guard mirroring the threshold
+            # slot — a dilation/radius nudge on a page with zero boxes must
+            # NOT derive over an empty list and wipe a previously mode-OFF
+            # full-heatmap auto layer after a mode switch.
+            if not boxes:
+                return
             derivation = derive_page_mask_state(
                 image_rgb, raw, boxes, profile.masker, radius
             )
+            # derive_page_mask_state MUTATES the list it is handed — the
+            # snapshot PageBoxes are detached copies, so write the fresh fits
+            # back onto the LIVE pageboxes (the _refit_changed_boxes pattern)
+            # or refresh_box_inpaint_states would render stale borders.
+            for live_item, fitted in zip(self.canvas._box_items, boxes):
+                live_item.pagebox.mask = fitted.mask
+                live_item.pagebox.std_dev = fitted.std_dev
             self.canvas.set_auto_binary(derivation.auto_binary)
             self.refresh_box_inpaint_states()
         else:
@@ -3727,7 +3758,11 @@ class MainWindow(QMainWindow):
         """
         if not self.action_detect_boxes_mode.isChecked():
             return
-        current_boxes = [it.pagebox for it in self.canvas._box_items]
+        # CR-01 (plan 08-10): compose from boxes_snapshot() — the snapshot
+        # materializes the CURRENT rects (a moved box's pagebox.box stays
+        # birth-geometry) AND carries the stored mask/std_dev/inpaint_override
+        # fields, so the override recompose lands at the box's live position.
+        current_boxes = self.canvas.boxes_snapshot()
         if not current_boxes:
             return
         if not any(pb.mask is not None for pb in current_boxes):
