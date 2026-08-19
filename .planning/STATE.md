@@ -5,10 +5,10 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08.1
 current_phase_name: Inpaint correction & OOM-safe patching
 status: ready
-stopped_at: Phase 08.1 inserted (URGENT) — inpaint gate inversion + OOM-safe patching; ready to discuss/plan
-last_updated: "2026-08-19T17:15:00.000Z"
+stopped_at: Phase 08.1 context gathered
+last_updated: "2026-08-19T17:39:44.650Z"
 last_activity: 2026-08-19
-last_activity_desc: Phase 08 complete, Phase 08.1 inserted for inpaint correction
+last_activity_desc: Phase 08 complete, Phase 08.1 inserted (URGENT)
 progress:
   total_phases: 10
   completed_phases: 8
@@ -343,8 +343,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-19
-Stopped at: Phase 8 complete (verified 5/5 truths, UAT 4/4 passed, security threats_open 0) — ready to plan Phase 9 (UI Rework)
-Resume file: None
+Last session: 2026-08-19T17:39:44.635Z
+Stopped at: Phase 08.1 context gathered
+Resume file: .planning/phases/08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate/08.1-CONTEXT.md
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
