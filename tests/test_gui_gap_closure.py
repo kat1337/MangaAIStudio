@@ -187,3 +187,151 @@ def test_threshold_tweak_after_invalidation_does_not_wipe_auto_plane(
         "CR-03: the auto plane must keep its pre-tweak content (no-fit guard)"
     )
     assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(5, 5, 29, 34)
+
+
+# ===========================================================================
+# Task 2 — CR-04 + CR-02: consume_mask_display clears all three planes
+# signal-silently; the detect-batch refresh replaces only the auto plane
+# ===========================================================================
+
+
+def _seed_planes(window, manual_bin, erase_bin, auto_bin) -> None:
+    """Replace the live three planes via set_planes (the seeded-content path)."""
+    from manga_ai_studio.core.mask_editor import numpy_binary_to_mask_qimage
+
+    window.canvas.set_planes(
+        numpy_binary_to_mask_qimage(manual_bin),
+        numpy_binary_to_mask_qimage(erase_bin),
+        auto_bin,
+    )
+
+
+@pytest.mark.gui
+def test_consume_mask_display_clears_planes_and_no_resurrection(
+    qtbot, tmp_path
+) -> None:
+    """CR-04: consuming the mask (inpaint / batch-clean) must clear ALL THREE
+    planes signal-silently — the consumed overlay cannot resurrect on the next
+    stroke/undo/page-switch recompose, so a re-run cannot re-process the
+    cleaned region.
+
+    Pre-fix: no ``consume_mask_display`` exists (RED on AttributeError) and the
+    display-only clear leaves the planes holding the consumed content.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    manual_bin = np.zeros((50, 60), dtype=np.uint8)
+    manual_bin[2:12, 2:12] = 255
+    erase_bin = np.zeros((50, 60), dtype=np.uint8)
+    erase_bin[30:40, 30:40] = 255
+    auto_bin = np.zeros((50, 60), dtype=np.uint8)
+    auto_bin[40:50, 40:50] = 255
+    _seed_planes(window, manual_bin, erase_bin, auto_bin)
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_manual)) > 0
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_erase)) > 0
+    assert window.canvas._auto_bin is not None
+
+    fired: list[bool] = []
+    window.canvas.mask_modified.connect(lambda: fired.append(True))
+    window.canvas.consume_mask_display()
+
+    assert not fired, (
+        "consumption is not a paint action — no mask_modified emission, so no "
+        "spurious mask-undo entry (the CR-16 2-stack contract)"
+    )
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_manual)) == 0, (
+        "CR-04: the manual plane must be emptied"
+    )
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_erase)) == 0, (
+        "CR-04: the erase plane must be emptied"
+    )
+    assert window.canvas._auto_bin is None, "CR-04: the auto plane must clear"
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask())) == 0, (
+        "CR-04: the composite must be content-free after consumption"
+    )
+
+    # The stroke-commit stand-in recompose must stay content-free — the
+    # consumed overlay cannot resurrect from the emptied planes.
+    window.canvas.recompose_mask()
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask())) == 0, (
+        "CR-04: the consumed overlay must not resurrect on the next recompose"
+    )
+
+
+@pytest.mark.gui
+def test_detect_batch_refresh_preserves_manual_and_erase(qtbot, tmp_path) -> None:
+    """CR-02: a detect-mode batch refresh must replace ONLY the auto plane —
+    the current page's live manual/erase planes (hand strokes + the erase
+    ledger, which the dispatch-time flush persists only as the flat composite)
+    survive the restore.
+
+    Pre-fix: the refresh passes EXPLICITLY-empty manual/erase to ``set_planes``
+    -> the seeded strokes are wiped (RED).
+    """
+    from manga_ai_studio.core.mask_editor import numpy_binary_to_mask_qimage
+    from manga_ai_studio.core.mask_planes import pack_binary, unpack_binary
+
+    window = _window_with_page(qtbot, tmp_path)
+    manual_bin = np.zeros((50, 60), dtype=np.uint8)
+    manual_bin[2:12, 2:12] = 255
+    erase_bin = np.zeros((50, 60), dtype=np.uint8)
+    erase_bin[30:40, 30:40] = 255
+    _seed_planes(window, manual_bin, erase_bin, None)
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_manual)) > 0
+
+    # Flat-restore prerequisites (:6353): a non-null content mask + a packed
+    # distinct auto binary (the batch detect result).
+    imf = window.image_files[0]
+    imf.mask = numpy_binary_to_mask_qimage(np.full((50, 60), 255, dtype=np.uint8))
+    auto_bin = np.zeros((50, 60), dtype=np.uint8)
+    auto_bin[40:50, 40:50] = 255
+    imf.auto_mask = pack_binary(auto_bin)
+
+    window._refresh_current_page_after_batch("detect")
+
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_manual)) > 0, (
+        "CR-02: hand strokes must survive a detect-mode batch restore"
+    )
+    assert np.array_equal(
+        mask_to_numpy_binary(window.canvas._mask_manual) > 0,
+        manual_bin > 0,
+    ), "CR-02: the manual plane content must be untouched"
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_erase)) > 0, (
+        "CR-02: the erase ledger must survive a detect-mode batch restore"
+    )
+    assert window.canvas._auto_bin is not None
+    assert np.array_equal(
+        window.canvas._auto_bin, unpack_binary(imf.auto_mask, 50, 60)
+    ), "the batch result must replace only the auto plane"
+
+
+@pytest.mark.gui
+def test_batch_clean_refresh_clears_planes(qtbot, tmp_path) -> None:
+    """CR-04 in the batch path: the clean-mode refresh consumes the mask — all
+    three planes cleared — so a re-clean cannot re-process the cleaned region.
+    (No cleaned file exists for the fixture page, so the reload is skipped and
+    the consume is the only mutation.)
+
+    Pre-fix: the clean branch clears only the display composite, leaving the
+    planes holding content (RED).
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    manual_bin = np.zeros((50, 60), dtype=np.uint8)
+    manual_bin[2:12, 2:12] = 255
+    erase_bin = np.zeros((50, 60), dtype=np.uint8)
+    erase_bin[30:40, 30:40] = 255
+    auto_bin = np.zeros((50, 60), dtype=np.uint8)
+    auto_bin[40:50, 40:50] = 255
+    _seed_planes(window, manual_bin, erase_bin, auto_bin)
+
+    window._refresh_current_page_after_batch("clean")
+
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_manual)) == 0, (
+        "CR-04: the clean-path consume must clear the manual plane"
+    )
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas._mask_erase)) == 0, (
+        "CR-04: the clean-path consume must clear the erase plane"
+    )
+    assert window.canvas._auto_bin is None, (
+        "CR-04: the clean-path consume must clear the auto plane"
+    )
+    assert np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask())) == 0
