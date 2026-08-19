@@ -396,6 +396,17 @@ Plans:
 
 **UI hint**: yes
 
+### Phase 08.1: Inpaint correction & OOM-safe patching — invert the std-dev gate (low-std boxes get median-color mask fill, high-std boxes get LaMa inpaint per PanelCleaner) and add max-resolution patched inpainting so large pages can't exhaust memory (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 08
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 08.1 to break down)
+
 ### Phase 9: UI Rework
 
 **Goal:** User works in a reorganized editor — a modular side panel of discrete independently-collapsible sections, a relocated right-side tools toolbar, a renamed "Typesetting" section, and a new "Edit" section consolidating the image-editing tools — replacing the monolithic panel and scattered menu/dialog access without removing any existing functionality. This activates the deferred 06-UAT sidebar revamp.

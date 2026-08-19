@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
-current_phase: 9
-current_phase_name: UI Rework
+current_phase: 08.1
+current_phase_name: Inpaint correction & OOM-safe patching
 status: ready
-stopped_at: "Phase 08 complete (5/5 truths, UAT 4/4, security passed); ready to plan Phase 9 (UI Rework)"
-last_updated: "2026-08-19T16:18:40.106Z"
+stopped_at: Phase 08.1 inserted (URGENT) — inpaint gate inversion + OOM-safe patching; ready to discuss/plan
+last_updated: "2026-08-19T17:15:00.000Z"
 last_activity: 2026-08-19
-last_activity_desc: Phase 08 complete, transitioned to Phase 9
+last_activity_desc: Phase 08 complete, Phase 08.1 inserted for inpaint correction
 progress:
-  total_phases: 9
+  total_phases: 10
   completed_phases: 8
   total_plans: 69
   completed_plans: 69
-  percent: 89
+  percent: 80
 ---
 
 # Project State
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 
 ## Current Position
 
-Phase: 9 — UI Rework
+Phase: 08.1 — Inpaint correction & OOM-safe patching
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-08-19 — Phase 08 complete, transitioned to Phase 9
+Last activity: 2026-08-19 — Phase 08 complete, Phase 08.1 inserted (URGENT)
 
 ## Performance Metrics
 
@@ -314,6 +314,7 @@ Recent decisions affecting current work:
 - Phase 7 added: Typesetting (TRAN-02) — render translated text into the page (2026-08-09)
 - Phase 8 added: Masker & Selective Inpaint — mask dilation radius + std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility/override (milestone v1.2, 2026-08-13)
 - Phase 9 added: UI Rework — modular side panel, top inspector toggle, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (milestone v1.2, 2026-08-13)
+- Phase 08.1 inserted after Phase 08: Inpaint correction & OOM-safe patching — invert std-dev gate + max-res patched inpainting (URGENT)
 
 ### Pending Todos
 
