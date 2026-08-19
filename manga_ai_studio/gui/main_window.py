@@ -1356,6 +1356,17 @@ class MainWindow(QMainWindow):
         idx = self._current_page_index()
         if geometry and idx is not None and 0 <= idx < len(self.image_files):
             self.image_files[idx].geometry_altered = True
+            # WR-02 (plan 08-10): a geometry op moves the page frame, but the
+            # retained raw detection blob (`raw_detected_mask`) stays in the
+            # OLD frame — the re-derive/refit dims guard passes for a
+            # dims-preserving op (e.g. a 180° rotate) while the misaligned raw
+            # fits nothing, so a later live re-dilate would compose an empty
+            # binary and SILENTLY wipe the rotated auto plane (the CR-03 wipe
+            # class). Invalidate the raw + the derived auto slot (the 08-01
+            # invalidation policy); the canvas already holds the
+            # geometry-transformed planes.
+            self.image_files[idx].auto_mask = None
+            self.image_files[idx].raw_detected_mask = None
         self._set_session_dirty()
         if flash:
             self._show_transient_status(flash)
@@ -3144,6 +3155,14 @@ class MainWindow(QMainWindow):
             for live_item, fitted in zip(self.canvas._box_items, boxes):
                 live_item.pagebox.mask = fitted.mask
                 live_item.pagebox.std_dev = fitted.std_dev
+            # WR-02 (plan 08-10): belt-and-suspenders mirror of the threshold
+            # slot's CR-03 no-fit guard — a dims-preserving geometry op could
+            # leave a retained-but-misaligned raw (any path that bypasses the
+            # geometry-op invalidation, e.g. a stale project-loaded blob); when
+            # EVERY box fails its fit, deriving an empty binary and calling
+            # set_auto_binary would silently wipe the plane. Skip instead.
+            if not any(pb.mask is not None for pb in boxes):
+                return
             self.canvas.set_auto_binary(derivation.auto_binary)
             self.refresh_box_inpaint_states()
         else:
@@ -3449,6 +3468,12 @@ class MainWindow(QMainWindow):
         for live_item, fitted in zip(self.canvas._box_items, current):
             live_item.pagebox.mask = fitted.mask
             live_item.pagebox.std_dev = fitted.std_dev
+        # WR-02 (plan 08-10): belt-and-suspenders mirror of the re-derive
+        # guard (the same CR-03 wipe class) — when a box move re-fits against
+        # a stale misaligned raw and EVERY fit fails, do not clobber the auto
+        # plane with an empty binary.
+        if not any(pb.mask is not None for pb in current):
+            return
         self.canvas.set_auto_binary(derivation.auto_binary)
         self.refresh_box_inpaint_states()
 
