@@ -6334,6 +6334,25 @@ class MainWindow(QMainWindow):
         if not cancelled:
             self._refresh_current_page_after_batch(batch_mode)
 
+        # WR-02 (plan 08-10, cancel/abort coverage): the dirty loop in
+        # ``_on_batch_finished`` fires only on the Worker's successful
+        # ``result`` path — on cancel the Worker emits ``aborted`` (no
+        # ``result``) and on exception ``error`` (no ``result``), so
+        # ``_on_batch_cleanup`` (connected to BOTH ``aborted`` and
+        # ``finished``) is the only handler that runs for those endpoints. The
+        # batch loop writes each page's state (``page.boxes`` / ``auto_mask`` /
+        # ``mask``) before the NEXT page's abort gate, so a cancel leaves
+        # already-processed pages mutated-but-clean — Close would silently drop
+        # the freshly detected boxes/masks. Mark EVERY page dirty for
+        # detect/detect_and_clean modes whenever the worker started; this is
+        # conservative (a page the abort skipped has no new state, so we only
+        # prompt a spurious save, never data loss). Clean-only mode keeps its
+        # pre-existing behavior (no dirty marking).
+        if batch_mode in ("detect", "detect_and_clean"):
+            for imf in self.image_files:
+                imf.dirty = True
+            self._update_title()
+
         self._op_running = False
         self._batch_active = False
         self._batch_mode = None
