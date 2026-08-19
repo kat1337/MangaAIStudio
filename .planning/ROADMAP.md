@@ -367,15 +367,28 @@ Plans:
   5. The Phase 3 D-15 seam (`PageBox.mask` / `PageBox.std_dev`) is populated by the vendored `masker.py` machinery and round-trips through `.mas` project save/load
 
 **Plans:** 9/9 plans complete
+**Wave 1**
 
 - [x] 08-01-PLAN.md
 - [x] 08-02-PLAN.md
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 08-03-PLAN.md
 - [x] 08-04-PLAN.md
 - [x] 08-05-PLAN.md
 - [x] 08-06-PLAN.md
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 08-07-PLAN.md
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 08-08-PLAN.md
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [x] 08-09-PLAN.md
 
 **UI hint**: yes
