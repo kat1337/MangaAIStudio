@@ -1,19 +1,14 @@
 ---
-status: testing
+status: complete
 phase: 08-masker-selective-inpaint
 source: [08-VERIFICATION.md]
 started: 2026-08-19T00:50:00Z
-updated: 2026-08-19T00:50:00Z
+updated: 2026-08-19T01:10:00Z
 ---
 
 ## Current Test
 
-number: 1
-name: Border (inpaint state pens) legible on real artwork at working zooms
-expected: |
-  The 4-state border (will-inpaint solid / gate-skipped dashed / never / forced)
-  is distinguishable from artwork and box handles at typical zoom levels.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -30,7 +25,7 @@ awaiting: user response
 
 **Expected:** The 4-state border is distinguishable from artwork and box handles at typical zoom levels.
 
-result: [pending]
+result: pass
 
 ### 2. Detection-settings dock renders correctly at 1024x720
 
@@ -45,7 +40,7 @@ result: [pending]
 
 **Expected:** All detection controls are reachable and unclipped at 1024x720.
 
-result: [pending]
+result: pass
 
 ### 3. Batch quality on a real chapter + re-dilate slider latency
 
@@ -60,7 +55,7 @@ result: [pending]
 
 **Expected:** Inpaint quality matches the interactive path; the dilation slider re-derives without perceptible lag.
 
-result: [pending]
+result: pass
 
 ### 4. Moved-box + override flow (08-10 gap-closure regression)
 
@@ -77,14 +72,14 @@ result: [pending]
 
 **Expected:** Mask content removed/joined at the box's current position; border states follow.
 
-result: [pending]
+result: pass
 
 ## Summary
 
 total: 4
-passed: 0
+passed: 4
 issues: 0
-pending: 4
+pending: 0
 skipped: 0
 blocked: 0
 
