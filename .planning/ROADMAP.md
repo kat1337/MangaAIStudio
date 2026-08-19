@@ -262,7 +262,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. Project Persistence, Image Ops & Export | 10/10 | Complete    | 2026-08-08 |
 | 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
 | 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
-| 8. Masker & Selective Inpaint | 10/10 | Complete   | 2026-08-19 |
+| 8. Masker & Selective Inpaint | 10/10 | Complete    | 2026-08-19 |
 | 9. UI Rework | 0/0 | Not started | - |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
