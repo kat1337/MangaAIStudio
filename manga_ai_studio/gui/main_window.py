@@ -6232,6 +6232,15 @@ class MainWindow(QMainWindow):
         Reads the Plan 03 summary dict ``{"ok", "failed", "total"}`` and
         renders the UI-SPEC copy: a clean run reads "Cleaned N/N pages"; a run
         with failures reads "Cleaned N/M pages — K failed, see log".
+
+        WR-02 (plan 08-10): a DETECT-mode batch completion marks every touched
+        page dirty (ok > 0) so Close prompts save instead of silently dropping
+        the freshly detected boxes. Batch dispatch passes ``list(self.image_files)``
+        (:6081/:6090), so the worker's ``page.boxes`` / ``auto_mask`` / ``mask``
+        writes land on those same objects — dirtied here in lockstep.
+        ``_batch_mode`` is still set when ``result`` fires (cleanup resets it
+        later via ``finished``), so the read is safe here. Clean-only mode
+        keeps its pre-existing behavior (no dirty marking).
         """
         ok = summary.get("ok", 0) if isinstance(summary, dict) else 0
         total = summary.get("total", 0) if isinstance(summary, dict) else 0
@@ -6242,6 +6251,13 @@ class MainWindow(QMainWindow):
             )
         else:
             self.status_bar_left.setText(f"Cleaned {ok}/{total} pages")
+        # WR-02 (plan 08-10): detect-mode batches mutate every page's boxes/
+        # masks — the session must be dirty so Close prompts save. Clean-only
+        # mode does not dirty (the pre-existing behavior).
+        if ok > 0 and self._batch_mode in ("detect", "detect_and_clean"):
+            for imf in self.image_files:
+                imf.dirty = True
+            self._update_title()
         self._refresh_action_states()
 
     def _on_batch_error(self, worker_error) -> None:

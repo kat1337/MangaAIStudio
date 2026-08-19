@@ -69,6 +69,7 @@ from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.core.detection_boxes import (
     build_detected_pageboxes,
     derive_page_mask_state,
+    merge_page_boxes_for_detect,
 )
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.image_io import passthrough_original, save_image_optimized
@@ -185,10 +186,15 @@ def _run_batch_task(
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 img_h, img_w = image.shape[0], image.shape[1]
                 boxes = build_detected_pageboxes(blk_list, img_w, img_h)
+                # WR-01 (plan 08-10): apply the interactive D-03 merge — a
+                # page's persisted USER-origin boxes (with their payload/style/
+                # inpaint_override/geometry) survive the batch detect, while
+                # DETECTED-origin boxes are replaced by the fresh detection.
+                merged = merge_page_boxes_for_detect(page.boxes, boxes)
                 derivation = derive_page_mask_state(
                     image_rgb,
                     mask_refined,
-                    boxes,
+                    merged,
                     masker_conf,
                     int(masker_conf.mask_dilation_radius),
                 )
@@ -198,8 +204,9 @@ def _run_batch_task(
                 # A page with zero boxes derives an EMPTY auto binary — the
                 # same persistence shape, so the clean-stage D-03 passthrough
                 # extends naturally. manual/erase stay None (batch pages have
-                # no hand strokes).
-                page.boxes = boxes
+                # no hand strokes). page.boxes = merged — never the fresh
+                # detected list alone (WR-01: user boxes survive).
+                page.boxes = merged
                 page.raw_detected_mask = pack_binary(derivation.raw_binary)
                 page.auto_mask = pack_binary(derivation.auto_binary)
                 # The trailing .copy() is belt-and-suspenders detachment

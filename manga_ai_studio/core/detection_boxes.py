@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import attrs
 import numpy as np
@@ -34,7 +35,7 @@ import panelcleaner.config as cfg
 import panelcleaner.image_ops as ops
 import panelcleaner.structures as st
 
-from manga_ai_studio.core.box_model import DETECTED, PageBox, textblock_to_box
+from manga_ai_studio.core.box_model import DETECTED, USER, PageBox, textblock_to_box
 from manga_ai_studio.core.text_style import default_style
 
 
@@ -103,6 +104,36 @@ def build_detected_pageboxes(
                 )
             )
     return detected_pageboxes
+
+
+def merge_page_boxes_for_detect(
+    existing: Sequence[PageBox], fresh_detected: Sequence[PageBox]
+) -> list[PageBox]:
+    """The headless D-03 merge: keep USER boxes, replace DETECTED ones.
+
+    Plan 08-10 (WR-01): applies the interactive D-03 replace-detected-keep-user
+    rule (:func:`MainWindow._build_detected_boxes`, main_window.py:4594-4613)
+    headlessly so the batch detect worker (plan 08-09, batch_runner.py) can
+    never overwrite a page's persisted USER-origin boxes — including their
+    per-box D-15 seam state (``inpaint_override``) and payload/style/geometry.
+
+    Every existing box whose ``origin == USER`` is kept AS-IS (object identity
+    preserved — the caller's :func:`derive_page_mask_state` mutates the
+    returned list in place, which is the interactive contract; the derive
+    refills the D-15 seam fields), every DETECTED-origin box is replaced by
+    ``fresh_detected``, and the result is ``[kept user boxes] +
+    list(fresh_detected)``. Qt-free by construction (the worker thread imports
+    this module — see :func:`build_detected_pageboxes`).
+
+    Args:
+        existing: The page's current boxes (``ImageFile.boxes`` — may be None).
+        fresh_detected: The boxes just built from the current detect pass.
+
+    Returns:
+        The merged list (kept user boxes first, then the fresh detected boxes).
+    """
+    user_pageboxes = [pb for pb in (existing or []) if pb.origin == USER]
+    return user_pageboxes + list(fresh_detected)
 
 
 # ---------------------------------------------------------------------------
