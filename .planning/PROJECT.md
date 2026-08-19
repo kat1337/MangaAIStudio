@@ -33,15 +33,15 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 - [x] Manual draw-to-OCR, edit recognized text inline, manual translation layer per box — *Validated in Phase 4: OCR Recognition & Text Editing (TEXT-02, TEXT-04, TEXT-05)*
 - [x] Save/load projects as `.mas` files (boxes, masks, text, image state — resumable like a .psd) — *Validated in Phase 5: Project Persistence (PROJ-01)*
 - [x] Export OCR/box JSON (mokuro-style `_ocr.json`) alongside pages for downstream tools — *Validated in Phase 5 (PROJ-03)*
+- [x] Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative CTD heatmap misses — *Validated in Phase 8 (MASK-01, SC-1)*
+- [x] Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility and override — activates the Phase 3 `PageBox.mask`/`std_dev` seam — *Validated in Phase 8 (MASK-02/MASK-03, SC-2/SC-3, incl. post-move gap-closure fixes)*
+- [x] Box-constrained inpainting: only mask content inside text boxes is inpainted (PanelCleaner's box-driven cleaning model) — *Validated in Phase 8 (MASK-05, SC-2 box-constrained)*
+- [x] Paint tools can paint mask under text boxes (box items don't block brush strokes) — *Validated in Phase 8 (MASK-06, SC-4)*
 
 ### Active
 
-<!-- v1.2 scope. Activating deferred cleaning-track features + UI rework. -->
+<!-- v1.2 scope. UI rework remaining (was: cleaning-track activation delivered in Phase 8). -->
 
-- [ ] Mask dilation: configurable detection-time radius so detected masks cover letter edges the conservative CTD heatmap misses
-- [ ] Std-deviation selective per-box inpaint (D-15): inpaint only inside boxes whose region is uniform enough, with per-box visibility and override — activates the Phase 3 `PageBox.mask`/`std_dev` seam
-- [ ] Box-constrained inpainting: only mask content inside text boxes is inpainted (PanelCleaner's box-driven cleaning model)
-- [ ] Paint tools can paint mask under text boxes (box items don't block brush strokes)
 - [ ] UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools)
 
 ### Out of Scope
@@ -104,6 +104,7 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 | Manual translation now, MT seam later | v1 ships manual entry; design text layer so MT can be plugged in later | — Pending |
 | Windows-first, Linux-portable | Developer environment is Windows; cross-platform Python stack makes Linux feasible later | — Pending |
 | GPL v3 license | PanelCleaner is GPL v3; derivative works must be GPL v3 — ensures tool stays open source | — Active |
+| Snapshot-as-geometry recompose | Canvas `boxes_snapshot()` is the single geometry/materialization source for every recompose consumer; live `pagebox.box` never written back (Box identity safety for OCR id-routing) — closed the stale-geometry defect family (Phase 8 gap closure) | — Decided (2026-08-19) |
 
 ## Evolution
 
@@ -123,4 +124,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-13 after milestone v1.2 start (Masker & Selective Inpaint + UI Rework)*
+*Last updated: 2026-08-19 after Phase 8 (Masker & Selective Inpaint) — cleaning-track activation delivered and gap-closed; next: Phase 9 UI rework*
