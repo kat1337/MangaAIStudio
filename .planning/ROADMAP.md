@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Project Persistence, Image Ops & Export** - Save/resume .mas projects, basic image operations, export _ocr.json (completed 2026-08-08)
 - [x] **Phase 6: Refinement & Polish** - Deferred v1.1 fixes (empty-state overlay, toolbar active-tool highlight, stale hint copy, dialog typography) + full draggable curve editor replacing the Levels dialog (completed 2026-08-09)
 - [x] **Phase 7: Typesetting (TRAN-02)** - Render translated text into the page with full styling controls (font, style, size, color, alignment, effects, tategaki) (completed 2026-08-09)
-- [ ] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + box-constrained std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override + brush-paints-under-boxes tool behavior (gaps found — awaiting gap closure)
+- [x] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + box-constrained std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override + brush-paints-under-boxes tool behavior (gaps found — awaiting gap closure) (completed 2026-08-19)
 - [ ] **Phase 9: UI Rework** - Modular side panel, inspector toggle at top, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section
 
 ## Phase Details
@@ -262,7 +262,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. Project Persistence, Image Ops & Export | 10/10 | Complete    | 2026-08-08 |
 | 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
 | 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
-| 8. Masker & Selective Inpaint | 9/9 | Gaps found |  |
+| 8. Masker & Selective Inpaint | 10/10 | Complete   | 2026-08-19 |
 | 9. UI Rework | 0/0 | Not started | - |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
@@ -366,7 +366,10 @@ Plans:
   4. User can paint mask under text boxes — when a paint tool is active, box items do not block brush strokes in box-overlapped regions
   5. The Phase 3 D-15 seam (`PageBox.mask` / `PageBox.std_dev`) is populated by the vendored `masker.py` machinery and round-trips through `.mas` project save/load
 
-**Plans:** 9/9 plans complete
+**Plans:** 10/10 plans complete
+
+- [x] 08-10-PLAN.md
+
 **Wave 1**
 
 - [x] 08-01-PLAN.md
