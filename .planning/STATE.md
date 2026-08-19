@@ -4,8 +4,8 @@ milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 9
 current_phase_name: UI Rework
-status: executing
-stopped_at: "Phase 08 verification — gaps found (3/5 must-haves); next /gsd:plan-phase 08 --gaps"
+status: ready
+stopped_at: "Phase 08 complete (5/5 truths, UAT 4/4, security passed); ready to plan Phase 9 (UI Rework)"
 last_updated: "2026-08-19T16:18:40.106Z"
 last_activity: 2026-08-19
 last_activity_desc: Phase 08 complete, transitioned to Phase 9
@@ -21,16 +21,16 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-11)
+See: .planning/PROJECT.md (updated 2026-08-19)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 08 — masker-selective-inpaint
+**Current focus:** Phase 09 — ui-rework (UI Rework)
 
 ## Current Position
 
 Phase: 9 — UI Rework
 Plan: Not started
-Status: Executing Phase 08
+Status: Ready to plan
 Last activity: 2026-08-19 — Phase 08 complete, transitioned to Phase 9
 
 ## Performance Metrics
@@ -302,6 +302,11 @@ Recent decisions affecting current work:
 - [Phase ?]: masker_conf is a REQUIRED positional on batch_detect/batch_detect_and_clean (no default): the profile always supplies it; a missing conf in a detect mode raises TypeError inside _run_batch_task (a programming error must fail loudly, never silently derive with defaults) — Batch adopts the D-02 rule only when the profile's live MaskerConfig reaches the worker; a silent default would hide a missing-threading bug
 - [Phase ?]: Task 2's behavior tests live in tests/test_gui_batch.py, NOT the plan's listed test_core/test_batch_runner.py — _dispatch_batch and the canvas restore are Qt-dependent MainWindow behavior that cannot run headless in the core suite; the Task 2 verify runs both files (superset of the plan command) — Physical constraint of the headless core suite; the plan's files_modified list conflated the GUI task with the core test file
 - [Phase ?]: The post-batch refresh passes EXPLICIT-EMPTY manual/erase planes (not None) for batch pages and restores the auto plane from the packed slot only when present — legacy flat-mask pages keep the existing set_mask restore — The canvas API distinguishes empty-from-absent; batch pages genuinely have no strokes
+- [Phase 08 gap-closure]: Snapshot-as-geometry is the single recompose contract — every recompose consumer (`_on_std_dev_threshold_changed`, `_rederive_auto_layer`, `_recompose_boxes_auto_plane`) reads `canvas.boxes_snapshot()`; live `pagebox.box` is NEVER written back (Box identity safety for `_on_ocr_finished` id-routing). Fixes the CR-01 stale-geometry defect family (08-10, verified 2026-08-19)
+- [Phase 08 gap-closure]: Sibling guard symmetry — the no-fit guard (`any(pb.mask is not None)`) and zero-boxes guard occupy the SAME relative position in every recompose slot (threshold: zero-boxes → no-fit → image → compose) so a geometry-op invalidation can never compose an empty binary and silently wipe the auto plane (CR-03/WR-03)
+- [Phase 08 gap-closure]: consumption is signal-silent — `canvas.consume_mask_display()` clears manual+erase+auto planes without emitting `mask_modified` (CR-16 2-stack contract), so consumed overlays cannot resurrect and re-Inpaint cannot re-process cleaned regions (CR-04)
+- [Phase 08 gap-closure]: `merge_page_boxes_for_detect()` is the headless D-03 merge (USER boxes keep identity, DETECTED replaced; `page.boxes = merged`) and detect-batch dirty marking covers BOTH the result and cancel/abort paths (conservative over-dirty is safe) — WR-01/WR-02
+- [Phase 08 gap-closure]: `_apply_geometry_op` invalidates `raw_detected_mask`/`auto_mask` — a dims-preserving ops (180° rotate) must not re-derive an unrotated raw against rotated boxes (WR-02 review-fix cache-invalidation principle)
 
 ### Roadmap Evolution
 
@@ -324,6 +329,8 @@ None yet.
 - [Phase 1]: Design model adapter interface to allow optional MangaCleaner_GPU ONNX models as user-installed modules (future enhancement).
 - [Licensing]: Project is GPL v3 (derivative of PanelCleaner) — must preserve GPL v3 in all distributions and provide source code.
 - [Phase 2 follow-up]: Deliberately re-verify `cleaned/` output quality before Phase 02 is considered fully shipped. The 02-04 smoke-test spot-check (check #3) passed, but the user wants a deliberate re-confirmation. Specifically: (1) outputs are visually clean (text removed, artwork restored); (2) no-text pages are byte-identical to their source (the D-03 copy2 passthrough is not silently re-encoding via PIL); (3) files are written ONLY into `cleaned/` and never into the source chapter folder. Logged from plan 02-04 completion (2026-07-25).
+- [Phase 08 follow-up]: OCR crop dispatch (`run_ocr` / `run_ocr_all`) still passes `it.pagebox.box` (birth geometry) into the worker — after a box move, OCR recognizes the pre-move region (IN-01 in 08-REVIEW.md; same CR-01 root-cause family, deliberately out of 08-10 scope). Fixes should pass per-item `box_item.current_box()`/`boxes_snapshot()` geometry to the worker while keeping `id(it.pagebox)` for result routing.
+- [Phase 09 input]: UI Rework inherits the post-08 UI-SPEC state — reused seams and the 08-07 live handlers/`boxes_snapshot` contract are load-bearing for the inspector/toolbar rework (see 08-SECURITY.md / 08-VERIFICATION.md).
 
 ## Deferred Items
 
@@ -335,8 +342,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-18T06:09:21.566Z
-Stopped at: Phase 08 verification — gaps found (3/5 must-haves); next /gsd:plan-phase 08 --gaps
+Last session: 2026-08-19
+Stopped at: Phase 8 complete (verified 5/5 truths, UAT 4/4 passed, security threats_open 0) — ready to plan Phase 9 (UI Rework)
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
