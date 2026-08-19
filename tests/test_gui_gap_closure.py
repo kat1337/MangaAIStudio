@@ -375,3 +375,128 @@ def test_detect_batch_marks_pages_dirty(qtbot, tmp_path) -> None:
     assert not any(imf.dirty for imf in window2.image_files), (
         "clean-only batches must not mark pages dirty"
     )
+
+
+# ===========================================================================
+# Plan 08-10 review (WR-01): a CANCELLED/aborted detect batch must also dirty
+# the processed pages, or Close silently drops the freshly detected boxes
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_detect_batch_cancel_marks_pages_dirty(qtbot, tmp_path) -> None:
+    """WR-02 (cancel/abort coverage, plan 08-10): a CANCELLED detect batch must
+    mark every page dirty too.
+
+    ``_on_batch_finished`` fires only on the Worker's successful ``result``
+    path — on cancel/abort the Worker emits ``aborted`` (no ``result``) and on
+    exception ``error`` (no ``result``), so ``_on_batch_cleanup`` (connected to
+    ``aborted`` AND ``finished``) is the only handler that runs. It must dirty
+    the already-processed pages (the batch loop writes each page's state before
+    the NEXT page's abort gate) or Close silently drops the detected
+    boxes/masks. Clean-only mode must NOT dirty even on cancel.
+    """
+    from manga_ai_studio.core.image_file import ImageFile
+
+    window = _window_with_page(qtbot, tmp_path)
+    window.image_files.append(ImageFile(path=tmp_path / "page2.png"))
+    assert not any(imf.dirty for imf in window.image_files)
+
+    # The Esc -> _cancel_batch -> worker.abort() path: _batch_cancelled is set
+    # by _cancel_batch and _batch_mode is still the dispatched mode.
+    window._batch_mode = "detect"
+    window._batch_cancelled = True
+    window._on_batch_cleanup(None)
+
+    assert all(imf.dirty for imf in window.image_files), (
+        "a cancelled detect batch must mark every page dirty so Close "
+        "prompts save instead of silently dropping the detected boxes"
+    )
+    assert "*" in window.windowTitle(), (
+        "the title must reflect the dirty state (the * suffix)"
+    )
+
+    # Clean-only mode: no spurious dirty marking on the cancel path.
+    window2 = _window_with_page(qtbot, tmp_path)
+    window2._batch_mode = "clean"
+    window2._batch_cancelled = True
+    window2._on_batch_cleanup(None)
+    assert not any(imf.dirty for imf in window2.image_files), (
+        "clean-only batches must not mark pages dirty even on cancel"
+    )
+
+
+# ===========================================================================
+# Plan 08-10 review (WR-02): dims-preserving geometry op leaves a stale raw
+# that must NOT wipe the auto plane on the next live re-derive
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_rotate_then_dilate_nudge_keeps_auto_plane(qtbot, tmp_path) -> None:
+    """WR-02 (plan 08-10): a dims-preserving geometry op (180-degree rotate)
+    followed by a live dilation nudge must NOT silently wipe the auto plane.
+
+    Pre-fix: ``_apply_geometry_op`` rotates the auto plane and every box but
+    never invalidates ``ImageFile.raw_detected_mask`` — the re-derive's dims
+    guard passes for a 180-degree rotate (dims unchanged) while the retained
+    raw content is misaligned against the rotated boxes, so every fit fails and
+    ``set_auto_binary(empty)`` wipes the rotated plane (the CR-03 wipe class).
+    Post-fix: the geometry op invalidates the raw (+ derived auto slot), so the
+    re-derive no-ops and the plane keeps its geometry-transformed content.
+    """
+    window = _window_with_page(qtbot, tmp_path)
+    window.action_detect_boxes_mode.setChecked(True)
+
+    # Non-symmetric content (a top-left block) so a 180-degree rotate changes it.
+    heat = np.zeros((50, 60), dtype=np.uint8)
+    heat[2:20, 2:20] = 255
+    window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 29, 34)]})
+    imf = window.image_files[0]
+    assert imf.raw_detected_mask is not None, "fixture sanity: raw is retained"
+    assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(5, 5, 29, 34), (
+        "fixture sanity: the auto plane holds the box-constrained content"
+    )
+
+    # 180-degree rotate — dims-preserving (50x60 -> 50x60) — driving
+    # ``_apply_geometry_op`` directly (the real ``_rotate_page`` machinery
+    # needs a full TextBlock payload; the headless ``_blk`` fixture payload is
+    # shape-only). Image + mask rotate under the ONE np.rot90(k=2) convention
+    # while every box is rotated and its mask/std_dev invalidated per the Phase
+    # 8 field policy — exactly what a real rotate applies. The geometry op must
+    # then invalidate the retained raw (no longer in the page frame).
+    from manga_ai_studio.core.box_model import PageBox
+    from manga_ai_studio.core.image_ops import transform_box
+
+    def _rotate_180_transform():
+        img = window.canvas.get_image_numpy()
+        h, w = img.shape[:2]
+        new_img = np.rot90(img, k=2).copy()
+        new_mask = np.rot90(window.canvas._auto_bin, k=2).copy()
+        new_boxes = [
+            PageBox(
+                box=transform_box(pb.box, w, h, 2),
+                origin=pb.origin,
+                mask=None,
+                std_dev=None,
+            )
+            for pb in window.canvas.boxes_snapshot()
+        ]
+        return new_img, new_mask, new_boxes
+
+    window._apply_geometry_op("rotate-180", geometry=True, transform_fn=_rotate_180_transform)
+
+    assert imf.raw_detected_mask is None, (
+        "WR-02: the geometry op must invalidate the retained raw mask"
+    )
+    assert imf.auto_mask is None, (
+        "WR-02: the derived auto slot must clear with the raw"
+    )
+
+    # Live dilation nudge: must not re-derive a stale raw into an empty binary
+    # that wipes the rotated plane.
+    window._rederive_auto_layer()
+    assert window.canvas._auto_bin is not None
+    assert np.count_nonzero(window.canvas._auto_bin) > 0, (
+        "WR-02: the auto plane must retain content after rotate + dilation nudge"
+    )
