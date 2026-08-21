@@ -53,7 +53,7 @@ Requirements for milestone v1.2 (Masker & Selective Inpaint + UI Rework). Each m
 
 - [ ] **UI-01**: The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
 - [ ] **UI-02**: The inspector toggle button is moved to the top of the side panel
-- [ ] **UI-03**: The tools toolbar is relocated from beside the file explorer to a small vertical toolbar on the right side of the canvas
+- [ ] **UI-03**: The tools toolbar is relocated from beside the file explorer to a small vertical toolbar beside the canvas — LEFT of the canvas, between the Pages file list and the canvas (D-05; wording corrected 2026-08-21 from the original "right side" per the user-locked deviation)
 - [ ] **UI-04**: The former "Inspector" panel section is renamed to "Typesetting"
 - [ ] **UI-05**: A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) currently scattered across menus/dialogs
 

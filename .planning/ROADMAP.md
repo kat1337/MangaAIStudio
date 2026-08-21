@@ -419,7 +419,7 @@ Plans:
 - Activates `phases/06-refinement-polish-deferred-fixes-full-curve-editor/06-UAT.md`: "Consider adding Curves (and possibly other tools) to the sidebar — user plans a later phase to revamp the sidebar a bit."
 - UI-01 modular side panel: discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel.
 - UI-02 inspector toggle button moved to the top of the side panel.
-- UI-03 tools toolbar relocated from beside the file explorer to a small vertical toolbar on the right side of the canvas.
+- UI-03 tools toolbar relocated from beside the file explorer to a small vertical toolbar beside the canvas — LEFT of the canvas, between the Pages file list and the canvas (D-05 deviation from the original right-side wording; user-locked 2026-08-21).
 - UI-04 the former "Inspector" panel section is renamed to "Typesetting".
 - UI-05 a new "Edit" panel section houses curves, crop, rotate, resize, levels — the image ops already delivered in Phases 5/6, reorganized into a panel section rather than scattered across menus/dialogs.
 - Internal PySide6 refactor touching `gui/main_window.py`, `gui/tools_panel.py`, the `gui/inspector` panel (Phases 4/7), and the canvas toolbar wiring (Phase 6 D-10 checkable-actions group). It does NOT remove existing functionality.
@@ -431,11 +431,24 @@ Plans:
 
   1. The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
   2. The inspector toggle button sits at the top of the side panel
-  3. The tools toolbar is a small vertical toolbar on the right side of the canvas, relocated from beside the file explorer
+  3. The tools toolbar is a small vertical toolbar beside the canvas — LEFT of the canvas, between the Pages file list and the canvas (D-05; wording corrected from the original "right side" per the user-locked deviation)
   4. The former "Inspector" panel section is labeled "Typesetting"
   5. A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) previously scattered across menus/dialogs
 
-**Plans:** TBD
+**Plans:** 3 plans
+
+**Wave 1**
+
+- [ ] 09-01-PLAN.md — Vertical tools strip beside the canvas (8 icon buttons + divider) + 8 bundled SVGs + top-toolbar slim-down (UI-03, D-04/D-05/D-06/D-07)
+
+**Wave 2** *(blocked on 09-01; main_window.py ownership)*
+
+- [ ] 09-02-PLAN.md — Unified "Panel" dock: 4 independently collapsible sections + panel-header toggle + Typesetting rename + collapse persistence (UI-01, UI-02, UI-04, D-01/D-02/D-03)
+
+**Wave 3** *(blocked on 09-02; side_panel.py ownership)*
+
+- [ ] 09-03-PLAN.md — Edit section (6 default-action buttons) + menu slimming with zero shortcut loss (UI-05, D-08/D-09)
+
 **UI hint**: yes
 
 ---
