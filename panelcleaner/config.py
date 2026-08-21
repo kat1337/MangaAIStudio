@@ -567,6 +567,10 @@ class MaskerConfig:
     # ignores the extra key gracefully on import (unknown options are
     # skipped by import_from_conf).
     mask_dilation_radius: Pixels = 2
+    # Manga AI Studio addition (Phase 08.1, D-05/D-06 — plan 08.1-01): max LaMa
+    # input size (square cap, largest side). NOT upstream. Default 2048 per
+    # D-05; clamped 512..8192 in fix() and via try_to_load fallback.
+    max_inpaint_resolution: int = 2048
     debug_mask_color: tuple[int, int, int, int] = (108, 30, 240, 127)
 
     def export_to_conf(
@@ -641,6 +645,11 @@ class MaskerConfig:
         # re-dilates the current page immediately.
         mask_dilation_radius = {self.mask_dilation_radius}
 
+        # Maximum LaMa inpaint input size (square cap, largest side). Larger pages are patched
+        # to cap memory (D-05). Default 2048; clamped 512..8192. Changing this affects the next
+        # Inpaint run (no live recompose).
+        max_inpaint_resolution = {self.max_inpaint_resolution}
+
         # Color to use for the debug mask. [CLI: This is a tuple of RGBA values.]
         debug_mask_color = {','.join(map(str, self.debug_mask_color))}
         
@@ -670,6 +679,7 @@ class MaskerConfig:
         try_to_load(self, config_updater, section, float, "mask_improvement_threshold")
         try_to_load(self, config_updater, section, bool, "mask_selection_fast")
         try_to_load(self, config_updater, section, Pixels, "mask_dilation_radius")
+        try_to_load(self, config_updater, section, int, "max_inpaint_resolution")
         try_to_load(self, config_updater, section, float, "mask_max_standard_deviation")
         try:
             color_tuple: tuple[int, ...] = tuple(
@@ -697,6 +707,12 @@ class MaskerConfig:
             self.mask_improvement_threshold = 0
         if self.mask_max_standard_deviation < 0:
             self.mask_max_standard_deviation = 0
+        # 08.1 clamp for max_inpaint_resolution (T-08.1-01-03, D-05 default 2048)
+        try:
+            self.max_inpaint_resolution = int(self.max_inpaint_resolution)
+        except (TypeError, ValueError):
+            self.max_inpaint_resolution = 2048
+        self.max_inpaint_resolution = max(512, min(8192, int(self.max_inpaint_resolution)))
         # We already ensured that it's a tuple of 4 ints.
         # noinspection PyTypeChecker
         self.debug_mask_color = tuple(max(0, min(255, x)) for x in self.debug_mask_color)

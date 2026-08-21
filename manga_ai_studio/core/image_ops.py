@@ -157,6 +157,7 @@ def transform_box_payload(pagebox: PageBox, w: int, h: int, k: int) -> PageBox:
             style=pagebox.style,
             mask=None,
             std_dev=None,
+            fill_color=None,
         )
     text = payload.text
     if isinstance(text, list):
@@ -179,13 +180,14 @@ def transform_box_payload(pagebox: PageBox, w: int, h: int, k: int) -> PageBox:
         manual_override=pagebox.manual_override,
         # Phase 8 field policy (RESEARCH §6.5 option b): the override is user
         # intent and cheap to carry; style is carried too (closing the live
-        # Phase 7 latent drop); mask/std_dev are DELIBERATELY invalidated — a
-        # rotated std-dev/border relation is stale, the refit happens on the
-        # next fit trigger.
+        # Phase 7 latent drop); mask/std_dev/fill_color are DELIBERATELY
+        # invalidated — a rotated std-dev/border relation is stale, the refit
+        # happens on the next fit trigger (08.1: fill_color invalidated alongside).
         inpaint_override=pagebox.inpaint_override,
         style=pagebox.style,
         mask=None,
         std_dev=None,
+        fill_color=None,
     )
 
 
@@ -294,6 +296,7 @@ def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | Non
             style=pagebox.style,
             mask=None,
             std_dev=None,
+            fill_color=None,
         )
     new_lines = []
     for quad in payload.lines:
@@ -323,11 +326,12 @@ def _clip_box(pagebox: PageBox, x: int, y: int, w: int, h: int) -> PageBox | Non
         bubble_no=pagebox.bubble_no,
         manual_override=pagebox.manual_override,
         # Phase 8 field policy (RESEARCH §6.5 option b): carry override +
-        # style, deliberately invalidate mask/std_dev (stale after crop).
+        # style, deliberately invalidate mask/std_dev/fill_color (stale after crop).
         inpaint_override=pagebox.inpaint_override,
         style=pagebox.style,
         mask=None,
         std_dev=None,
+        fill_color=None,
     )
 
 
@@ -442,6 +446,7 @@ def resize_boxes(
                     style=pb.style,
                     mask=None,
                     std_dev=None,
+                    fill_color=None,
                 )
             )
             continue
@@ -469,12 +474,13 @@ def resize_boxes(
                 bubble_no=pb.bubble_no,
                 manual_override=pb.manual_override,
                 # Phase 8 field policy (RESEARCH §6.5 option b): carry
-                # override + style, deliberately invalidate mask/std_dev
+                # override + style, deliberately invalidate mask/std_dev/fill_color
                 # (stale after resize).
                 inpaint_override=pb.inpaint_override,
                 style=pb.style,
                 mask=None,
                 std_dev=None,
+                fill_color=None,
             )
         )
     return out

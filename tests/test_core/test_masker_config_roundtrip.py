@@ -93,3 +93,57 @@ def test_startup_load_profile_applies_to_current_profile(tmp_path: Path) -> None
     fresh.load_profile("default")
 
     assert fresh.config.current_profile.masker.mask_dilation_radius == 7
+
+
+@pytest.mark.unit
+def test_max_inpaint_resolution_default_is_2048() -> None:
+    """08.1 D-05: a fresh MaskerConfig defaults max_inpaint_resolution to 2048."""
+    assert MaskerConfig().max_inpaint_resolution == 2048
+
+
+@pytest.mark.unit
+def test_max_inpaint_resolution_round_trips_through_ini(tmp_path: Path) -> None:
+    """08.1: Full INI round-trip: resolution 1024 saved and reloaded via ProfileManager."""
+    pm = ProfileManager(tmp_path)
+    profile = pm.default_profile()
+    profile.masker.max_inpaint_resolution = 1024
+    pm.save_profile(profile, "default")
+    reloaded = pm.load_profile("default")
+    assert reloaded.masker.max_inpaint_resolution == 1024
+
+
+@pytest.mark.unit
+def test_max_inpaint_resolution_clamped_512_8192(tmp_path: Path) -> None:
+    """08.1 T-08.1-01-03: values outside 512..8192 clamp in fix() and on load."""
+    # Direct fix clamp
+    cfg = MaskerConfig(max_inpaint_resolution=10000)
+    cfg.fix()
+    assert cfg.max_inpaint_resolution == 8192
+    cfg2 = MaskerConfig(max_inpaint_resolution=100)
+    cfg2.fix()
+    assert cfg2.max_inpaint_resolution == 512
+    # Through INI: crafted low value clamps on load
+    pm = ProfileManager(tmp_path)
+    profile = pm.default_profile()
+    profile.masker.max_inpaint_resolution = 8192
+    saved = pm.save_profile(profile, "default")
+    text = saved.read_text(encoding="utf-8")
+    text = text.replace("max_inpaint_resolution = 8192", "max_inpaint_resolution = 100")
+    saved.write_text(text, encoding="utf-8")
+    reloaded = pm.load_profile("default")
+    assert reloaded.masker.max_inpaint_resolution == 512
+
+
+@pytest.mark.unit
+def test_ini_without_max_inpaint_key_falls_back_to_default(tmp_path: Path) -> None:
+    """08.1: missing max_inpaint_resolution key falls back to 2048 (try_to_load guard)."""
+    pm = ProfileManager(tmp_path)
+    profile = pm.default_profile()
+    profile.masker.max_inpaint_resolution = 4096
+    saved = pm.save_profile(profile, "default")
+    lines = saved.read_text(encoding="utf-8").splitlines(keepends=True)
+    stripped = "".join(ln for ln in lines if "max_inpaint_resolution" not in ln)
+    assert "max_inpaint_resolution" not in stripped
+    saved.write_text(stripped, encoding="utf-8")
+    reloaded = pm.load_profile("default")
+    assert reloaded.masker.max_inpaint_resolution == 2048

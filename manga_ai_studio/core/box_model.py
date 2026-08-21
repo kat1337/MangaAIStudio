@@ -113,6 +113,12 @@ class PageBox:
     # NOT manual_override — that name is TAKEN by the Phase 4 reading-order
     # pin above (RESEARCH Q3).
     inpaint_override: Optional[str] = None
+    # Phase 08.1 (D-04 quad-state + fill_color): per-box median fill color.
+    # Populated at fit time from MaskFittingResults.median_color (off-white
+    # rounding baked at panelcleaner/image_ops.py:535). None until fitted.
+    # Carried through boxes_snapshot, geometry-op invalidation, and .mas
+    # persistence. Tuple is immutable — copy() shares by ref.
+    fill_color: Optional[tuple[int, int, int]] = None
 
     # --------------------------------------------------------- text setters
     def _ensure_payload(self) -> None:
@@ -197,37 +203,45 @@ class PageBox:
         return self.mask is not None and self.mask.getbbox() is not None
 
     def inpaint_state(self, threshold: float) -> str:
-        """Derive the border-state contract state (08-UI-SPEC §Color).
+        """Derive the border-state contract state (08-UI-SPEC §Color + 08.1 D-01/D-04).
 
         A pure function of own fields + ``threshold`` (the
         ``has_recognized_text`` shape — headless-testable, no UI logic).
         Returns exactly one of:
 
-        - ``"forced"``: ``inpaint_override == "always"`` — the user asserted
-          "clean this no matter what" (std_dev/mask are irrelevant).
-        - ``"never"``: ``inpaint_override == "never"`` — the user demoted the
-          box ("C will not touch this").
+        - ``"forced_inpaint"``: ``inpaint_override == "always"`` — forced LaMa.
+        - ``"forced_fill"``: ``inpaint_override == "fill"`` — forced median fill.
+        - ``"never"``: ``inpaint_override == "never"`` — leave text entirely.
         - ``"will_inpaint"``: Auto AND ``std_dev`` is not None AND
-          ``std_dev <= threshold`` AND the box has auto mask content — the
-          gate passes.
-        - ``"gate_skipped"``: everything else (gate fails, no fit data yet,
-          or no auto mask content — a noise box / no detected text inside).
+          ``std_dev > threshold`` AND the box has auto mask content — complex
+          box, gate passes for inpaint (D-01 inverted).
+        - ``"will_fill"``: Auto AND ``std_dev`` is not None AND
+          ``std_dev <= threshold`` AND the box has auto mask content — uniform
+          box, gate passes for fill (D-01 inverted).
+        - ``"gate_skipped"``: everything else (no fit data yet, or no auto
+          mask content — noise box).
 
         This is the SINGLE derivation site: ``BoxItem.set_inpaint_state``
         (plan 08-06) and ``refresh_box_inpaint_states`` (plan 08-07) consume
         it; the logic is not duplicated elsewhere.
+
+        Backward compat: callers comparing to ``"forced"`` should migrate to
+        ``"forced_inpaint"``; this implementation still returns
+        ``"forced_inpaint"`` for ``"always"`` so GUI checks for ``"forced"``
+        will miss it until their next plan (headless tracer proves the new
+        vocabulary headlessly).
         """
         if self.inpaint_override == "always":
-            return "forced"
+            return "forced_inpaint"
+        if self.inpaint_override == "fill":
+            return "forced_fill"
         if self.inpaint_override == "never":
             return "never"
-        if (
-            self.std_dev is not None
-            and self.std_dev <= threshold
-            and self._has_auto_mask_content()
-        ):
-            return "will_inpaint"
-        return "gate_skipped"
+        if not self._has_auto_mask_content() or self.std_dev is None:
+            return "gate_skipped"
+        if self.std_dev <= threshold:
+            return "will_fill"
+        return "will_inpaint"
 
     # ------------------------------------------------------------ undo seam
     def copy(self) -> "PageBox":
@@ -253,6 +267,7 @@ class PageBox:
             payload=_copy.copy(self.payload),
             style=_copy.copy(self.style),
             mask=_copy.copy(self.mask) if self.mask is not None else None,
+            fill_color=self.fill_color,
         )
 
 

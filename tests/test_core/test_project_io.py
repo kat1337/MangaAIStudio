@@ -315,10 +315,10 @@ def test_legacy_pagebox_without_phase8_keys_loads_defaults() -> None:
 
 @pytest.mark.unit
 def test_invalid_inpaint_override_rejected() -> None:
-    """An inpaint_override not in {"always","never"} raises ProjectFormatError,
-    matching the format-version rejection stance (T-08-08 enum validation).
+    """An inpaint_override not in {"always","never","fill"} raises ProjectFormatError,
+    matching the format-version rejection stance (T-08-08 enum validation + 08.1 D-04).
 
-    None (Auto) passes; any other string is structural garbage.
+    None (Auto) and "fill"/"always"/"never" pass; any other string is structural garbage.
     """
     base = {
         "box": [0, 0, 10, 10],
@@ -333,6 +333,11 @@ def test_invalid_inpaint_override_rejected() -> None:
     # None (null/Auto) loads clean
     out = json_to_pagebox({**base, "inpaint_override": None})
     assert out.inpaint_override is None
+    # 08.1: "fill" loads clean (quad-state)
+    out2 = json_to_pagebox({**base, "inpaint_override": "fill"})
+    assert out2.inpaint_override == "fill"
+    out3 = json_to_pagebox({**base, "inpaint_override": "always"})
+    assert out3.inpaint_override == "always"
 
 
 @pytest.mark.unit
@@ -894,3 +899,70 @@ def test_oversized_chapter_rejected(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ProjectFormatError):
         load_project(manifest_path)
+
+
+@pytest.mark.unit
+def test_fill_and_fill_color_round_trip() -> None:
+    """08.1: PageBox with inpaint_override fill and fill_color (128,200,50)
+    serializes fill_color as [128,200,50] and loads back equal; legacy file
+    without fill_color loads with fill_color None; old vocab always/never still loads."""
+    from manga_ai_studio.core.project_io import pagebox_to_json, json_to_pagebox
+
+    pb = PageBox(
+        box=Box(0, 0, 10, 10),
+        origin=USER,
+        payload=None,
+        inpaint_override="fill",
+        fill_color=(128, 200, 50),
+    )
+    d = pagebox_to_json(pb)
+    assert d["inpaint_override"] == "fill"
+    assert d["fill_color"] == [128, 200, 50]
+    out = json_to_pagebox(d)
+    assert out.inpaint_override == "fill"
+    assert out.fill_color == (128, 200, 50)
+
+    # Legacy without fill_color key loads with None
+    legacy = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+        "inpaint_override": None,
+    }
+    out_legacy = json_to_pagebox(legacy)
+    assert out_legacy.fill_color is None
+    assert out_legacy.inpaint_override is None
+
+    # Old vocab still loads
+    for val in ("always", "never"):
+        out_old = json_to_pagebox({**legacy, "inpaint_override": val})
+        assert out_old.inpaint_override == val
+
+    # Invalid fill_color rejected
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**legacy, "fill_color": [1, 2]})
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**legacy, "fill_color": [256, 0, 0]})
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**legacy, "fill_color": "bad"})
+
+
+@pytest.mark.unit
+def test_pagebox_copy_detaches_mask_preserves_fill_color() -> None:
+    """08.1 tracer truth: PageBox copy detaches mask PIL image while fill_color tuple preserved by value."""
+    from manga_ai_studio.core.box_model import DETECTED, PageBox
+    from PIL import Image
+
+    m = Image.new("1", (4, 4), 0)
+    m.putpixel((1, 1), 1)
+    pb = PageBox(box=Box(0, 0, 10, 10), origin=DETECTED, mask=m, fill_color=(10, 20, 30))
+    clone = pb.copy()
+    assert clone.mask is not pb.mask
+    assert clone.fill_color == (10, 20, 30)
+    pb.fill_color = (1, 1, 1)
+    assert clone.fill_color == (10, 20, 30)
+    pb.mask.putpixel((2, 2), 1)
+    assert clone.mask.getpixel((2, 2)) == 0

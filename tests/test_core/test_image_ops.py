@@ -691,16 +691,20 @@ def test_geometry_transforms_carry_inpaint_override_and_style(
 def test_geometry_transforms_invalidate_mask_and_std_dev(
     name: str, with_payload: bool
 ) -> None:
-    """A PageBox with a mask (PIL "1" with content) and ``std_dev=9.5`` comes
-    out of every transform with ``mask is None`` and ``std_dev is None`` —
-    deliberate invalidation: a rotated/scaled std-dev/border relation is
-    stale, and the refit happens on the next fit trigger (Phase 8 policy,
-    RESEARCH §6.5 option b)."""
+    """A PageBox with a mask (PIL "1" with content) and ``std_dev=9.5`` + fill_color comes
+    out of every transform with ``mask is None`` and ``std_dev is None`` and
+    ``fill_color is None`` — deliberate invalidation: a rotated/scaled
+    std-dev/border relation and its fill color are stale, and the refit happens
+    on the next fit trigger (Phase 8 policy, RESEARCH §6.5 option b; 08.1 adds
+    fill_color to the invalidation)."""
     pb = _phase8_box(with_payload)
+    pb.fill_color = (10, 20, 30)
     assert pb.mask is not None  # precondition: the input carries a mask
     assert pb.std_dev == 9.5
+    assert pb.fill_color == (10, 20, 30)
 
     out = _apply_geometry_transform(name, pb)
 
     assert out.mask is None
     assert out.std_dev is None
+    assert out.fill_color is None

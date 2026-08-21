@@ -148,10 +148,14 @@ def _page_bbox(mask_or_arr) -> tuple[int, int, int, int]:
 
 @pytest.mark.unit
 def test_derive_discards_out_of_box_heatmap_content() -> None:
-    """D-02/MASK-05: heatmap content outside the union of all boxes NEVER
-    enters the auto binary — it is retained in raw_binary (D-08) but cut away
-    before fitting/composition."""
-    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+    """D-02/MASK-05 (08.1 inverted): heatmap content outside the union of all boxes NEVER
+    enters the auto inpaint binary — it is retained in raw_binary (D-08) but cut away
+    before fitting/composition. Uniform boxes (low std) now go to fill, not auto, so
+    auto inside is 0 and fill inside is >0 (D-01 inverted)."""
+    from manga_ai_studio.core.detection_boxes import (
+        compose_fill_binary,
+        derive_page_mask_state,
+    )
 
     image_rgb, heatmap = _uniform_page_with_strokes()
     # A detected-text blob OUTSIDE every box (bottom-right corner).
@@ -164,32 +168,31 @@ def test_derive_discards_out_of_box_heatmap_content() -> None:
     assert result.raw_binary[40, 50] == 255
     # ...the constrained auto binary never does.
     assert result.auto_binary[40, 50] == 0
-    # Auto content lives ONLY inside the box union.
+    # Auto content lives ONLY inside the box union (and for uniform low-std, auto is now 0 inside too — inverted).
     assert np.count_nonzero(result.auto_binary[0:10, :]) == 0
     assert np.count_nonzero(result.auto_binary[31:, :]) == 0
     assert np.count_nonzero(result.auto_binary[:, 0:10]) == 0
     assert np.count_nonzero(result.auto_binary[:, 41:]) == 0
-    assert np.count_nonzero(result.auto_binary[10:31, 10:41]) > 0
+    # Inverted gate: uniform box (low std) contributes to fill, not auto.
+    assert np.count_nonzero(result.auto_binary[10:31, 10:41]) == 0
+    fill = compose_fill_binary(boxes, float(cfg.MaskerConfig().mask_max_standard_deviation), (60, 50))
+    assert np.count_nonzero(fill[10:31, 10:41]) > 0
 
 
 @pytest.mark.unit
 def test_derive_dilation_grows_but_never_exits_the_box() -> None:
-    """MASK-01 via dilate-then-intersect: radius 3 grows the auto content by
-    ~3 px on unclamped sides and is CLIPPED exactly at the box border where it
-    would exit; radius 0 leaves it unchanged. The stored per-box mask and the
-    composed auto binary agree.
+    """MASK-01 via dilate-then-intersect (08.1 inverted): radius 3 grows the auto
+    content by ~3 px on unclamped sides and is CLIPPED exactly at the box border
+    where it would exit; radius 0 leaves it unchanged. Uniform low-std content now
+    goes to FILL, not auto, so the bbox is checked via compose_fill_binary; stored
+    per-box mask and fill composition agree.
 
-    ``mask_growth_steps=1`` makes the winner deterministic: the single growth
-    candidate (dilated cut + min_thickness) beats the box-mask candidate,
-    whose border crosses the contrast ticks drawn on the box's right/bottom
-    edges (probe-verified selection)."""
-    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+    ``mask_growth_steps=1`` makes the winner deterministic."""
+    from manga_ai_studio.core.detection_boxes import compose_fill_binary, derive_page_mask_state
 
     page = Image.new("RGB", (60, 50), (240, 240, 240))
     draw = ImageDraw.Draw(page)
     draw.rectangle([16, 16, 24, 24], fill=(20, 20, 20))  # the stroke block
-    # Contrast ticks crossing the box's right/bottom edges: the box-mask
-    # candidate's border std is high, so it never wins the selection.
     for y in range(12, 34, 6):
         draw.rectangle([44, y, 45, y + 1], fill=(10, 10, 10))
     for x in range(16, 44, 6):
@@ -202,12 +205,10 @@ def test_derive_dilation_grows_but_never_exits_the_box() -> None:
     r0 = derive_page_mask_state(np.array(page), heatmap, boxes, conf, 0)
     r3 = derive_page_mask_state(np.array(page), heatmap, boxes, conf, 3)
 
-    # Radius 0: the stroke grown by min_thickness (4) — unchanged by dilation.
-    assert _page_bbox(r0.auto_binary) == (12, 12, 28, 28)
-    # Radius 3: +3 px on the unclamped sides (28 -> 31), CLIPPED at the box
-    # border on the clamped sides (12 -> 10 == the box edge, never past it).
-    assert _page_bbox(r3.auto_binary) == (10, 10, 31, 31)
-    # The stored per-box mask agrees with the composition.
+    # Inverted gate: uniform low-std -> fill plane. Auto is empty; fill has the dilated bbox.
+    assert np.count_nonzero(r0.auto_binary) == 0
+    assert np.count_nonzero(r3.auto_binary) == 0
+    # The stored per-box mask agrees with fill composition (r3's latest mask is the 31 bbox).
     assert boxes[0].mask is not None
     local = _bbox(np.array(boxes[0].mask))
     assert (local[0] + 10, local[1] + 10, local[2] + 10, local[3] + 10) == (10, 10, 31, 31)
@@ -215,15 +216,19 @@ def test_derive_dilation_grows_but_never_exits_the_box() -> None:
     # returned for retention (D-07/D-08): raw_binary is identical at both radii.
     assert np.array_equal(r0.raw_binary, r3.raw_binary)
     assert np.count_nonzero(r3.raw_binary) == 9 * 9  # the raw stroke, undilated
+    # Fill composition for r3's boxes has the expected expanded bbox (10,10,31,31)
+    fill_r3 = compose_fill_binary(boxes, float(conf.mask_max_standard_deviation), (60, 50))
+    assert _page_bbox(fill_r3) == (10, 10, 31, 31)
 
 
 @pytest.mark.unit
 def test_derive_per_box_fits_store_gate_lifted() -> None:
-    """Per-box fits: a uniform-region box stores mask+std; a box with no
-    heatmap content stores (None, None) — the noise outcome; a textured box
-    STILL stores its mask with an honest std ABOVE the threshold (the fit ran
-    gate-lifted — P-5: threshold changes never re-fit) and consequently does
-    NOT contribute to the auto binary at that threshold."""
+    """Per-box fits (08.1 inverted): a uniform-region box stores mask+std+fill_color;
+    a box with no heatmap content stores (None,None,None); a textured box STILL
+    stores its mask with an honest std ABOVE the threshold (gate-lifted — P-5)
+    and consequently DOES contribute to the auto inpaint binary at that threshold
+    (D-01 inverted), while the uniform box contributes to the fill binary
+    instead."""
     from manga_ai_studio.core.detection_boxes import (
         BoxMaskFit,
         derive_page_mask_state,
@@ -236,17 +241,21 @@ def test_derive_per_box_fits_store_gate_lifted() -> None:
     result = derive_page_mask_state(image_rgb, heatmap, [box_a, box_b], cfg.MaskerConfig(), 0)
 
     assert set(result.fits) == {id(box_a), id(box_b)}
-    # Uniform box: stored fit with a finite, gate-passing std.
+    # Uniform box: stored fit with a finite std <= threshold, and median color.
     assert result.fits[id(box_a)].mask is not None
     assert box_a.mask is not None
     assert box_a.std_dev is not None and np.isfinite(box_a.std_dev)
     assert box_a.std_dev <= cfg.MaskerConfig().mask_max_standard_deviation
-    # Empty box: the noise outcome (None, None) — never an exception.
-    assert result.fits[id(box_b)] == BoxMaskFit(None, None)
-    assert box_b.mask is None and box_b.std_dev is None
+    assert box_a.fill_color is not None
+    assert box_a.fill_color == result.fits[id(box_a)].median_color
+    assert isinstance(box_a.fill_color, tuple) and len(box_a.fill_color) == 3
+    # Empty box: the noise outcome (None,None,None).
+    assert result.fits[id(box_b)].mask is None and result.fits[id(box_b)].std_dev is None
+    assert box_b.mask is None and box_b.std_dev is None and box_b.fill_color is None
 
     # Textured page: the fit still stores a mask (gate-lifted) with an honest
-    # std above the default gate, so the box contributes nothing at threshold.
+    # std above the default gate, so the box DOES contribute to inpaint at threshold
+    # (inverted) and not to fill.
     rng = np.random.default_rng(1234)
     noisy_rgb = rng.integers(0, 256, size=(50, 60, 3), dtype=np.uint8)
     noisy_box = PageBox(box=st.Box(10, 10, 40, 30), origin=DETECTED)
@@ -254,41 +263,69 @@ def test_derive_per_box_fits_store_gate_lifted() -> None:
     assert noisy.fits[id(noisy_box)].mask is not None
     assert noisy_box.std_dev is not None
     assert noisy_box.std_dev > cfg.MaskerConfig().mask_max_standard_deviation
-    assert np.count_nonzero(noisy.auto_binary) == 0  # gate excludes it entirely
+    assert noisy_box.fill_color is not None
+    # Inverted gate: high-std now contributes to auto inpaint binary, not excluded.
+    assert np.count_nonzero(noisy.auto_binary) > 0
+    # And threshold change recomposes without re-fitting (fits unchanged)
+    from manga_ai_studio.core.detection_boxes import compose_auto_binary, compose_fill_binary
+
+    auto_low = compose_auto_binary([noisy_box], threshold=15.0, page_size=(60, 50))
+    auto_high = compose_auto_binary([noisy_box], threshold=1000.0, page_size=(60, 50))
+    # At 15, high-std contributes; at 1000, it would be considered low-std relative -> not contribute to auto
+    assert np.count_nonzero(auto_low) > 0
+    assert np.count_nonzero(auto_high) == 0
+    # Fill binary is the complement for Auto
+    fill_low = compose_fill_binary([noisy_box], threshold=15.0, page_size=(60, 50))
+    assert np.count_nonzero(fill_low) == 0
+    fill_high = compose_fill_binary([noisy_box], threshold=1000.0, page_size=(60, 50))
+    assert np.count_nonzero(fill_high) > 0
 
 
 @pytest.mark.unit
 def test_compose_auto_binary_gate_matrix() -> None:
-    """Pure recomposition from STORED per-box masks: Auto+under-threshold
-    contributes; "always" contributes regardless of std; "never" and mask-None
-    contribute nothing — and raising the threshold admits the above-threshold
-    box WITHOUT any re-fitting (the same stored masks recompose differently)."""
-    from manga_ai_studio.core.detection_boxes import compose_auto_binary
+    """Pure recomposition from STORED per-box masks (08.1 inverted): Auto+ABOVE-threshold
+    contributes to inpaint; "always" contributes regardless; "fill" never to inpaint;
+    "never" and mask-None contribute nothing — and raising the threshold moves
+    a box from inpaint to fill WITHOUT any re-fitting (same stored masks recompose differently).
+    Complement verified via compose_fill_binary."""
+    from manga_ai_studio.core.detection_boxes import compose_auto_binary, compose_fill_binary
 
-    def _box(x1, override, std_dev, with_mask=True):
+    def _box(x1, override, std_dev, with_mask=True, fill_color=(255, 255, 255)):
         box = st.Box(x1, 0, x1 + 10, 10)
-        pb = PageBox(box=box, origin=DETECTED, std_dev=std_dev, inpaint_override=override)
+        pb = PageBox(box=box, origin=DETECTED, std_dev=std_dev, inpaint_override=override, fill_color=fill_color)
         if with_mask:
             pb.mask = Image.new("1", (10, 10), 1)  # fully content
         return pb
 
     boxes = [
-        _box(0, None, 5.0),  # auto, under threshold
-        _box(10, None, 30.0),  # auto, ABOVE threshold
-        _box(20, "always", 30.0),  # forced despite high std
-        _box(30, "never", 1.0),  # demoted despite passing gate
-        _box(40, None, 1.0, with_mask=False),  # no stored mask
+        _box(0, None, 5.0),  # auto, under threshold -> fill, not inpaint
+        _box(10, None, 30.0),  # auto, ABOVE threshold -> inpaint
+        _box(20, "always", 30.0),  # forced_inpaint regardless
+        _box(30, "never", 1.0),  # demoted -> neither
+        _box(40, None, 1.0, with_mask=False),  # no mask -> neither
+        _box(45, "fill", 30.0),  # forced_fill -> not inpaint
     ]
 
-    at_15 = compose_auto_binary(boxes, threshold=15.0, page_size=(50, 10))
-    assert np.count_nonzero(at_15[:, 0:10]) > 0  # auto under threshold
-    assert np.count_nonzero(at_15[:, 10:20]) == 0  # above threshold excluded
-    assert np.count_nonzero(at_15[:, 20:30]) > 0  # "always" forces
-    assert np.count_nonzero(at_15[:, 30:50]) == 0  # "never" + mask-None
+    at_15 = compose_auto_binary(boxes, threshold=15.0, page_size=(60, 10))
+    assert np.count_nonzero(at_15[:, 0:10]) == 0  # low-std excluded from inpaint (inverted)
+    assert np.count_nonzero(at_15[:, 10:20]) > 0  # high-std contributes to inpaint
+    assert np.count_nonzero(at_15[:, 20:30]) > 0  # "always" forces inpaint
+    assert np.count_nonzero(at_15[:, 30:40]) == 0  # "never" excluded
+    assert np.count_nonzero(at_15[:, 40:45]) == 0  # mask-None excluded
+    assert np.count_nonzero(at_15[:, 45:55]) == 0  # "fill" excluded from inpaint
 
-    # Threshold change = pure recomposition of the SAME stored masks.
-    at_50 = compose_auto_binary(boxes, threshold=50.0, page_size=(50, 10))
-    assert np.count_nonzero(at_50[:, 10:20]) > 0  # now admitted, no re-fit
+    # Fill binary is the complement for Auto
+    fill_15 = compose_fill_binary(boxes, threshold=15.0, page_size=(60, 10))
+    assert np.count_nonzero(fill_15[:, 0:10]) > 0  # low-std Auto contributes to fill
+    assert np.count_nonzero(fill_15[:, 10:20]) == 0  # high-std not in fill
+    assert np.count_nonzero(fill_15[:, 20:30]) == 0  # "always" not in fill
+    assert np.count_nonzero(fill_15[:, 45:55]) > 0  # "fill" forces fill
+
+    # Threshold change = pure recomposition of the SAME stored masks (no re-fit).
+    at_50 = compose_auto_binary(boxes, threshold=50.0, page_size=(60, 10))
+    assert np.count_nonzero(at_50[:, 10:20]) == 0  # now below threshold -> not inpaint
+    fill_50 = compose_fill_binary(boxes, threshold=50.0, page_size=(60, 10))
+    assert np.count_nonzero(fill_50[:, 10:20]) > 0  # now admitted to fill, no re-fit
 
 
 @pytest.mark.unit
@@ -321,8 +358,9 @@ def test_derive_zero_boxes_empty_auto_and_dilate_auto_mask() -> None:
 @pytest.mark.unit
 def test_derive_fits_user_origin_boxes_identically() -> None:
     """All boxes certify: a USER PageBox over heatmap content is fitted
-    identically to a detected one (same union, same fit)."""
-    from manga_ai_studio.core.detection_boxes import derive_page_mask_state
+    identically to a detected one (same union, same fit). Inverted gate:
+    uniform USER box goes to fill, so auto is 0 and fill >0."""
+    from manga_ai_studio.core.detection_boxes import compose_fill_binary, derive_page_mask_state
 
     image_rgb, heatmap = _uniform_page_with_strokes()
     user_box = PageBox(box=st.Box(10, 10, 40, 30), origin=USER)
@@ -332,7 +370,10 @@ def test_derive_fits_user_origin_boxes_identically() -> None:
     assert result.fits[id(user_box)].mask is not None
     assert user_box.mask is not None
     assert user_box.std_dev is not None and np.isfinite(user_box.std_dev)
-    assert np.count_nonzero(result.auto_binary) > 0
+    assert user_box.fill_color is not None
+    assert np.count_nonzero(result.auto_binary) == 0
+    fill = compose_fill_binary([user_box], float(cfg.MaskerConfig().mask_max_standard_deviation), (60, 50))
+    assert np.count_nonzero(fill) > 0
 
 
 # ===========================================================================

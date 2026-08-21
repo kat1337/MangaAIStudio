@@ -434,17 +434,21 @@ def test_pagebox_inpaint_override_default_and_roundtrip() -> None:
 
 @pytest.mark.unit
 def test_inpaint_state_matrix() -> None:
-    """The border-state contract (08-UI-SPEC §Color) as a pure function of
-    override + std_dev + mask content: "forced" / "never" / "will_inpaint" /
-    "gate_skipped" are the ONLY return values. Matrix rows:
+    """The border-state contract (08-UI-SPEC §Color + 08.1 D-01 inverted) as a
+    pure function of override + std_dev + mask content: "forced_inpaint" /
+    "forced_fill" / "never" / "will_inpaint" / "will_fill" / "gate_skipped"
+    are the ONLY return values (08.1 D-04 quad-state). Matrix rows (D-01
+    inverted: low-std -> fill, high-std -> inpaint):
 
-    - override "always" -> "forced" (regardless of std_dev, even None)
-    - override "never"  -> "never"  (regardless of std_dev, even None)
-    - Auto + std_dev <= threshold + mask content -> "will_inpaint"
-    - Auto + std_dev > threshold                -> "gate_skipped"
-    - Auto + std_dev None                       -> "gate_skipped"
-    - Auto + std_dev set + mask None            -> "gate_skipped"
-    - Auto + std_dev set + empty mask           -> "gate_skipped"
+    - override "always" -> "forced_inpaint" (regardless of std_dev, even None)
+    - override "fill"   -> "forced_fill"   (regardless of std_dev)
+    - override "never"  -> "never"         (regardless)
+    - Auto + std_dev <= threshold + mask content -> "will_fill"
+    - Auto + std_dev == threshold (15)          -> "will_fill" (<= per D-01)
+    - Auto + std_dev > threshold               -> "will_inpaint"
+    - Auto + std_dev None                      -> "gate_skipped"
+    - Auto + std_dev set + mask None           -> "gate_skipped"
+    - Auto + std_dev set + empty mask          -> "gate_skipped"
     """
     from manga_ai_studio.core.box_model import DETECTED, PageBox
     from panelcleaner.structures import Box
@@ -464,22 +468,29 @@ def test_inpaint_state_matrix() -> None:
     threshold = 15.0
 
     # Override rows — the user decision replaces the gate entirely.
-    assert make("always").inpaint_state(threshold) == "forced"
+    assert make("always").inpaint_state(threshold) == "forced_inpaint"
     assert make("always", std_dev=99.0, mask=content_mask).inpaint_state(
         threshold
-    ) == "forced"
+    ) == "forced_inpaint"
+    assert make("fill").inpaint_state(threshold) == "forced_fill"
+    assert make("fill", std_dev=99.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "forced_fill"
     assert make("never").inpaint_state(threshold) == "never"
     assert make("never", std_dev=1.0, mask=content_mask).inpaint_state(
         threshold
     ) == "never"
 
-    # Auto rows — the std-dev gate + auto mask content decide.
+    # Auto rows — the std-dev gate + auto mask content decide (D-01 inverted).
     assert make(None, std_dev=8.0, mask=content_mask).inpaint_state(
         threshold
-    ) == "will_inpaint"
+    ) == "will_fill"
+    assert make(None, std_dev=15.0, mask=content_mask).inpaint_state(
+        threshold
+    ) == "will_fill"
     assert make(None, std_dev=20.0, mask=content_mask).inpaint_state(
         threshold
-    ) == "gate_skipped"
+    ) == "will_inpaint"
     assert make(None, std_dev=None, mask=content_mask).inpaint_state(
         threshold
     ) == "gate_skipped"
@@ -490,15 +501,16 @@ def test_inpaint_state_matrix() -> None:
         threshold
     ) == "gate_skipped"
 
-    # The four strings are the ONLY return values (the matrix above covers
-    # every branch; this asserts the closed set directly).
+    # The six strings are the closed set (5 visible + gate_skipped).
     observed = {
         make("always").inpaint_state(threshold),
+        make("fill").inpaint_state(threshold),
         make("never").inpaint_state(threshold),
         make(None, std_dev=8.0, mask=content_mask).inpaint_state(threshold),
         make(None, std_dev=20.0, mask=content_mask).inpaint_state(threshold),
+        make(None, std_dev=None, mask=content_mask).inpaint_state(threshold),
     }
-    assert observed == {"forced", "never", "will_inpaint", "gate_skipped"}
+    assert observed == {"forced_inpaint", "forced_fill", "never", "will_fill", "will_inpaint", "gate_skipped"}
 
 
 @pytest.mark.unit
@@ -507,7 +519,8 @@ def test_pagebox_copy_detaches_mask_and_preserves_seam_fields() -> None:
     mask is a DIFFERENT object — mutating the original mask leaves the copy
     unaffected (a BOXES undo must restore the snapshot-time mask, not the
     live post-edit one). ``std_dev`` and ``inpaint_override`` are immutable
-    scalars and are carried through unchanged."""
+    scalars and are carried through unchanged. 08.1: fill_color tuple is
+    preserved by value (immutable) while mask is detached."""
     from manga_ai_studio.core.box_model import DETECTED, PageBox
     from panelcleaner.structures import Box
 
@@ -515,15 +528,22 @@ def test_pagebox_copy_detaches_mask_and_preserves_seam_fields() -> None:
     pb.mask = _mask_with_content()
     pb.std_dev = 9.5
     pb.inpaint_override = "never"
+    pb.fill_color = (128, 200, 50)
 
     clone = pb.copy()
 
     assert clone.mask is not pb.mask  # detached PIL Image
     assert clone.std_dev == 9.5
     assert clone.inpaint_override == "never"
+    assert clone.fill_color == (128, 200, 50)
+    # Fill color is a tuple (immutable) — preserved by value, not detached copy needed.
+    assert clone.fill_color is not None
     # Mutating the ORIGINAL mask must not touch the copy's mask.
     pb.mask.putpixel((3, 3), 1)
     assert clone.mask.getpixel((3, 3)) == 0
+    # Changing fill_color on original does not affect clone (tuple reassignment).
+    pb.fill_color = (1, 2, 3)
+    assert clone.fill_color == (128, 200, 50)
     # Replacing the original's mask outright also leaves the copy unaffected.
     pb.mask = None
     assert clone.mask is not None

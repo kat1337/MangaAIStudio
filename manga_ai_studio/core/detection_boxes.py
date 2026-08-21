@@ -159,10 +159,16 @@ class BoxMaskFit:
     standard deviation — the std-dev gate is applied DOWNSTREAM by
     :func:`compose_auto_binary` / ``PageBox.inpaint_state``, never inside the
     fit, so a threshold change never re-fits.
+
+    ``median_color`` is the fit-time median fill color from
+    ``MaskFittingResults.median_color`` (off-white rounding baked at
+    panelcleaner/image_ops.py:535). Stored at fit time on the fit and on
+    ``PageBox.fill_color`` — never recomputed at inpaint time.
     """
 
     mask: Image.Image | None
     std_dev: float | None
+    median_color: tuple[int, int, int] | None = None
 
 
 @dataclass
@@ -321,7 +327,8 @@ def _fit_one_box(
     """
     if cut.crop(pb.box.as_tuple).getbbox() is None:
         pb.mask, pb.std_dev = None, None
-        return BoxMaskFit(None, None)
+        pb.fill_color = None
+        return BoxMaskFit(None, None, None)
 
     reference_box = pb.box.pad(
         masker_conf.mask_growth_step_pixels * masker_conf.mask_growth_steps, page_size
@@ -336,8 +343,19 @@ def _fit_one_box(
         analytics_page_path=analytics_page_path or _ANALYTICS_FALLBACK_PATH,
     )
     if fit is None or fit.best_mask is None:
+        # Even on failed fits (std too high), PanelCleaner returns median_color
+        # for the best candidate — preserve it as fill source for forced cases.
+        median = None
+        if fit is not None and getattr(fit, "median_color", None) is not None:
+            try:
+                median = tuple(int(c) for c in fit.median_color)  # type: ignore[arg-type]
+                if len(median) != 3:
+                    median = None
+            except Exception:
+                median = None
         pb.mask, pb.std_dev = None, None
-        return BoxMaskFit(None, None)
+        pb.fill_color = median
+        return BoxMaskFit(None, None, median)
 
     # Crop the reference-frame-sized best_mask back to the masking box
     # (offset math at image_ops.py:624-641 — mask_coords is the reference
@@ -350,8 +368,17 @@ def _fit_one_box(
     )
     box_mask = ops.cut_out_mask(fit.best_mask, box_in_reference)
     std_dev = float(fit.analytics_std_deviation)
+    median_color = None
+    if getattr(fit, "median_color", None) is not None:
+        try:
+            median_color = tuple(int(c) for c in fit.median_color)  # type: ignore[arg-type]
+            if len(median_color) != 3:
+                median_color = None
+        except Exception:
+            median_color = None
     pb.mask, pb.std_dev = box_mask, std_dev
-    return BoxMaskFit(box_mask, std_dev)
+    pb.fill_color = median_color
+    return BoxMaskFit(box_mask, std_dev, median_color)
 
 
 def compose_auto_binary(
@@ -359,15 +386,19 @@ def compose_auto_binary(
 ) -> np.ndarray:
     """Recompose the auto binary purely from the STORED per-box masks.
 
+    Inverted per 08.1 D-01: the std-dev gate now routes uniform (low-std)
+    boxes to the FILL plane and complex (high-std) boxes to INPAINT. So
+    auto now means "will_inpaint" (std > threshold) not "will_fill".
+
     The gate/override logic (this is exactly what threshold changes and
     override flips call — NO fitting ever happens here):
 
-    - ``inpaint_override == "always"`` contributes regardless of std_dev,
-    - ``inpaint_override == "never"`` contributes nothing,
+    - ``inpaint_override == "always"`` contributes regardless of std_dev (forced_inpaint),
+    - ``inpaint_override == "fill"`` never contributes to auto (it is fill-only),
+    - ``inpaint_override == "never"`` contributes to NEITHER plane,
     - ``inpaint_override is None`` (Auto) contributes if ``std_dev`` is not
-      None AND ``std_dev <= threshold`` AND the stored mask has content,
-    - any box with ``mask`` None (or an empty mask) contributes nothing —
-      a ``mask`` is required to paste.
+      None AND ``std_dev > threshold`` AND the stored mask has content,
+    - any box with ``mask`` None (or an empty mask) contributes nothing.
 
     Args:
         boxes: The pageboxes (their ``mask``/``std_dev``/``inpaint_override``
@@ -376,15 +407,51 @@ def compose_auto_binary(
         page_size: The page size as ``(w, h)`` (PIL ordering).
 
     Returns:
-        The auto binary as an ``(H, W)`` 0/255 uint8 array.
+        The auto inpaint binary as an ``(H, W)`` 0/255 uint8 array.
     """
     contributing: list[PageBox] = []
     for pb in boxes:
         if pb.inpaint_override == "never":
             continue
+        if pb.inpaint_override == "fill":
+            continue
         if pb.mask is None or pb.mask.getbbox() is None:
             continue
         if pb.inpaint_override == "always":
+            contributing.append(pb)
+        elif pb.inpaint_override is None and pb.std_dev is not None and pb.std_dev > threshold:
+            contributing.append(pb)
+    composed = ops.compose_masks(
+        tuple(page_size), [(pb.mask, (pb.box.x1, pb.box.y1)) for pb in contributing]
+    )
+    return _pil1_to_uint8(composed)
+
+
+def compose_fill_binary(
+    boxes: list[PageBox], threshold: float, page_size: tuple[int, int]
+) -> np.ndarray:
+    """Recompose the FILL binary purely from the STORED per-box masks (08.1 D-01).
+
+    Complement of :func:`compose_auto_binary` for the median-color fill pass:
+    - ``inpaint_override == "fill"`` contributes regardless of std_dev (forced_fill),
+    - ``inpaint_override == "always"`` never contributes to fill (it is inpaint-only),
+    - ``inpaint_override == "never"`` contributes to NEITHER plane,
+    - ``inpaint_override is None`` (Auto) contributes if ``std_dev`` is not
+      None AND ``std_dev <= threshold`` AND the stored mask has content,
+    - empty masks excluded.
+
+    Returns:
+        The fill binary as an ``(H, W)`` 0/255 uint8 array.
+    """
+    contributing: list[PageBox] = []
+    for pb in boxes:
+        if pb.inpaint_override == "never":
+            continue
+        if pb.inpaint_override == "always":
+            continue
+        if pb.mask is None or pb.mask.getbbox() is None:
+            continue
+        if pb.inpaint_override == "fill":
             contributing.append(pb)
         elif pb.inpaint_override is None and pb.std_dev is not None and pb.std_dev <= threshold:
             contributing.append(pb)
@@ -392,6 +459,35 @@ def compose_auto_binary(
         tuple(page_size), [(pb.mask, (pb.box.x1, pb.box.y1)) for pb in contributing]
     )
     return _pil1_to_uint8(composed)
+
+
+def compose_fill_specs(
+    boxes: list[PageBox], threshold: float
+) -> list[tuple[Image.Image, tuple[int, int, int], tuple[int, int]]]:
+    """Return per-box fill specs (mask, color, (x,y)) for the fill pass.
+
+    Same gate as :func:`compose_fill_binary` but returns the list consumed by
+    the worker's PIL ``convert_mask_to_rgba`` → ``alpha_composite`` → ``paste``
+    sequence (panelcleaner/masker.py:104,138 pattern). Boxes without a
+    ``fill_color`` are skipped (they have no proven color to fill with).
+    """
+    specs: list[tuple[Image.Image, tuple[int, int, int], tuple[int, int]]] = []
+    for pb in boxes:
+        if pb.inpaint_override == "never" or pb.inpaint_override == "always":
+            continue
+        if pb.mask is None or pb.mask.getbbox() is None:
+            continue
+        is_fill = False
+        if pb.inpaint_override == "fill":
+            is_fill = True
+        elif pb.inpaint_override is None and pb.std_dev is not None and pb.std_dev <= threshold:
+            is_fill = True
+        if not is_fill:
+            continue
+        if pb.fill_color is None:
+            continue
+        specs.append((pb.mask, pb.fill_color, (pb.box.x1, pb.box.y1)))
+    return specs
 
 
 def dilate_auto_mask(raw_binary: np.ndarray, radius: int) -> np.ndarray:

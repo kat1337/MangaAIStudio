@@ -2191,6 +2191,7 @@ class EditorCanvas(QGraphicsView):
                     mask=pb.mask.copy() if pb.mask is not None else None,
                     std_dev=pb.std_dev,
                     inpaint_override=pb.inpaint_override,
+                    fill_color=pb.fill_color,
                 )
             )
         return snapshots

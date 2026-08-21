@@ -215,6 +215,10 @@ def pagebox_to_json(pb) -> dict:
     ``mask`` (the box-cropped mode-"1" PIL image as base64 PNG, or null).
     All three are OPTIONAL load keys (Phase 7 optional-key precedent) so
     legacy Phase 5/7 files still load with defaults.
+
+    Phase 08.1 (plan 08.1-01): adds ``fill`` to the override vocabulary and
+    ``fill_color`` (optional [r,g,b] triple 0..255) — legacy files without
+    those keys load with defaults (None).
     """
     payload = pb.payload
     return {
@@ -226,8 +230,9 @@ def pagebox_to_json(pb) -> dict:
         "style": pb.style.to_dict() if pb.style is not None else None,  # D-07
         # Phase 8 (plan 08-04) — the D-15 seam fields close through save/load.
         "std_dev": pb.std_dev,  # float | null (None = not yet fitted)
-        "inpaint_override": pb.inpaint_override,  # "always" | "never" | null
+        "inpaint_override": pb.inpaint_override,  # "always" | "fill" | "never" | null (08.1 adds fill)
         "mask": _pagebox_mask_to_json(pb.mask),  # base64 PNG | null
+        "fill_color": list(pb.fill_color) if getattr(pb, "fill_color", None) is not None else None,  # 08.1 optional triple
         "payload": None if payload is None else {
             "xyxy": list(payload.xyxy),
             "lines": payload.lines,  # list of 4-point quads
@@ -294,14 +299,31 @@ def json_to_pagebox(d: dict):
             raise ProjectFormatError("std_dev must be a number") from exc
 
     # Phase 8 (plan 08-04): inpaint_override — the D-14 tri-state enum.
+    # Phase 08.1 (plan 08.1-01): adds "fill" (quad-state per D-04).
     # Absent/None = Auto; any OTHER value is structural garbage (stricter
     # than the format-version stance, matching it).
     override_raw = d.get("inpaint_override")
-    if override_raw is not None and override_raw not in ("always", "never"):
+    if override_raw is not None and override_raw not in ("always", "never", "fill"):
         raise ProjectFormatError(
-            f"inpaint_override must be one of 'always'/'never' or null, "
+            f"inpaint_override must be one of 'always'/'never'/'fill' or null, "
             f"got {override_raw!r}"
         )
+
+    # Phase 08.1 (plan 08.1-01): fill_color — optional [r,g,b] triple.
+    # Absent/None -> None; garbage -> ProjectFormatError (T-08.1-01-01).
+    fill_color = None
+    if d.get("fill_color") is not None:
+        raw_fc = d["fill_color"]
+        if not isinstance(raw_fc, (list, tuple)) or len(raw_fc) != 3:
+            raise ProjectFormatError("fill_color must be [r,g,b]")
+        try:
+            fill_color = tuple(_coerce_int(v, "fill_color") for v in raw_fc)
+        except ProjectFormatError:
+            raise
+        except Exception as exc:
+            raise ProjectFormatError(f"fill_color must be [r,g,b]: {exc}") from exc
+        if not all(0 <= c <= 255 for c in fill_color):
+            raise ProjectFormatError("fill_color components must be 0..255")
 
     if len(box_vals) != 4:
         raise ProjectFormatError("box must have exactly 4 coordinates")
@@ -348,9 +370,11 @@ def json_to_pagebox(d: dict):
         manual_override=bool(manual_override),
         style=style,  # D-07 — always a TextStyle (defaults when absent/None)
         # Phase 8 (plan 08-04) — the D-15 seam fields restore.
+        # Phase 08.1 adds fill_color.
         std_dev=std_dev,
         inpaint_override=override_raw,
         mask=mask,
+        fill_color=fill_color,
     )
 
 
