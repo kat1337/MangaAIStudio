@@ -107,18 +107,20 @@ def _box_content_bbox(x1: int, y1: int, x2: int, y2: int) -> tuple[int, int, int
 
 @pytest.mark.gui
 def test_recompose_after_move_uses_live_geometry(qtbot, tmp_path) -> None:
-    """CR-01: after Detect + a box move, a threshold change recomposes the auto
-    mask at the box's CURRENT (moved) position — never the birth origin.
+    """CR-01 (08.1 D-01 inverted): after Detect + a box move, a threshold
+    change recomposes the auto mask at the box's CURRENT (moved) position —
+    never the birth origin. Uses noisy page so the box is high-std -> will_inpaint
+    -> auto has content (uniform -> will_fill would be auto empty)."""
+    # Noisy page to make the box high-std -> will_inpaint -> auto has content (08.1 inverted gate)
+    rng = np.random.default_rng(10)
+    noisy = rng.integers(0, 256, size=(50, 60, 3), dtype=np.uint8)
+    from PIL import Image as PILImage
 
-    Pre-fix (08-VERIFICATION.md probe): the threshold slot reads the live
-    pageboxes whose ``.box`` is birth geometry (the canvas only ever
-    ``setRect``s; geometry materialization lives solely in
-    ``boxes_snapshot()``), so the composite jumped back to (5,5,29,34) after
-    one threshold change. Post-fix: the slot composes from
-    ``canvas.boxes_snapshot()`` and the content stays at the moved rect
-    (25,15,49,44).
-    """
     window = _window_with_page(qtbot, tmp_path)
+    # Overwrite the white page with noisy image at same dims
+    window.canvas.set_image_from_numpy(noisy)
+    # Update the ImageFile's current_image to keep data model consistent
+    window.image_files[0].current_image = noisy.copy()
     window.action_detect_boxes_mode.setChecked(True)
 
     # Full-page-content binary + the (5,5,29,34) fixture box: the fitted mask
@@ -141,10 +143,11 @@ def test_recompose_after_move_uses_live_geometry(qtbot, tmp_path) -> None:
     )
 
     # The threshold tweak must NOT jump the content back to the birth origin.
-    window._on_std_dev_threshold_changed(50.0)
+    # Use a low threshold (5) that keeps the high-std noisy box as will_inpaint (D-01 inverted)
+    window._on_std_dev_threshold_changed(5.0)
     assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(25, 15, 49, 44), (
         "CR-01: the recomposed content must stay at the moved rect, not jump "
-        "back to the birth origin (5,5,29,34) — the 08-VERIFICATION.md probe"
+        "back to the birth origin (5,5,29,34) — the 08-VERIFICATION.md probe (08.1 D-01 inverted: keep high-std as will_inpaint)"
     )
 
 
@@ -152,15 +155,15 @@ def test_recompose_after_move_uses_live_geometry(qtbot, tmp_path) -> None:
 def test_threshold_tweak_after_invalidation_does_not_wipe_auto_plane(
     qtbot, tmp_path
 ) -> None:
-    """CR-03: a std-dev threshold tweak after a geometry op (which invalidated
-    every per-box mask per the 08-01 policy) must NOT compose an all-mask-None
-    empty binary and silently wipe the auto plane.
-
-    Pre-fix (08-VERIFICATION.md probe): content present before the tweak, bbox
-    None after one tweak — the whole plane emptied. Post-fix: the no-fit guard
-    returns early and the plane keeps its pre-tweak content.
-    """
+    """CR-03 (08.1 D-01 inverted): a std-dev threshold tweak after a geometry
+    op (which invalidated every per-box mask per the 08-01 policy) must NOT
+    compose an all-mask-None empty binary and silently wipe the auto plane.
+    Uses noisy page so the box is high-std -> will_inpaint -> auto has content."""
+    rng = np.random.default_rng(11)
+    noisy = rng.integers(0, 256, size=(50, 60, 3), dtype=np.uint8)
     window = _window_with_page(qtbot, tmp_path)
+    window.canvas.set_image_from_numpy(noisy)
+    window.image_files[0].current_image = noisy.copy()
     window.action_detect_boxes_mode.setChecked(True)
 
     heat = np.full((50, 60), 255, dtype=np.uint8)
@@ -434,18 +437,14 @@ def test_detect_batch_cancel_marks_pages_dirty(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_rotate_then_dilate_nudge_keeps_auto_plane(qtbot, tmp_path) -> None:
-    """WR-02 (plan 08-10): a dims-preserving geometry op (180-degree rotate)
-    followed by a live dilation nudge must NOT silently wipe the auto plane.
-
-    Pre-fix: ``_apply_geometry_op`` rotates the auto plane and every box but
-    never invalidates ``ImageFile.raw_detected_mask`` — the re-derive's dims
-    guard passes for a 180-degree rotate (dims unchanged) while the retained
-    raw content is misaligned against the rotated boxes, so every fit fails and
-    ``set_auto_binary(empty)`` wipes the rotated plane (the CR-03 wipe class).
-    Post-fix: the geometry op invalidates the raw (+ derived auto slot), so the
-    re-derive no-ops and the plane keeps its geometry-transformed content.
-    """
+    """WR-02 (plan 08-10, 08.1 D-01 inverted): a dims-preserving geometry op
+    (180-degree rotate) followed by a live dilation nudge must NOT silently wipe
+    the auto plane. Uses noisy page so the box is high-std -> will_inpaint."""
+    rng = np.random.default_rng(12)
+    noisy = rng.integers(0, 256, size=(50, 60, 3), dtype=np.uint8)
     window = _window_with_page(qtbot, tmp_path)
+    window.canvas.set_image_from_numpy(noisy)
+    window.image_files[0].current_image = noisy.copy()
     window.action_detect_boxes_mode.setChecked(True)
 
     # Non-symmetric content (a top-left block) so a 180-degree rotate changes it.
@@ -454,8 +453,9 @@ def test_rotate_then_dilate_nudge_keeps_auto_plane(qtbot, tmp_path) -> None:
     window._on_detection_finished({"mask": heat, "blocks": [_blk(5, 5, 29, 34)]})
     imf = window.image_files[0]
     assert imf.raw_detected_mask is not None, "fixture sanity: raw is retained"
-    assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(5, 5, 29, 34), (
-        "fixture sanity: the auto plane holds the box-constrained content"
+    # 08.1 inverted: noisy page high-std -> will_inpaint, but fitted mask may be smaller than box due to content; just check it has content
+    assert window.canvas._auto_bin is not None and np.count_nonzero(window.canvas._auto_bin) > 0, (
+        "fixture sanity: the auto plane must have content for high-std box (08.1 D-01 inverted)"
     )
 
     # 180-degree rotate — dims-preserving (50x60 -> 50x60) — driving

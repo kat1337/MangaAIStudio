@@ -408,7 +408,7 @@ def test_op_running_cleared_after_batch(qtbot, tmp_path, monkeypatch) -> None:
     window = _make_window(qtbot, tmp_path)
     _load_two_pages(window, tmp_path)
 
-    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, masker_conf=None, max_inpaint_size=(2048, 2048), progress_callback=None, abort_flag=None):  # noqa: ARG001
         return {"ok": len(pages), "failed": [], "total": len(pages)}
 
     monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
@@ -517,7 +517,7 @@ def test_cancel_batch_updates_status_bar(qtbot, tmp_path, monkeypatch) -> None:
 
     # A fake clean that BLOCKS until cancel flips the abort flag, so the
     # "Inpainting N%" status is live when _cancel_batch runs.
-    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, masker_conf=None, max_inpaint_size=(2048, 2048), progress_callback=None, abort_flag=None):  # noqa: ARG001
         if progress_callback is not None:
             progress_callback.emit((42, pages[0].path.name))
         # Spin until the abort flag flips (cancel pressed) then return a
@@ -577,7 +577,7 @@ def test_batch_clean_refreshes_current_page_canvas(qtbot, tmp_path, monkeypatch)
     # the original solid-white page.
     cleaned_fill = 123
 
-    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, masker_conf=None, max_inpaint_size=(2048, 2048), progress_callback=None, abort_flag=None):  # noqa: ARG001
         # Simulate the cleaning pipeline: write a known cleaned file into
         # cleaned_dir for every page (the real loop writes via
         # save_image_optimized). page_a's file uses cleaned_fill so the
@@ -671,7 +671,7 @@ def test_batch_clean_uses_current_canvas_mask_edits(qtbot, tmp_path, monkeypatch
     #    is absent, the stale persisted mask is read and the inpainter runs.
     received_masks: list = []
 
-    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_clean(pages, inp_model_path, inp_backend, cleaned_dir, masker_conf=None, max_inpaint_size=(2048, 2048), progress_callback=None, abort_flag=None):  # noqa: ARG001
         # Call the REAL _run_batch_task so the D-03 gate + mask read execute
         # against the ImageFile.mask state _dispatch_batch hands it. This
         # makes the regression test exercise the actual read path.
@@ -746,21 +746,24 @@ def test_batch_clean_uses_current_canvas_mask_edits(qtbot, tmp_path, monkeypatch
 
 @pytest.mark.gui
 def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monkeypatch) -> None:
-    """Bug D1: a detect-only batch leaves the current page's detected mask visible.
-
-    Behavior: after a Batch Detect finishes, the current page's just-detected
-    ``ImageFile.mask`` must be RESTORED onto the canvas (mirroring the D-11
-    seam step 4), NOT cleared. The detection loop correctly writes
-    ``ImageFile.mask`` for every page; the bug was that the post-batch refresh
-    unconditionally cleared the canvas overlay (a Bug C fix that is correct for
-    clean-containing batches but wrong for detect-only batches).
-
-    Regression for the user re-test report "batch detection will detect pages
-    N+1 on, skipping current page and pages before that" — the visible symptom
-    of the current page showing no mask after a detect batch.
-    """
+    """Bug D1 (08.1 D-01 inverted): a detect-only batch leaves the current
+    page's detected mask visible. Use noisy page so the box is high-std ->
+    will_inpaint -> auto has content (uniform -> will_fill would be auto empty)."""
     window = _make_window(qtbot, tmp_path)
     page_a, _page_b = _load_two_pages(window, tmp_path)
+    # Make page_a noisy on disk so the fitted box's border std is HIGH -> will_inpaint -> auto has content (08.1 inverted)
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(20)
+    noisy = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
+    Image.fromarray(noisy).save(page_a)
+    # Also update canvas to noisy for consistency (though batch reads from disk)
+    from PySide6.QtGui import QImage
+
+    qimg = QImage(page_a.as_posix())
+    window.canvas.set_image_from_path(page_a)
+    window.image_files[0].current_image = noisy.copy()
     assert window._current_page_index() == 0, "precondition: page_a is current"
     # page_a starts with NO mask (never detected).
     assert window.canvas.has_mask_content() is False, (
@@ -831,22 +834,22 @@ def test_batch_detect_restores_current_page_mask_on_canvas(qtbot, tmp_path, monk
 
 @pytest.mark.gui
 def test_batch_detect_mask_survives_backwards_navigation(qtbot, tmp_path, monkeypatch) -> None:
-    """Bug D1 cascade: a detected mask survives a backwards navigation round-trip.
-
-    Behavior: the erasure cascade described in the user report is gone. After a
-    detect-only batch the detected masks must survive navigating to another
-    page and back — the D-11 seam must NOT overwrite a page's detected
-    ImageFile.mask with an empty (desynced) canvas mask. This holds because the
-    post-batch refresh now RESTORES the detected mask onto the canvas, so the
-    seam's OUTGOING snapshot (step 1) captures the real mask instead of an
-    empty buffer.
-
-    Regression for "skipping current page and pages before that" — each
-    backwards navigation previously erased the detected mask of the page being
-    left.
-    """
+    """Bug D1 cascade (08.1 D-01 inverted): a detected mask survives a backwards
+    navigation round-trip. Use noisy pages so boxes are high-std -> will_inpaint."""
     window = _make_window(qtbot, tmp_path)
     page_a, page_b = _load_two_pages(window, tmp_path)
+    # Make both pages noisy so fitted boxes are high-std -> will_inpaint -> auto has content
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(21)
+    for p in (page_a, page_b):
+        noisy = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
+        Image.fromarray(noisy).save(p)
+    # Refresh canvas for page_a to noisy
+    noisy_a = np.array(Image.open(page_a))
+    window.canvas.set_image_from_numpy(noisy_a)
+    window.image_files[0].current_image = noisy_a.copy()
     assert window._current_page_index() == 0, "precondition: page_a is current"
 
     detected_block_value = 255
@@ -1079,7 +1082,7 @@ def test_batch_detect_and_clean_dispatch_passes_profile_masker_conf(qtbot, tmp_p
 
     captured: dict = {}
 
-    def _fake_batch_detect_and_clean(pages, det_model_path, inp_model_path, det_backend, inp_backend, cleaned_dir, masker_conf, progress_callback=None, abort_flag=None):  # noqa: ARG001
+    def _fake_batch_detect_and_clean(pages, det_model_path, inp_model_path, det_backend, inp_backend, cleaned_dir, masker_conf, max_inpaint_size=(2048, 2048), progress_callback=None, abort_flag=None):  # noqa: ARG001
         captured["masker_conf"] = masker_conf
         return {"ok": len(pages), "failed": [], "total": len(pages)}
 
@@ -1094,14 +1097,19 @@ def test_batch_detect_and_clean_dispatch_passes_profile_masker_conf(qtbot, tmp_p
 
 @pytest.mark.gui
 def test_batch_detect_refresh_restores_boxes_auto_plane_and_borders(qtbot, tmp_path, monkeypatch) -> None:
-    """After a detect-only batch, _refresh_current_page_after_batch("detect")
-    restores the CURRENT page's boxes onto the canvas (set_boxes under the
-    _suppress_boxes_push guard — no history push), the composite mask equals
-    the persisted auto plane, and the border states render from the per-box
-    fields via refresh_box_inpaint_states (no current-page desync — the 02-04
-    Bug-D family lesson)."""
+    """After a detect-only batch (08.1 D-01 inverted): use noisy page so the
+    box is high-std -> will_inpaint -> auto has content and border is will_inpaint."""
     window = _make_window(qtbot, tmp_path)
-    _load_two_pages(window, tmp_path)
+    page_a, _page_b = _load_two_pages(window, tmp_path)
+    # Make page_a noisy so the box is high-std -> will_inpaint
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(22)
+    noisy = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
+    Image.fromarray(noisy).save(page_a)
+    window.canvas.set_image_from_numpy(noisy)
+    window.image_files[0].current_image = noisy.copy()
     assert window._current_page_index() == 0, "precondition: page_a is current"
     assert window.canvas.has_boxes() is False, "precondition: no boxes yet"
 

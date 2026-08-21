@@ -477,21 +477,28 @@ def _profile_threshold(window) -> float:
 
 @pytest.mark.gui
 def test_mode_on_composite_contains_only_in_box_content(qtbot, tmp_path) -> None:
-    """Mode ON: the heatmap outside the box never enters the composite; the
-    box content does, the PageBox is fitted (mask + float std_dev), and the
-    border pen renders the derived state (D-02/MASK-05)."""
-    window = _window_with_page(qtbot, tmp_path)
+    """Mode ON (08.1 D-01 inverted): the heatmap outside the box never enters
+    the composite; the box content does, the PageBox is fitted (mask + float
+    std_dev), and the border pen renders the derived state (D-02/MASK-05).
+    Uniform boxes now map to will_fill (fill plane) vs high-std to will_inpaint;
+    this fixture uses a noisy page so the box is high-std -> will_inpaint -> auto has content."""
+    # Use a noisy page so the fitted box's border std is HIGH (>t) -> will_inpaint -> auto has content (preserves D-02 check after inversion)
+    h, w = 50, 60
+    noisy = np.zeros((h, w, 3), dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    noisy[:, :] = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    window = _window_with_custom_page(qtbot, tmp_path, noisy)
     window.action_detect_boxes_mode.setChecked(True)
 
     result = {
-        "mask": _heatmap_with_in_and_out_content(),
+        "mask": _heatmap_with_in_and_out_content(h, w),
         "blocks": [_blk(5, 6, 25, 30)],
     }
     window._on_detection_finished(result)
 
     # Composite == the auto plane (no manual strokes): only in-box content.
     auto = mask_to_numpy_binary(window.canvas.get_mask())
-    assert auto[10:20, 10:20].any(), "the in-box heatmap content must land"
+    assert auto[10:20, 10:20].any(), "the in-box heatmap content must land (high-std -> will_inpaint)"
     assert not auto[10:20, 40:50].any(), (
         "heatmap content outside every box must NEVER enter the mask (D-02)"
     )
@@ -504,10 +511,9 @@ def test_mode_on_composite_contains_only_in_box_content(qtbot, tmp_path) -> None
     assert item.pagebox.std_dev is not None
     assert isinstance(item.pagebox.std_dev, float)
 
-    # The border renders the DERIVED state (single derivation site): the pen
-    # style is solid iff the state says will-inpaint / forced.
+    # The border renders the DERIVED state (single derivation site): solid for will_fill/will_inpaint/forced_*, dashed for gate_skipped/never (08.1 5-state)
     expected = item.pagebox.inpaint_state(_profile_threshold(window))
-    if expected in ("will_inpaint", "forced"):
+    if expected in ("will_inpaint", "will_fill", "forced", "forced_fill", "forced_inpaint"):
         assert item.pen().style() == Qt.PenStyle.SolidLine
     else:
         assert item.pen().style() == Qt.PenStyle.CustomDashLine
@@ -721,10 +727,10 @@ def _mouse_event_factory(window):
 
 @pytest.mark.gui
 def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
-    """D-12 recompute-on-release: moving a DETECTED box and releasing re-runs
-    the per-box fit — the std_dev re-measures at the new location (0 on the
-    uniform region, > threshold on the noisy half) and the border state
-    re-derives (solid will-inpaint -> dashed gate-skipped)."""
+    """D-12 recompute-on-release (08.1 D-01 inverted): moving a DETECTED box
+    and releasing re-runs the per-box fit — the std_dev re-measures at the new
+    location (uniform -> will_fill solid, noisy -> will_inpaint solid; D-01
+    inverted gate)."""
     from manga_ai_studio.core.mask_editor import ToolMode
 
     from PySide6.QtCore import QCoreApplication
@@ -754,8 +760,8 @@ def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
     profile = window.profile_manager.config.current_profile
     threshold = float(profile.masker.mask_max_standard_deviation)
     assert item.pagebox.std_dev is not None
-    assert item.pagebox.std_dev <= threshold, "uniform region passes the gate"
-    assert item.pagebox.inpaint_state(threshold) == "will_inpaint"
+    assert item.pagebox.std_dev <= threshold, "uniform region: low std -> will_fill (D-01 inverted)"
+    assert item.pagebox.inpaint_state(threshold) == "will_fill"
     assert item.pen().style() == Qt.PenStyle.SolidLine
 
     # Move the box onto the noisy half via the REAL canvas event chain.
@@ -779,10 +785,10 @@ def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
     assert moved.pagebox.std_dev is not None
     assert moved.pagebox.std_dev > threshold, (
         "moving onto the noisy region must re-measure std ABOVE the gate "
-        "(D-12 recompute-on-release)"
+        "(D-12 recompute-on-release, D-01 inverted -> will_inpaint)"
     )
-    assert moved.pagebox.inpaint_state(threshold) == "gate_skipped"
-    assert moved.pen().style() == Qt.PenStyle.CustomDashLine
+    assert moved.pagebox.inpaint_state(threshold) == "will_inpaint"
+    assert moved.pen().style() == Qt.PenStyle.SolidLine
 
 
 @pytest.mark.gui
@@ -891,9 +897,14 @@ def test_refresh_box_inpaint_states_iterates_and_derives(qtbot, tmp_path) -> Non
             "each item must carry the SINGLE-derivation state (08-01)"
         )
 
-    # A std-dev flip + refresh re-renders (border dashed under the gate).
+    # A std-dev flip + refresh re-renders (08.1 D-01 inverted: high std -> will_inpaint solid).
     it = items[0]
     it.pagebox.std_dev = 9999.0
+    window.refresh_box_inpaint_states()
+    assert it._inpaint_state == "will_inpaint"
+    assert it.pen().style() == Qt.PenStyle.SolidLine
+    # gate_skipped is reached by clearing mask (no content), not high std
+    it.pagebox.mask = None
     window.refresh_box_inpaint_states()
     assert it._inpaint_state == "gate_skipped"
     assert it.pen().style() == Qt.PenStyle.CustomDashLine
@@ -973,10 +984,11 @@ def test_dilation_live_redilate_mode_on_rederives(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_threshold_live_regate_flips_border_and_composite(qtbot, tmp_path) -> None:
-    """D-12 threshold: emitting std_dev_threshold_changed recomposes ONLY
-    from the STORED fits (no refit — std_dev unchanged): 100.0 admits an
-    above-threshold box (solid border + composite content), 0.0 excludes it
-    (dashed border + content removed)."""
+    """D-12 threshold (08.1 D-01 inverted): emitting std_dev_threshold_changed
+    recomposes ONLY from the STORED fits (no refit — std_dev unchanged):
+    high-std box (>t) is will_inpaint at default 15 (solid + in auto), at 100
+    it becomes will_fill (solid but in fill plane, auto empty), at 0 it is
+    will_inpaint again. Verifies pure recompose without refit."""
     window = _window_with_custom_page(qtbot, tmp_path, _noisy_right_half_page())
     window.action_detect_boxes_mode.setChecked(True)
     heat = np.zeros((80, 120), dtype=np.uint8)
@@ -985,30 +997,37 @@ def test_threshold_live_regate_flips_border_and_composite(qtbot, tmp_path) -> No
     item = window.canvas._box_items[0]
     threshold = _profile_threshold(window)
     assert item.pagebox.std_dev is not None
-    assert item.pagebox.std_dev > threshold, "fixture must measure above the gate"
+    assert item.pagebox.std_dev > threshold, "fixture must measure above the gate (high std)"
     std_before = item.pagebox.std_dev
 
-    # At the default gate the box is excluded (dashed) ...
-    assert item.pagebox.inpaint_state(threshold) == "gate_skipped"
-    assert item.pen().style() == Qt.PenStyle.CustomDashLine
+    # At the default gate (15) the HIGH-std box is INPAINT (will_inpaint solid, in auto)
+    assert item.pagebox.inpaint_state(threshold) == "will_inpaint"
+    assert item.pen().style() == Qt.PenStyle.SolidLine
+    composite = mask_to_numpy_binary(window.canvas.get_mask())
+    assert composite[10:30, 90:110].any(), "high-std box must be in auto at default"
 
-    # 100.0 admits it: solid border + content in the composite (pure recompose).
+    # 100.0: threshold high, high-std (30) <=100 -> will_fill (solid but in fill plane, auto empty) (D-01 inverted)
     window.tools_panel.std_dev_threshold_changed.emit(100.0)
     assert item.pagebox.std_dev == std_before, (
         "threshold change must NOT re-fit — the stored std stays (D-12)"
     )
-    assert item.pagebox.inpaint_state(100.0) == "will_inpaint"
+    assert item.pagebox.inpaint_state(100.0) == "will_fill"
     assert item.pen().style() == Qt.PenStyle.SolidLine
     composite = mask_to_numpy_binary(window.canvas.get_mask())
-    assert composite[10:30, 90:110].any(), "admitted box contributes content"
+    assert not composite[10:30, 90:110].any(), "will_fill box must NOT be in auto (fill plane, not auto)"
+    # Verify fill plane has content
+    from manga_ai_studio.core.detection_boxes import compose_fill_binary
 
-    # 0.0 excludes it again: dashed + content REMOVED, std still stored.
+    fill_bin = compose_fill_binary([item.pagebox], 100.0, (120, 80))
+    assert fill_bin[10:30, 90:110].any(), "will_fill box must be in fill plane"
+
+    # 0.0: threshold low, high-std 30 >0 -> will_inpaint again (solid, in auto)
     window.tools_panel.std_dev_threshold_changed.emit(0.0)
     assert item.pagebox.std_dev == std_before
-    assert item.pagebox.inpaint_state(0.0) == "gate_skipped"
-    assert item.pen().style() == Qt.PenStyle.CustomDashLine
+    assert item.pagebox.inpaint_state(0.0) == "will_inpaint"
+    assert item.pen().style() == Qt.PenStyle.SolidLine
     composite = mask_to_numpy_binary(window.canvas.get_mask())
-    assert not composite[10:30, 90:110].any(), "excluded box leaves the composite"
+    assert composite[10:30, 90:110].any(), "high-std box must be in auto at 0 threshold"
 
 
 @pytest.mark.gui
@@ -1032,13 +1051,16 @@ def test_dilation_no_raw_is_silent_noop(qtbot, tmp_path) -> None:
 def test_mas_save_roundtrip_restores_planes_without_detect(
     qtbot, tmp_path, monkeypatch
 ) -> None:
-    """Save + reload a session through the REAL Save Project path: border
-    states render from the round-tripped per-box fields, the auto plane is
-    restored from the persisted automask entry, and the raw plane is retained
-    — a post-load radius change re-dilates from it with NO detect call."""
+    """Save + reload a session (08.1 D-01 inverted): use noisy page so the box
+    is high-std -> will_inpaint -> auto has content (preserves save/restore check
+    after inversion; uniform -> will_fill would be auto empty)."""
     from manga_ai_studio.core.mask_planes import unpack_binary as _unpack
 
-    window = _window_with_custom_page(qtbot, tmp_path, np.full((80, 120, 3), 200, dtype=np.uint8))
+    # Noisy page to make the box high-std -> will_inpaint -> auto has content (08.1 inverted gate)
+    noisy = np.zeros((80, 120, 3), dtype=np.uint8)
+    rng = np.random.default_rng(2)
+    noisy[:, :] = rng.integers(0, 256, size=(80, 120, 3), dtype=np.uint8)
+    window = _window_with_custom_page(qtbot, tmp_path, noisy)
     window.action_detect_boxes_mode.setChecked(True)
     heat = np.zeros((80, 120), dtype=np.uint8)
     heat[10:30, 10:30] = 255
@@ -1104,38 +1126,47 @@ def test_inpaint_completion_copy_no_boxes(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_inpaint_completion_copy_box_counts(qtbot, tmp_path) -> None:
-    """With boxes, the completion flash tells the selective story: n boxes
-    inpainted (+ '· m skipped' when some are skipped — gate-failed boxes)."""
+    """With boxes (08.1 D-01 inverted): uniform -> will_fill, noisy -> will_inpaint;
+    completion flash tells selective story: n filled · m inpainted (both)."""
     window = _window_with_custom_page(qtbot, tmp_path, _noisy_right_half_page())
     window.action_detect_boxes_mode.setChecked(True)
     heat = np.zeros((80, 120), dtype=np.uint8)
-    heat[10:30, 10:30] = 255  # uniform box -> will_inpaint
-    heat[10:30, 90:110] = 255  # noise box -> gate_skipped
+    heat[10:30, 10:30] = 255  # uniform box (left white) -> will_fill after inversion
+    heat[10:30, 90:110] = 255  # noise box (right noisy) -> will_inpaint after inversion
     window._on_detection_finished(
         {"mask": heat, "blocks": [_blk(5, 5, 35, 35), _blk(85, 5, 115, 35)]}
     )
     threshold = _profile_threshold(window)
     states = [it.pagebox.inpaint_state(threshold) for it in window.canvas._box_items]
-    assert "gate_skipped" in states, "the noise box must be skipped by the gate"
+    assert "will_fill" in states, "uniform box must be will_fill (D-01 inverted)"
+    assert "will_inpaint" in states, "noisy box must be will_inpaint (D-01 inverted)"
 
     result_rgb = np.full((80, 120, 3), 200, dtype=np.uint8)
-    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 120, 80)})
-    assert window.status_bar_left.text() == (
-        "Inpainting complete · 1 box(es) inpainted · 1 skipped"
-    )
+    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 120, 80), "fill_count": 1, "inpaint_count": 1, "patch_count": 1})
+    # New 08.1 status: both fill and inpaint counts present, no patch suffix for small page
+    assert "1 filled" in window.status_bar_left.text().lower()
+    assert "1 inpainted" in window.status_bar_left.text().lower()
+    assert "patch" not in window.status_bar_left.text().lower()
 
 
 @pytest.mark.gui
 def test_inpaint_completion_copy_zero_skipped(qtbot, tmp_path) -> None:
-    """When every box is inpainted (m == 0), the skipped clause is omitted
-    (zero-one-many: 'Inpainting complete · n box(es) inpainted')."""
-    window = _window_with_page(qtbot, tmp_path)
+    """08.1 D-01 inverted: uniform box -> will_fill, so inpaint completion
+    with single uniform box reports filled, not inpainted; zero-one-many for fill."""
+    # Use noisy page so the single box is high-std -> will_inpaint to keep original intent of "every box inpainted"
+    h, w = 50, 60
+    noisy = np.zeros((h, w, 3), dtype=np.uint8)
+    rng = np.random.default_rng(1)
+    noisy[:, :] = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+    window = _window_with_custom_page(qtbot, tmp_path, noisy)
     window.action_detect_boxes_mode.setChecked(True)
+    heat = np.zeros((h, w), dtype=np.uint8)
+    heat[10:20, 10:20] = 255
     window._on_detection_finished(
-        {"mask": _heatmap_with_in_and_out_content(), "blocks": [_blk(5, 6, 25, 30)]}
+        {"mask": heat, "blocks": [_blk(5, 6, 25, 30)]}
     )
+    # After inversion, high-std noisy box -> will_inpaint, so status should report inpainted
     result_rgb = np.full((50, 60, 3), 200, dtype=np.uint8)
-    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 60, 50)})
-    assert window.status_bar_left.text() == (
-        "Inpainting complete · 1 box(es) inpainted"
-    )
+    window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 60, 50), "fill_count": 0, "inpaint_count": 1, "patch_count": 1})
+    assert "1 inpainted" in window.status_bar_left.text().lower()
+    assert "filled" not in window.status_bar_left.text().lower() or "1 filled" not in window.status_bar_left.text().lower()

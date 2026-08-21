@@ -51,7 +51,8 @@ _TINT_MIN_ALPHA = 25
 _TINT_MAX_ALPHA = 40
 
 # state -> (unselected color hex per origin, style, width, dash pattern)
-_ALL_STATES = ("will_inpaint", "gate_skipped", "forced", "never")
+# 08.1 D-01 authority: 5 visible states + gate_skipped (CONTEXT D-01 inverted gate).
+_ALL_STATES = ("will_fill", "will_inpaint", "gate_skipped", "forced", "forced_fill", "forced_inpaint", "never")
 
 
 def _scene_with_box(pagebox: PageBox) -> tuple[QGraphicsScene, BoxItem]:
@@ -121,9 +122,37 @@ def test_gate_skipped_unselected_renders_origin_hue_dashed(qtbot, origin, hue) -
 @pytest.mark.gui
 @pytest.mark.parametrize("origin", [DETECTED, USER])
 def test_forced_unselected_renders_near_white_solid(qtbot, origin) -> None:
-    """forced = #e8e8ea, SolidLine, width 2 — the override replaces the hue."""
+    """forced = #e8e8ea, SolidLine, width 2 — the override replaces the hue (legacy compat)."""
     _scene, item = _scene_with_box(_make_box(origin))
     item.set_inpaint_state("forced")
+    _assert_pen(item, _FORCED_HEX, Qt.PenStyle.SolidLine, _UNSELECTED_WIDTH, [])
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("origin,hue", [(DETECTED, _DETECTED_HUE), (USER, _USER_HUE)])
+def test_will_fill_unselected_renders_origin_hue_solid(qtbot, origin, hue) -> None:
+    """will_fill (08.1 D-01 inverted: std <=t → fill) = origin hue, SolidLine, width 2."""
+    _scene, item = _scene_with_box(_make_box(origin))
+    item.set_inpaint_state("will_fill")
+    _assert_pen(item, hue, Qt.PenStyle.SolidLine, _UNSELECTED_WIDTH, [])
+    assert item.brush().style() == Qt.BrushStyle.NoBrush
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("origin", [DETECTED, USER])
+def test_forced_fill_unselected_renders_near_white_solid(qtbot, origin) -> None:
+    """forced_fill (08.1 D-04 fill override) = #e8e8ea, SolidLine, width 2 — CONTEXT D-01 inverted."""
+    _scene, item = _scene_with_box(_make_box(origin))
+    item.set_inpaint_state("forced_fill")
+    _assert_pen(item, _FORCED_HEX, Qt.PenStyle.SolidLine, _UNSELECTED_WIDTH, [])
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("origin", [DETECTED, USER])
+def test_forced_inpaint_unselected_renders_near_white_solid(qtbot, origin) -> None:
+    """forced_inpaint (08.1 D-04 inpaint override) = #e8e8ea, SolidLine, width 2 — CONTEXT D-01 inverted."""
+    _scene, item = _scene_with_box(_make_box(origin))
+    item.set_inpaint_state("forced_inpaint")
     _assert_pen(item, _FORCED_HEX, Qt.PenStyle.SolidLine, _UNSELECTED_WIDTH, [])
 
 
@@ -160,6 +189,8 @@ def test_set_inpaint_state_none_renders_phase3_look(qtbot, origin, hue) -> None:
 @pytest.mark.parametrize(
     "state,origin,hue",
     [
+        ("will_fill", DETECTED, _DETECTED_HUE),
+        ("will_fill", USER, _USER_HUE),
         ("will_inpaint", DETECTED, _DETECTED_HUE),
         ("will_inpaint", USER, _USER_HUE),
         ("gate_skipped", DETECTED, _DETECTED_HUE),
@@ -167,7 +198,7 @@ def test_set_inpaint_state_none_renders_phase3_look(qtbot, origin, hue) -> None:
     ],
 )
 def test_selected_auto_states_tint_with_origin_hue(qtbot, state, origin, hue) -> None:
-    """Selected will_inpaint/gate_skipped = state's hue at width 3 + hue tint."""
+    """Selected will_fill/will_inpaint/gate_skipped = state's hue at width 3 + hue tint (08.1 D-01)."""
     scene, item = _scene_with_box(_make_box(origin))
     item.set_inpaint_state(state)
     _select(scene, item)
@@ -188,17 +219,19 @@ def test_selected_auto_states_tint_with_origin_hue(qtbot, state, origin, hue) ->
 @pytest.mark.gui
 @pytest.mark.parametrize("state,hex_hex,tint_hex", [
     ("forced", _FORCED_HEX, _FORCED_HEX),
+    ("forced_fill", _FORCED_HEX, _FORCED_HEX),
+    ("forced_inpaint", _FORCED_HEX, _FORCED_HEX),
     ("never", _NEVER_HEX, _NEVER_HEX),
 ])
 def test_selected_override_states_tint_with_their_grey(qtbot, state, hex_hex, tint_hex) -> None:
-    """Selected forced/never = the state's grey at width 3 + grey tint."""
+    """Selected forced*/never = the state's grey at width 3 + grey tint (08.1 D-04)."""
     scene, item = _scene_with_box(_make_box(DETECTED))
     item.set_inpaint_state(state)
     _select(scene, item)
     style = (
-        Qt.PenStyle.SolidLine if state == "forced" else Qt.PenStyle.CustomDashLine
+        Qt.PenStyle.CustomDashLine if state == "never" else Qt.PenStyle.SolidLine
     )
-    dash = [] if state == "forced" else _DASH
+    dash = _DASH if state == "never" else []
     _assert_pen(item, hex_hex, style, _SELECTED_WIDTH, dash)
     tint = item.brush().color()
     assert tint.name().lower() == tint_hex
