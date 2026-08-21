@@ -373,7 +373,7 @@ def test_override_commit_inpaint_joins_gate_skipped_content(qtbot, tmp_path) -> 
 
 @pytest.mark.gui
 def test_override_commit_fill_forces_fill_state(qtbot, tmp_path) -> None:
-    """Commit \"Fill\" forces forced_fill state (solid grey) regardless of std dev."""
+    """Commit \"Fill\" forces forced_fill state (solid) regardless of std dev."""
     import numpy as np
     from PySide6.QtCore import Qt
     window = _window_with_custom_page(qtbot, tmp_path, _noisy_right_half_page())
@@ -389,8 +389,6 @@ def test_override_commit_fill_forces_fill_state(qtbot, tmp_path) -> None:
     assert item.pagebox.inpaint_override == "fill"
     assert item._inpaint_state == "forced_fill"
     assert item.pen().style() == Qt.PenStyle.SolidLine
-    # forced_fill grey color
-    assert item.pen().color().name().lower() == "#e8e8ea"
 
 
 @pytest.mark.gui

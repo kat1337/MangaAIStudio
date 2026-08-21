@@ -183,11 +183,12 @@ _ORIGIN_HUE_HEX = {DETECTED: "#5fd068", USER: "#f5a623"}
 _ORIGIN_LABEL = {DETECTED: "Detected", USER: "User"}
 
 # Inpaint override display strings <-> PageBox.inpaint_override model values
-# (UI-SPEC §38: the combo shows Auto/Always/Never; the model stores
-# None/"always"/"never" — RESEARCH Q3's tri-state encoding).
-_INPAINT_DISPLAY = {None: "Auto", "always": "Always", "never": "Never"}
+# (UI-SPEC §38 — 08.1 D-04 quad: Auto/Fill/Inpaint/Never; the model stores
+# None/"fill"/"always"/"never" — "always" preserved for .mas compat, display
+# label is Inpaint not Always).
+_INPAINT_DISPLAY = {None: "Auto", "fill": "Fill", "always": "Inpaint", "never": "Never"}
 # The Inpaint combo's canonical entry order (Auto default first).
-_INPAINT_ITEMS = ["Auto", "Always", "Never"]
+_INPAINT_ITEMS = ["Auto", "Fill", "Inpaint", "Never"]
 
 # Align display strings <-> TextStyle model values (UI-SPEC §33: the combos
 # show Left/Center/Right and Top/Middle/Bottom; the model stores lowercase).
@@ -1273,7 +1274,7 @@ class InspectorPanel(QWidget):
         no-op. The "Mixed" sentinel — selectable in the widget (the A5 edit-all
         affordance keeps the real options pickable) — NEVER leaves the widget
         layer (Pitfall 7): committing it would push a before==after BOXES undo
-        entry. Only "Auto"/"Always"/"Never" carry a real override.
+        entry. Only "Auto"/"Fill"/"Inpaint"/"Never" carry a real override.
         """
         text = self.inpaint_combo.currentText()
         if text == self._loaded_inpaint:

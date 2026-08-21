@@ -3732,19 +3732,19 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------- plan 08-08 inpaint override
-    # The Inspector "Inpaint" combo commit (D-13/D-14 — UI-SPEC §38). Mirrors
+    # The Inspector "Inpaint" combo commit (08.1 D-04 quad — UI-SPEC §38). Mirrors
     # `_inspector_style_commit`: captures ONE before-snapshot (the
     # boxes_snapshot — which carries per-box mask/std_dev/inpaint_override
-    # per 08-07), maps the display text to the model tri-state, sets
+    # per 08-07), maps the display text to the model quad-state, sets
     # `inpaint_override` on EVERY selected pagebox, records the op name
     # "inpaint override" (D-09 consumes it for the Ctrl+Z flash), emits
     # `boxes_modified` ONCE, then recomposes the auto plane (Never content
-    # leaves the mask; Always content joins it), refreshes every border, and
-    # flashes the transient status. One Ctrl+Z reverses BOTH the overrides and
-    # the recomposed mask (the BOXES apply path recomposes — see
-    # `apply_undo_boxes`). Never mutates a PageBox outside the commit handler
-    # (the pure-follower rule, 04-04).
-    _INPAINT_OVERRIDE_TO_MODEL = {"Auto": None, "Always": "always", "Never": "never"}
+    # leaves the mask; Inpaint content joins it; Fill is fill plane), refreshes
+    # every border, and flashes the transient status. One Ctrl+Z reverses BOTH
+    # the overrides and the recomposed mask (the BOXES apply path recomposes —
+    # see `apply_undo_boxes`). Never mutates a PageBox outside the commit
+    # handler (the pure-follower rule, 04-04).
+    _INPAINT_OVERRIDE_TO_MODEL = {"Auto": None, "Fill": "fill", "Inpaint": "always", "Never": "never"}
 
     def _on_inspector_inpaint_committed(self, value: str) -> None:
         selected = self._selected_box_items()
@@ -3752,7 +3752,7 @@ class MainWindow(QMainWindow):
             return
         mapped = self._INPAINT_OVERRIDE_TO_MODEL.get(value)
         if value not in self._INPAINT_OVERRIDE_TO_MODEL:
-            return  # defensive — only the three real display values commit
+            return  # defensive — only the four real display values commit
         before = self.canvas.boxes_snapshot()
         self._boxes_interaction_start_snapshot = before
         for item in selected:
