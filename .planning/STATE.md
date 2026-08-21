@@ -3,18 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08.1
-current_phase_name: Inpaint correction & OOM-safe patching
-status: ready
-stopped_at: Phase 08.1 context gathered
-last_updated: "2026-08-19T17:39:44.650Z"
-last_activity: 2026-08-19
-last_activity_desc: Phase 08 complete, Phase 08.1 inserted (URGENT)
+current_phase_name: inpaint-correction-oom-safe-patching-invert-the-std-dev-gate
+status: executing
+stopped_at: Completed 08.1-01-PLAN.md
+last_updated: "2026-08-21T01:48:51.024Z"
+last_activity: 2026-08-20
+last_activity_desc: Phase 08.1 execution started
 progress:
-  total_phases: 10
+  total_phases: 9
   completed_phases: 8
-  total_plans: 69
-  completed_plans: 69
-  percent: 80
+  total_plans: 73
+  completed_plans: 70
 ---
 
 # Project State
@@ -24,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-19)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 09 — ui-rework (UI Rework)
+**Current focus:** Phase 08.1 — inpaint-correction-oom-safe-patching-invert-the-std-dev-gate
 
 ## Current Position
 
-Phase: 08.1 — Inpaint correction & OOM-safe patching
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-19 — Phase 08 complete, Phase 08.1 inserted (URGENT)
+Phase: 08.1 (inpaint-correction-oom-safe-patching-invert-the-std-dev-gate) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
+Last activity: 2026-08-20 — Phase 08.1 execution started
 
 ## Performance Metrics
 
@@ -126,6 +125,7 @@ Last activity: 2026-08-19 — Phase 08 complete, Phase 08.1 inserted (URGENT)
 | Phase 08 P07 | 1h 6m | 3 tasks | 4 files |
 | Phase 08-masker-selective-inpaint P08 | 1h 38m | 2 tasks | 3 files |
 | Phase 08-masker-selective-inpaint P08-09 | 35min | 2 tasks | 5 files |
+| Phase 08.1 P01 | 42 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -307,6 +307,9 @@ Recent decisions affecting current work:
 - [Phase 08 gap-closure]: consumption is signal-silent — `canvas.consume_mask_display()` clears manual+erase+auto planes without emitting `mask_modified` (CR-16 2-stack contract), so consumed overlays cannot resurrect and re-Inpaint cannot re-process cleaned regions (CR-04)
 - [Phase 08 gap-closure]: `merge_page_boxes_for_detect()` is the headless D-03 merge (USER boxes keep identity, DETECTED replaced; `page.boxes = merged`) and detect-batch dirty marking covers BOTH the result and cancel/abort paths (conservative over-dirty is safe) — WR-01/WR-02
 - [Phase 08 gap-closure]: `_apply_geometry_op` invalidates `raw_detected_mask`/`auto_mask` — a dims-preserving ops (180° rotate) must not re-derive an unrotated raw against rotated boxes (WR-02 review-fix cache-invalidation principle)
+- [Phase 08.1]: Inverted std-dev gate per D-01: will_fill (Auto <=t) vs will_inpaint (Auto >t) with forced_fill/forced_inpaint — Matches PanelCleaner pick_best_mask semantics: high std -> inpaint, low std -> fill
+- [Phase 08.1]: Stored median_color at fit time on BoxMaskFit and PageBox.fill_color, invalidated on geometry ops — Preserves off-white rounding and avoids border divergence from recomputation
+- [Phase 08.1]: Max inpaint resolution on MaskerConfig (2048, 512..8192 clamp) and headless patch planner with D-06..D-08 — Follows mask_dilation_radius precedent, caps LaMa input OOM, one patch live at a time
 
 ### Roadmap Evolution
 
@@ -343,8 +346,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-19T17:39:44.635Z
-Stopped at: Phase 08.1 context gathered
-Resume file: .planning/phases/08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate/08.1-CONTEXT.md
+Last session: 2026-08-21T01:48:50.960Z
+Stopped at: Completed 08.1-01-PLAN.md
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
