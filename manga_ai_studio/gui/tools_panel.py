@@ -451,7 +451,7 @@ class ToolsPanel(QWidget):
         radius_row.addWidget(self.dilation_spinbox)
         form.addRow("Dilation radius", radius_row)
 
-        # 3. Std-dev threshold (D-06/D-12) — LIVE: border colors update live.
+        # 3. Std-dev threshold (D-06/D-12 — 08.1 Pitfall 5 inversion) — LIVE: border colors update live.
         self.std_dev_threshold_spin = QDoubleSpinBox(self)
         self.std_dev_threshold_spin.setMinimum(0)
         self.std_dev_threshold_spin.setMaximum(100)
@@ -459,15 +459,25 @@ class ToolsPanel(QWidget):
         self.std_dev_threshold_spin.setDecimals(1)
         self.std_dev_threshold_spin.setValue(15)
         self.std_dev_threshold_spin.setToolTip(
-            "The maximum color variation along a mask's edge for it to count"
-            " as sitting in a solid region. Boxes above this are skipped"
-            " (dashed border). 0 allows only perfect masks — recommended for"
-            " very high resolution images. Border colors update live."
+            "Color variation along this box's detected mask edge. At or below this is color-filled "
+            "(solid border); above is AI-inpainted (solid). \"Fill\"/\"Never\" overrides fill/skip. "
+            "Borders update live."
         )
         self.std_dev_threshold_spin.valueChanged.connect(
             self.std_dev_threshold_changed
         )
         form.addRow("Std-dev threshold", self.std_dev_threshold_spin)
+
+        # 3b. Max LaMa input size (08.1 D-05) — user-capped patch size, persisted via profile INI.
+        self.max_inpaint_spin = QSpinBox(self)
+        self.max_inpaint_spin.setRange(512, 8192)
+        self.max_inpaint_spin.setValue(2048)
+        self.max_inpaint_spin.setSuffix(" px")
+        self.max_inpaint_spin.setToolTip(
+            "Maximum LaMa input size (largest side). Larger pages are patched; caps memory."
+        )
+        self.max_inpaint_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Max inpaint size", self.max_inpaint_spin)
 
         # 4-10. The seven next-detect fit params (D-06) — they share ONE
         # persist + apply-next-detect fate (one signal, UI-SPEC §36).
@@ -567,11 +577,11 @@ class ToolsPanel(QWidget):
         self.masker_params_changed.emit()
 
     def masker_values(self) -> dict:
-        """Read the seven next-detect fit params as a profile-field-keyed dict.
+        """Read the fit params + max inpaint size as a profile-field-keyed dict.
 
         Keys match ``MaskerConfig`` field names so MainWindow's
         ``_on_masker_params_changed`` can ``setattr`` them onto
-        ``profile.masker`` directly (plan 08-05).
+        ``profile.masker`` directly (plan 08-05, 08.1-03 D-05).
         """
         return {
             "mask_growth_step_pixels": self.growth_step_spin.value(),
@@ -581,6 +591,7 @@ class ToolsPanel(QWidget):
             "mask_improvement_threshold": self.improvement_spin.value(),
             "allow_colored_masks": self.allow_colored_check.isChecked(),
             "mask_selection_fast": self.fast_selection_check.isChecked(),
+            "max_inpaint_resolution": self.max_inpaint_spin.value(),
         }
 
     def set_masker_values(self, masker_conf, detect_boxes: bool) -> None:
@@ -596,6 +607,7 @@ class ToolsPanel(QWidget):
             self.dilation_slider,
             self.dilation_spinbox,
             self.std_dev_threshold_spin,
+            self.max_inpaint_spin,
             self.growth_step_spin,
             self.growth_steps_spin,
             self.min_thickness_spin,
@@ -612,6 +624,11 @@ class ToolsPanel(QWidget):
             self.std_dev_threshold_spin.setValue(
                 masker_conf.mask_max_standard_deviation
             )
+            try:
+                _max_val = int(getattr(masker_conf, "max_inpaint_resolution", 2048))
+            except (TypeError, ValueError):
+                _max_val = 2048
+            self.max_inpaint_spin.setValue(_max_val)
             self.growth_step_spin.setValue(masker_conf.mask_growth_step_pixels)
             self.growth_steps_spin.setValue(masker_conf.mask_growth_steps)
             self.min_thickness_spin.setValue(masker_conf.min_mask_thickness)
