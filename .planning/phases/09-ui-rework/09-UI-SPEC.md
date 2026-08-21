@@ -1,10 +1,11 @@
 ---
 phase: 9
 slug: ui-rework
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-21
+reviewed_at: 2026-08-21
 ---
 
 # Phase 9 — UI Design Contract (UI Rework)
@@ -169,6 +170,8 @@ No third-party UI component registries. No `npx shadcn` operations. No packages 
 
 ### Window layout (final Phase 9 arrangement — executor-authoritative)
 
+**Focal point:** the canvas (EditorCanvas) is the primary visual anchor of the main window — every other chrome surface (strip, panel, toolbar) is subordinate matte around it. The strip's accent checked-border is the single strongest non-canvas attention point.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Menu bar: File · Edit · View · Text · Batch · Tools · Help           │
@@ -257,6 +260,30 @@ No persisted state is keyed on the name (grep-verified: QSettings keys are `rece
 | Async op running | Strip + Edit section | Same gating as today (op-running gate); running-state indicator on Detect/Inpaint mirrors the action |
 | Four sections expanded at min window (1024×720) | Panel | Vertical scroll only (A11 wrap); horizontal scrollbar permanently off |
 | Long section interaction | Typesetting body | Unchanged InspectorPanel behavior incl. Mixed-state hint (12px muted) |
+
+---
+
+## UI Considerations
+
+> State-coverage resolution from the post-verification ui-consideration probe
+> (2026-08-21). `covered` rows are planner-liftable truths; `backstop` rows are
+> held-out visual checks; dismissed rows are recorded as N/A with reasons.
+
+### Covered
+
+- Panel/section overflow: when the four expanded sections exceed the panel height, the single vertical-only QScrollArea wrap scrolls; the horizontal scrollbar is permanently off (§38 A11 rule).
+- Strip + Edit-section disabled state: with no page open or an async op running, Detect Text / Inpaint / all six Edit buttons disable via the inherited `_refresh_action_states` gating and icons grey automatically (§State coverage).
+- Top-toolbar Preview (hold) enablement: stays disabled until an inpaint result exists — inherited verbatim in the shrunken toolbar (§41).
+- Icon load failure containment: strip SVGs load module-relative only; tests assert non-null QIcon plus button wiring, never pixels (§Icon Asset Contract, RESEARCH A5).
+
+### Backstop
+
+- { statement: The checked strip tool button renders the 1px #00d4ff accent border on its :checked state at 100% zoom, and unchecked buttons sit flat on #2d2d33 with a 1px #3a3a42 border — visual check on the running app, not pixel-unit-testable., verification: backstop }
+
+### Dismissed (N/A — recorded reasons)
+
+- loading/error states on section headers, toggle, strip, Edit section, toolbar, icons — static Qt chrome performs no async data loads; the only busy signal is the op-running gate (covered above).
+- partial / zero-one-many / long-text states on sections, strip, Edit section, icons — all labels and buttons are fixed contracted copy (§Copywriting Contract); no dynamic-content or truncation surfaces exist in this phase.
 
 ---
 
