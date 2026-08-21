@@ -98,10 +98,12 @@ _SELECTED_PEN_WIDTH = 3
 # surface colours, declared the same way Phase 1 declared the mask red.
 _INPAINT_FORCED_HEX = "#e8e8ea"  # near-white — "Always" (promoted)
 _INPAINT_NEVER_HEX = "#9a9aa2"  # muted grey — "Never" (demoted)
-# The two override states that REPLACE the origin hue with a grey (reading rule
+# The three override states that REPLACE the origin hue with a grey (reading rule
 # 2: hue = who decided; overrides are user decisions). The auto-gate states
-# (will_inpaint/gate_skipped) keep the origin hue.
-_INPAINT_GREY_STATES = frozenset({"forced", "never"})
+# (will_inpaint/will_fill/gate_skipped) keep the origin hue. 08.1 adds
+# forced_fill vs forced_inpaint distinction but keeps ZERO new hex — both map
+# to the same near-white #e8e8ea (forced variants solid grey, never dashed).
+_INPAINT_GREY_STATES = frozenset({"forced", "forced_fill", "forced_inpaint", "never"})
 # 6/4 scene px dash (UI-SPEC §Spacing/§Color): dash lengths ~3x the 2px stroke
 # so the pattern reads as a dash (not dots, not mush) at 100% zoom; scene units
 # match how the Phase 3 border scales with zoom (the border-state high-DPI note).
@@ -557,7 +559,7 @@ class BoxItem(QGraphicsRectItem):
         self._primary_owner = None
         # Phase 8 inpaint border-state dimension (plan 08-06). None = no refresh
         # yet — renders the Phase 3 look (backward-compat default). State strings
-        # come from PageBox.inpaint_state(threshold) (08-01) via the 08-07 refresh
+        # come from PageBox.inpaint_state (08-01) via the 08-07 refresh
         # helper; BoxItem never computes the gate itself.
         self._inpaint_state: str | None = None
         self._apply_origin_pen()
@@ -571,22 +573,20 @@ class BoxItem(QGraphicsRectItem):
     def _inpaint_pen_color(self, base_hue: str) -> QColor:
         """The border colour for the current inpaint state (UI-SPEC §Color).
 
-        ``forced``/``never`` REPLACE the origin hue with the reused palette
+        ``forced_*``/``never`` REPLACE the origin hue with the reused palette
         greys — an override state means the user decided, so the hue switches
         from "the auto gate decided" (origin hue) to "the user's override
         decided" (near-white forced-in / muted grey forced-out, reading rule 2).
-        Every other state (``will_inpaint``/``gate_skipped``/``None``) keeps the
-        origin hue (the auto-gate surface).
+        Auto states (``will_inpaint``/``will_fill``/``gate_skipped``/``None``)
+        keep the origin hue (the auto-gate surface). 08.1 keeps ZERO new hex:
+        both forced variants map to #e8e8ea, never to #9a9aa2.
         """
         if self._inpaint_state in _INPAINT_GREY_STATES:
-            # The set guarantees only the two override values reach this branch;
-            # pick the specific grey by state (the near-white vs muted distance
-            # is the ~2.4:1 luminance difference the §Accessibility note relies on).
-            return QColor(
-                _INPAINT_FORCED_HEX
-                if self._inpaint_state == "forced"
-                else _INPAINT_NEVER_HEX
-            )
+            # Grey set covers all forced variants + never; distinguish only never
+            # vs forced family (both forced variants share the near-white).
+            if self._inpaint_state == "never":
+                return QColor(_INPAINT_NEVER_HEX)
+            return QColor(_INPAINT_FORCED_HEX)
         return QColor(base_hue)
 
     def _apply_origin_pen(self) -> None:
@@ -623,7 +623,7 @@ class BoxItem(QGraphicsRectItem):
     def set_inpaint_state(self, state: str | None) -> None:
         """Set the inpaint border-state dimension (plan 08-06, UI-SPEC §37).
 
-        ``state`` is one of the ``PageBox.inpaint_state(threshold)`` returns
+        ``state`` is one of the ``PageBox.inpaint_state`` returns
         (08-01 — the SINGLE derivation site; this method never computes the
         gate itself): ``"will_inpaint"`` / ``"gate_skipped"`` / ``"forced"`` /
         ``"never"``, or ``None`` to reset to the Phase 3 look (the
