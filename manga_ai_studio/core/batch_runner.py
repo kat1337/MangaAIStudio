@@ -65,23 +65,23 @@ import numpy as np
 from loguru import logger
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from manga_ai_studio.adapters.factory import backend_factory
-from manga_ai_studio.core.detection_boxes import (
-    build_detected_pageboxes,
-    compose_auto_binary,
-    compose_fill_specs,
-    derive_page_mask_state,
-    merge_page_boxes_for_detect,
-)
-from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.image_io import passthrough_original, save_image_optimized
 from manga_ai_studio.core.inpaint_patching import inpaint_patches
-from manga_ai_studio.core.mask_editor import (
-    mask_to_numpy_binary,
-    numpy_binary_to_mask_qimage,
-)
 from manga_ai_studio.core.mask_planes import pack_binary
-from manga_ai_studio.gui.worker_thread import Abort
+
+if TYPE_CHECKING:
+    from manga_ai_studio.core.detection_boxes import (
+        build_detected_pageboxes,
+        compose_auto_binary,
+        compose_fill_specs,
+        derive_page_mask_state,
+        merge_page_boxes_for_detect,
+    )
+    from manga_ai_studio.core.image_file import ImageFile
+# headless: detection_boxes (via panelcleaner.config->helpers->Qt), image_file, mask_editor and worker_thread are Qt-dependent. Import lazily inside functions to keep this module import Qt-free so `import batch_runner` is headless-pure per 08.1-04 verification.
 
 
 def _read_image_bgr(image_path: Path) -> np.ndarray:
@@ -162,6 +162,43 @@ def _run_batch_task(
     Raises ``Abort`` if the cancel flag is set at a page boundary (the Worker
     converts this to ``signals.aborted``).
     """
+    # Lazily import Qt-dependent helpers to keep module import Qt-free (headless probe).
+    try:
+        from manga_ai_studio.core.detection_boxes import (
+            build_detected_pageboxes,
+            compose_auto_binary,
+            compose_fill_specs,
+            derive_page_mask_state,
+            merge_page_boxes_for_detect,
+        )
+    except ImportError:
+        # Headless probe fallback: stubs
+        def build_detected_pageboxes(*a, **kw):  # type: ignore
+            raise RuntimeError("detection_boxes not available")
+        def compose_auto_binary(*a, **kw):  # type: ignore
+            raise RuntimeError("detection_boxes not available")
+        def compose_fill_specs(*a, **kw):  # type: ignore
+            raise RuntimeError("detection_boxes not available")
+        def derive_page_mask_state(*a, **kw):  # type: ignore
+            raise RuntimeError("detection_boxes not available")
+        def merge_page_boxes_for_detect(*a, **kw):  # type: ignore
+            raise RuntimeError("detection_boxes not available")
+    try:
+        from manga_ai_studio.core.mask_editor import mask_to_numpy_binary, numpy_binary_to_mask_qimage
+    except ImportError:
+        # Fallback for headless probe: define stubs that will be overridden on actual use
+        def mask_to_numpy_binary(x):  # type: ignore
+            raise RuntimeError("mask_editor not available headless")
+        def numpy_binary_to_mask_qimage(x):  # type: ignore
+            raise RuntimeError("mask_editor not available headless")
+    try:
+        from manga_ai_studio.gui.worker_thread import Abort as _ImportedAbort
+        _Abort = _ImportedAbort  # type: ignore
+    except ImportError:
+        class _Abort(Exception):  # type: ignore
+            pass
+    # Use the lazily imported Abort for the raise below (keep top-level Qt-free)
+
     # T-02-03 defense-in-depth: the writer must never write to source.parent
     # directly. The output dir is DERIVED in the caller (D-06/D-07) but this
     # guard makes a path-derivation bug fail loudly instead of silently writing
@@ -180,7 +217,7 @@ def _run_batch_task(
         # strictly between pages; a page whose work has already started runs to
         # completion, so no output file is ever half-written (T-02-06).
         if abort_flag is not None and abort_flag.get():
-            raise Abort()
+            raise _Abort()
 
         # D-10: per-page progress (percent, page_name). Computed at the loop
         # top so the UI shows "about to process page i" before the work begins.
