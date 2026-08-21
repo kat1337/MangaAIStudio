@@ -5243,7 +5243,7 @@ class MainWindow(QMainWindow):
 
         has_inpaint = bool(np.count_nonzero(inpaint_binary))
         if not has_inpaint:
-            # Skip LaMa, just fill
+            # Skip LaMa, just fill — no patches
             result_rgb = page_with_fill.copy()
             # Union bbox is fill only
             try:
@@ -5262,7 +5262,7 @@ class MainWindow(QMainWindow):
                         bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
             except Exception:
                 bbox = None
-            return {"image": result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count}
+            return {"image": result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count, "patch_count": 0}
 
         # Has inpaint: run inpaint_patches with one-patch-live ordering
         # Progress wrapper: 50 + 40*n//total
@@ -5279,17 +5279,36 @@ class MainWindow(QMainWindow):
             # model.inpaint expects (H,W,3) and (H,W)
             return model.inpaint(patch_rgb, patch_mask)  # type: ignore[union-attr]
 
-        # Need to import inpaint_patches headlessly
+        # Need to import inpaint_patches headlessly — also capture patch count for verdict
+        patch_count = 0
         try:
-            from manga_ai_studio.core.inpaint_patching import inpaint_patches
+            from manga_ai_studio.core.inpaint_patching import inpaint_patches, plan_patches
 
+            # Pre-compute patch count for verdict (whole-page fast path = 1, patched = len(patches) >1)
+            try:
+                if max(h, w) <= max(max_size):
+                    patch_count = 1
+                else:
+                    patches = plan_patches(inpaint_binary, max_size, page_size=(w, h))
+                    patch_count = len(patches) if patches else 1
+            except Exception:
+                patch_count = 0
             result_rgb, patch_union = inpaint_patches(
                 page_with_fill, inpaint_binary, max_size, _inpaint_fn, isolation_radius=5, progress_cb=_patch_progress
             )
+            # If inpaint_patches used whole-page fast path but we pre-counted 1, keep 1; patched count already set
+            # For accurate patched count, recompute if patched path was taken and patch_count was 1 but should be >1
+            if max(h, w) > max(max_size) and patch_count == 1:
+                try:
+                    patches = plan_patches(inpaint_binary, max_size, page_size=(w, h))
+                    patch_count = len(patches) if patches else patch_count
+                except Exception:
+                    pass
         except Exception as exc:
             # Fallback to direct inpaint if patching fails (should not happen in tests)
             result_rgb = model.inpaint(page_with_fill, inpaint_binary)  # type: ignore[union-attr]
             patch_union = compute_mask_bbox(inpaint_binary)
+            patch_count = 1 if max(h, w) <= max(max_size) else 1
 
         # Union bbox: fill+inpaint coverage or patch union — take union of fill bbox + patch union
         try:
@@ -5337,11 +5356,11 @@ class MainWindow(QMainWindow):
 
         if progress_callback is not None:
             try:
-                progress_callback.emit((90, "Compositing result\u2026"))
+                progress_callback.emit((90, "Compositing result…"))
             except Exception:
                 pass
         # Ensure counts reflect actual work
-        return {"image": result_rgb.copy() if hasattr(result_rgb, 'copy') else result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count}
+        return {"image": result_rgb.copy() if hasattr(result_rgb, 'copy') else result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count, "patch_count": patch_count}
 
     def _on_inpaint_progress(self, payload) -> None:
         """Update the status bar + progress bar (UI-SPEC surface 5/9)."""
@@ -5480,35 +5499,31 @@ class MainWindow(QMainWindow):
             else:
                 fill_cnt = 0
                 inpaint_cnt = 0
-        # Build status: always mention both when both present, include patch count when patched
-        # Patch count: worker may have done multiple patches when max(max_size) < max(page dims)
-        # We infer patched when page max > max_size cap; use bbox vs page size heuristic or result patch count
+        # Build status: always mention both when both present, include patch count N when patched (D-08), no suffix on whole-page
         patch_suffix = ""
         try:
-            # If result bbox is patch union larger than mask bbox, it was patched; but simpler: check result has patch count
-            # Worker does not return patch count directly, but we can infer from bbox vs combined mask bbox
-            # For now, if bbox exists and its area suggests patched (w*h > 2048*2048?), not reliable. Instead check if worker's
-            # image size max > max_size cap (from profile) — if so, it was patched.
-            max_cap = None
-            try:
-                max_cap = int(self.profile_manager.config.current_profile.masker.max_inpaint_resolution)
-            except Exception:
-                max_cap = 2048
-            if bbox is not None and max_cap is not None:
-                # Heuristic: if original image max side > max_cap, then patched
+            patch_n = result.get("patch_count") if isinstance(result, dict) else None
+            # Only show patch count when actually patched (>1 patches). Whole-page fast path is 1 or 0 -> no suffix per acceptance.
+            if isinstance(patch_n, int) and patch_n > 1:
+                patch_suffix = f" · {patch_n} patches"
+            elif patch_n is not None and patch_n == 1:
+                # Whole-page path — no suffix (acceptance: whole-page shows no patch suffix)
+                patch_suffix = ""
+            else:
+                # Fallback heuristic for legacy results without patch_count: infer via page dims vs cap (pre-fix)
+                max_cap = None
                 try:
-                    pre_shape = self.canvas.get_image_numpy().shape if hasattr(self.canvas, 'get_image_numpy') else None
-                    if pre_shape is not None and max(pre_shape[0], pre_shape[1]) > max_cap:
-                        # Patched path was taken — try to get patch count from worker via result["patch_count"] if present
-                        patch_n = result.get("patch_count") if isinstance(result, dict) else None
-                        if patch_n is None:
-                            # Fallback: estimate patch count from union bbox vs page dims (not exact)
-                            # For test, we just need to show patch count when patched; use "patches" suffix if bbox present and page large
-                            patch_suffix = " · patched"
-                        else:
-                            patch_suffix = f" · {patch_n} patch(es)"
+                    max_cap = int(self.profile_manager.config.current_profile.masker.max_inpaint_resolution)
                 except Exception:
-                    patch_suffix = ""
+                    max_cap = 2048
+                if bbox is not None and max_cap is not None:
+                    try:
+                        pre_shape = self.canvas.get_image_numpy().shape if hasattr(self.canvas, 'get_image_numpy') else None
+                        if pre_shape is not None and max(pre_shape[0], pre_shape[1]) > max_cap:
+                            if patch_n is None:
+                                patch_suffix = " · patched"
+                    except Exception:
+                        patch_suffix = ""
         except Exception:
             patch_suffix = ""
         # Final status construction per spec: Inpaint finish status contains both fill and inpaint counts and, when patched, patch count N
