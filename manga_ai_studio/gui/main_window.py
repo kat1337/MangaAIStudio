@@ -6593,7 +6593,14 @@ class MainWindow(QMainWindow):
         # D-04 (plan 08-09): thread the profile's live MaskerConfig into the
         # detect-mode worker args — the batch loop derives the box-constrained
         # mask from it (mask_dilation_radius + every masker fit param).
+        # 08.1 D-09 parity: also thread max_inpaint_resolution as (max,max) cap (T-08.1-04-01).
         masker_conf = self.profile_manager.config.current_profile.masker
+        try:
+            max_res = int(getattr(masker_conf, "max_inpaint_resolution", 2048))
+        except Exception:
+            max_res = 2048
+        max_res = max(512, min(8192, max_res))
+        max_size = (max_res, max_res)
 
         if mode == "detect":
             task_fn = batch_detect
@@ -6602,7 +6609,7 @@ class MainWindow(QMainWindow):
         elif mode == "clean":
             task_fn = batch_clean
             inp_path = self._resolve_inpainting_model_path()
-            args = (list(self.image_files), inp_path, inp_backend, cleaned_dir)
+            args = (list(self.image_files), inp_path, inp_backend, cleaned_dir, masker_conf, max_size)
         elif mode == "detect_and_clean":
             task_fn = batch_detect_and_clean
             det_path = self._resolve_detection_model_path()
@@ -6615,6 +6622,7 @@ class MainWindow(QMainWindow):
                 inp_backend,
                 cleaned_dir,
                 masker_conf,
+                max_size,
             )
         else:  # pragma: no cover - defensive; the three handlers are the only callers
             raise ValueError(f"unknown batch mode: {mode}")

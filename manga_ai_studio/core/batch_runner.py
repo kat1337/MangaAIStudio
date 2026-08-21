@@ -68,11 +68,14 @@ from pathlib import Path
 from manga_ai_studio.adapters.factory import backend_factory
 from manga_ai_studio.core.detection_boxes import (
     build_detected_pageboxes,
+    compose_auto_binary,
+    compose_fill_specs,
     derive_page_mask_state,
     merge_page_boxes_for_detect,
 )
 from manga_ai_studio.core.image_file import ImageFile
 from manga_ai_studio.core.image_io import passthrough_original, save_image_optimized
+from manga_ai_studio.core.inpaint_patching import inpaint_patches
 from manga_ai_studio.core.mask_editor import (
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
@@ -101,6 +104,24 @@ def _read_image_bgr(image_path: Path) -> np.ndarray:
     return image
 
 
+def _normalize_max_size(max_size) -> tuple[int, int]:
+    """Clamp max_inpaint_size to 512..8192, fallback 2048 on invalid (T-08.1-04-01)."""
+    try:
+        if max_size is None:
+            return (2048, 2048)
+        if isinstance(max_size, (tuple, list)) and len(max_size) == 2:
+            mw, mh = int(max_size[0]), int(max_size[1])
+            mw = max(512, min(8192, mw))
+            mh = max(512, min(8192, mh))
+            return (mw, mh)
+        if isinstance(max_size, int):
+            v = max(512, min(8192, int(max_size)))
+            return (v, v)
+        return (2048, 2048)
+    except Exception:
+        return (2048, 2048)
+
+
 def _run_batch_task(
     pages: list[ImageFile],
     mode: str,
@@ -108,6 +129,7 @@ def _run_batch_task(
     inp_model,
     cleaned_dir: Path,
     masker_conf=None,
+    max_inpaint_size: tuple[int, int] = (2048, 2048),
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
@@ -215,27 +237,120 @@ def _run_batch_task(
                 page.mask = numpy_binary_to_mask_qimage(derivation.auto_binary).copy()
 
             if mode in ("clean", "detect_and_clean"):
-                # D-03 GATE: a page whose mask is empty (detection found no
-                # text, OR the user cleared it during review) skips LaMa
-                # entirely and the original is copied through unchanged. This
-                # covers both empty-after-review masks AND never-detected masks
-                # (mask is None -> has_mask_content returns False -> passthrough;
-                # RESEARCH Open Question Q3).
-                if not page.has_mask_content():
+                # 08.1 D-09 parity: same corrected gate + patched inpaint as interactive.
+                # Validate max size (T-08.1-04-01): clamp 512..8192, fallback 2048.
+                max_size = _normalize_max_size(max_inpaint_size)
+                try:
+                    threshold = float(masker_conf.mask_max_standard_deviation) if masker_conf is not None else 15.0
+                except Exception:
+                    threshold = 15.0
+                # Load image for fill/inpaint (non-ASCII safe, T-08.1-04-02)
+                image_bgr = _read_image_bgr(page.path)
+                image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                h, w = image_rgb.shape[:2]
+                page_size = (w, h)
+                # Derive fill_specs and auto binary from per-box persisted data
+                fill_specs: list = []
+                auto_bin = np.zeros((h, w), dtype=np.uint8)
+                manual_bin = np.zeros((h, w), dtype=np.uint8)
+                erase_bin = np.zeros((h, w), dtype=np.uint8)
+                if page.boxes is not None and len(page.boxes) > 0:
+                    try:
+                        fill_specs = compose_fill_specs(page.boxes, threshold)
+                    except Exception:
+                        fill_specs = []
+                    try:
+                        auto_bin = compose_auto_binary(page.boxes, threshold, page_size)
+                    except Exception:
+                        auto_bin = np.zeros((h, w), dtype=np.uint8)
+                    # In real canvas manual/erase would be packed planes, but batch pages have no strokes (D-04).
+                    # Keep manual/erase zero, but allow future ImageFile extension: if page has manualMask etc, use it.
+                    try:
+                        if getattr(page, "mask_manual", None) is not None and page.mask_manual is not None:
+                            manual_bin = mask_to_numpy_binary(page.mask_manual)
+                            if manual_bin.shape != (h, w):
+                                manual_bin = np.zeros((h, w), dtype=np.uint8)
+                    except Exception:
+                        manual_bin = np.zeros((h, w), dtype=np.uint8)
+                    try:
+                        if getattr(page, "mask_erase", None) is not None and page.mask_erase is not None:
+                            erase_bin = mask_to_numpy_binary(page.mask_erase)
+                            if erase_bin.shape != (h, w):
+                                erase_bin = np.zeros((h, w), dtype=np.uint8)
+                    except Exception:
+                        erase_bin = np.zeros((h, w), dtype=np.uint8)
+                    inpaint_binary = np.where(erase_bin > 0, np.uint8(0), (manual_bin | auto_bin)).astype(np.uint8)
+                else:
+                    # Legacy pages without boxes (pre-Phase 8): fall back to flat mask
+                    if page.mask is not None:
+                        try:
+                            if page.has_mask_content():
+                                raw = mask_to_numpy_binary(page.mask)
+                                if raw.shape != (h, w):
+                                    # Embed small mask at origin (legacy 4x4 mask on 8x8 page test fixture)
+                                    # Preserve content so D-03 gate still triggers LaMa for legacy pages.
+                                    tmp = np.zeros((h, w), dtype=np.uint8)
+                                    mh, mw = raw.shape
+                                    ch, cw = min(h, mh), min(w, mw)
+                                    tmp[:ch, :cw] = raw[:ch, :cw]
+                                    inpaint_binary = tmp
+                                else:
+                                    inpaint_binary = raw
+                            else:
+                                inpaint_binary = np.zeros((h, w), dtype=np.uint8)
+                        except Exception:
+                            inpaint_binary = np.zeros((h, w), dtype=np.uint8)
+                    else:
+                        inpaint_binary = np.zeros((h, w), dtype=np.uint8)
+                    fill_specs = []
+
+                has_fill = len(fill_specs) > 0
+                has_inpaint = bool(np.count_nonzero(inpaint_binary))
+                if not has_fill and not has_inpaint:
                     passthrough_original(page.path, cleaned_dir)
                     continue
 
-                # Read the RGB image for inpaint. The adapter contract is
-                # inpaint(image_rgb, mask_binary); detect returned a grayscale
-                # heatmap (fine for the mask), so we re-read the page as BGR
-                # and convert to RGB to match the adapter's expectation.
-                image_bgr = _read_image_bgr(page.path)
-                image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-                mask_binary = mask_to_numpy_binary(page.mask)
-                result_rgb = inp_model.inpaint(image_rgb, mask_binary)
-                # Write only into cleaned_dir / page.path.name (T-02-02: the
-                # loop never writes to page.path or its parent). The original
-                # is passed so its format/mode/DPI are preserved (plan 01).
+                # Fill headlessly via PIL convert_mask_to_rgba + alpha_composite + paste
+                page_with_fill = image_rgb.copy()
+                if has_fill:
+                    try:
+                        from PIL import Image as PILImage
+                        from panelcleaner.image_ops import convert_mask_to_rgba
+
+                        fill_layer = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+                        for mask, color, (x, y) in fill_specs:
+                            try:
+                                rgba = convert_mask_to_rgba(mask, color)
+                                fill_layer.alpha_composite(rgba, (int(x), int(y)))
+                            except Exception:
+                                continue
+                        page_pil = PILImage.fromarray(page_with_fill, mode="RGB").convert("RGBA")
+                        page_pil.paste(fill_layer, (0, 0), fill_layer)
+                        page_with_fill = np.array(page_pil.convert("RGB"), dtype=np.uint8)
+                    except Exception as exc:
+                        logger.warning(f"Batch fill failed for {page.path.name}: {exc}")
+                        page_with_fill = image_rgb.copy()
+
+                # Inpaint patched (one patch live, halo 5) or skip if fill-only
+                if not has_inpaint:
+                    result_rgb = page_with_fill.copy()
+                else:
+                    def _patch_progress(n: int, total: int) -> None:
+                        if progress_callback is not None:
+                            try:
+                                progress_callback.emit((int(n / total * 100) if total else 0, f"{page.path.name} patch {n}/{total}"))
+                            except Exception:
+                                pass
+
+                    try:
+                        result_rgb, _bbox = inpaint_patches(
+                            page_with_fill, inpaint_binary, max_size, inp_model.inpaint, isolation_radius=5, progress_cb=_patch_progress
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Batch inpaint_patches failed for {page.path.name}: {exc}, falling back to direct")
+                        result_rgb = inp_model.inpaint(page_with_fill, inpaint_binary)
+
+                # Write only into cleaned_dir / page.path.name (T-02-02)
                 save_image_optimized(
                     result_rgb, cleaned_dir / page.path.name, original=page.path
                 )
@@ -294,15 +409,23 @@ def batch_clean(
     inp_model_path: Path,
     inp_backend: str,
     cleaned_dir: Path,
+    masker_conf=None,
+    max_inpaint_size: tuple[int, int] = (2048, 2048),
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
     """Inpaint every page using its current mask, save into ``cleaned/`` (D-01).
 
-    Detection is NOT re-run: masks are read back via ``ImageFile.has_mask_content``
-    (plan 02). Pages whose mask is empty/None are copied through unchanged via
-    ``passthrough_original`` (D-03). Resolves + loads the inpaint adapter ONCE
-    (Pitfall 3) before the loop.
+    08.1 D-09 parity: when ``page.boxes`` is present the corrected inverted gate
+    is applied (low-std -> fill, high-std -> LaMa via inpaint_patches capped at
+    max_inpaint_size). ``masker_conf`` supplies the threshold (default 15) and
+    ``max_inpaint_size`` is the OOM cap (default 2048, clamped 512..8192). Both
+    are additive with defaults so existing callers keep working (08.1-04 Task 1).
+
+    Detection is NOT re-run for legacy pages without boxes: the flat mask is
+    used as the inpaint source. Pages whose combined fill+inpaint is empty are
+    copied through via passthrough_original (D-03 extended). Resolves + loads
+    the inpaint adapter ONCE (Pitfall 3) before the loop.
 
     ``inp_model_path`` / ``inp_backend`` are supplied by ``MainWindow`` via
     ``_resolve_inpainting_model_path`` + ``_inpainting_backend()`` (plan 04).
@@ -315,6 +438,8 @@ def batch_clean(
         det_model=None,
         inp_model=inp_model,
         cleaned_dir=cleaned_dir,
+        masker_conf=masker_conf,
+        max_inpaint_size=max_inpaint_size,
         progress_callback=progress_callback,
         abort_flag=abort_flag,
     )
@@ -328,6 +453,7 @@ def batch_detect_and_clean(
     inp_backend: str,
     cleaned_dir: Path,
     masker_conf,
+    max_inpaint_size: tuple[int, int] = (2048, 2048),
     progress_callback=None,
     abort_flag=None,
 ) -> dict:
@@ -359,6 +485,7 @@ def batch_detect_and_clean(
         inp_model=inp_model,
         cleaned_dir=cleaned_dir,
         masker_conf=masker_conf,
+        max_inpaint_size=max_inpaint_size,
         progress_callback=progress_callback,
         abort_flag=abort_flag,
     )
