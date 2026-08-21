@@ -401,14 +401,14 @@ Plans:
 **Goal:** Correct the std-dev gate to PanelCleaner semantics (uniform boxes median-color fill, complex boxes LaMa inpaint) with one combined Inpaint action (one undo) and OOM-safe patched inpainting capped at a user-configurable max resolution (default 2048), plus Auto/Fill/Inpaint/Never override and batch parity.
 **Requirements**: MASK-02 (corrected), MASK-03 (corrected), OOM guard, Batch parity D-09
 **Depends on:** Phase 08
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans executed
 
 Plans:
 
 - [x] 08.1-01-PLAN.md — Tracer: inverted gate + median-color fill storage + headless patch planner + max-size config + persistence widening (MASK-02, MASK-03)
 - [x] 08.1-02-PLAN.md — Interactive Inpaint one-shot fill+patched LaMa with single undo + snapshot-as-geometry (MASK-02, MASK-03)
 - [x] 08.1-03-PLAN.md — Inspector Auto/Fill/Inpaint/Never + threshold copy fix + max-size control + 5-state border pens (MASK-03)
-- [ ] 08.1-04-PLAN.md — Batch corrected gate+fill+patching parity + remaining test re-basing + verdict/progress (MASK-02, MASK-03, D-09)
+- [x] 08.1-04-PLAN.md — Batch corrected gate+fill+patching parity + remaining test re-basing + verdict/progress (MASK-02, MASK-03, D-09)
 
 ### Phase 9: UI Rework
 
