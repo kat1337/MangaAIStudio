@@ -473,7 +473,18 @@ def inpaint_patches(
             return result.copy(), None
         x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
         bbox = (x1, y1, x2 - x1, y2 - y1)
-        # Ensure .copy() detachment
+        # Halo composite so only masked area is replaced, preserving fill outside
+        # (08.1 fix: small page with both fill+inpaint must preserve fill outside inpaint mask;
+        # fake model paints whole image, but real LaMa preserves unmasked pixels. Halo limits copy to mask.)
+        if isolation_radius > 0:
+            halo = _grow_mask_binary(mask_binary, isolation_radius)
+        else:
+            halo = mask_binary > 0
+        page_copy = image_rgb.copy()
+        if np.any(halo):
+            # halo is (H,W) bool, page_copy[halo] gives (N,3) view
+            page_copy[halo] = result[halo]
+            return page_copy.copy(), bbox
         return result.copy(), bbox
 
     # Patched path
