@@ -3331,18 +3331,24 @@ def test_run_ocr_selected_real_model_end_to_end(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
-def test_alt_drag_draw_release_emits_ocr_requested(qtbot) -> None:
-    """D-01: Alt+drag draw-release emits ocr_requested with the new BoxItem
-    (the MainWindow-subscribed auto-OCR seam)."""
+def test_alt_drag_draw_release_defers_ocr_to_grace(qtbot) -> None:
+    """D-01 (quick-260822-gnq revision): Alt+drag draw-release NO LONGER emits
+    ocr_requested — the instant dispatch is superseded by the stationary
+    grace period (MainWindow._mark_geometry_changed arms it via the
+    boxes_modified commit, which still fires). The ocr_requested signal stays
+    declared; a draw-and-release must emit boxes_modified and zero OCR
+    requests."""
     canvas = _canvas_with_image_and_boxes(qtbot)
     requested: list = []
     canvas.ocr_requested.connect(lambda item: requested.append(item))
+    modified: list = []
+    canvas.boxes_modified.connect(lambda snap: modified.append(snap))
     canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
     canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
     canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
     assert canvas.box_count() == 1
-    assert len(requested) == 1
-    assert requested[0] is canvas._box_items[0]
+    assert requested == []  # no instant dispatch anymore
+    assert len(modified) == 1  # the commit still flows (arms the grace timer)
 
 
 @pytest.mark.gui
@@ -3439,9 +3445,12 @@ def test_ctrl_r_shortcut_triggers_ocr_all(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
-def test_on_canvas_ocr_requested_dispatches_single_box_worker(qtbot, tmp_path, monkeypatch) -> None:
-    """D-01 auto-OCR hook end-to-end: a real Alt+drag on the window's canvas
-    emits ocr_requested -> MainWindow dispatches the worker -> the box
+def test_on_canvas_create_dispatches_single_box_worker_after_grace(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """D-01 auto-OCR end-to-end (quick-260822-gnq revision): a real Alt+drag
+    on the window's canvas creates a box; after the (shortened) stationary
+    grace expires, MainWindow dispatches exactly one OCR worker and the box
     arrives with recognized text (off the GUI thread, T-4-11)."""
     window = _window_with_page(qtbot, tmp_path)
     fake = _FakeOCRModel("自動")
@@ -3450,6 +3459,9 @@ def test_on_canvas_ocr_requested_dispatches_single_box_worker(qtbot, tmp_path, m
         lambda kind, backend: fake,
     )
     monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.STATIONARY_GRACE_MS", 50
+    )
     canvas = window.canvas
     canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
     canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
@@ -3457,9 +3469,15 @@ def test_on_canvas_ocr_requested_dispatches_single_box_worker(qtbot, tmp_path, m
     assert canvas.box_count() == 1
     item = canvas._box_items[0]
     assert item.isSelected() is True
-    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    # Nothing dispatches at release; the grace timer is armed instead.
+    assert window._op_running is False
+    # The fake worker completes near-instantly, so _op_running may flip
+    # True->False between polls — wait on the OBSERVABLE result instead.
+    qtbot.waitUntil(lambda: item.pagebox.payload is not None, timeout=5000)
     assert item.pagebox.payload.text == "自動"
     assert item.pagebox.edited is False
+    # Exactly ONE auto pass: the stale marker cleared + no repeat firing.
+    assert item.geometry_stale is False
 
 
 @pytest.mark.gui

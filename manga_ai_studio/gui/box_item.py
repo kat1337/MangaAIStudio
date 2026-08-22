@@ -59,6 +59,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsRectItem,
     QGraphicsTextItem,
@@ -166,6 +167,78 @@ _BADGE_OFFSET = 2.0
 _HANDLE_OUTLINE = QColor("#0b0b0e")
 # Corner handle is centred on the corner: shift by -size/2 in both axes.
 _HANDLE_OFFSET = _HANDLE_SIZE / 2.0
+
+# quick-260822-gnq: the per-box "re-run detection" affordance (the stale-marker
+# corner button). Built exactly like a CornerHandle — an ItemIgnoresTransformations
+# child with a fixed viewport-px size (10x10, comparable to the 8x8 handles) at
+# z=160 (above the handles' z=150 so it is never visually buried) — but amber
+# (#f5a623, the user-origin hue family) with a tooltip instead of resize
+# cursors: clicking it re-fits the box + re-runs OCR at its CURRENT geometry.
+_REDETECT_SIZE = 10
+_REDETECT_Z = 160
+# Sits OUTSIDE the top-right corner (2px gap) so it never overlaps the TR
+# resize handle's hit area (the badge's TL-outside precedent).
+_REDETECT_OFFSET = 2.0
+
+
+class RedetectHandle(QGraphicsEllipseItem):
+    """The circular "re-run detection" affordance of a geometry-stale box.
+
+    Shown ONLY while the parent :class:`BoxItem` is marked ``geometry_stale``
+    (a committed move/resize/create that has not yet been re-fitted). The
+    affordance owns its left-click: ``mousePressEvent`` accepts the event and
+    invokes ``activate_callback`` — wired by the canvas to
+    ``EditorCanvas.box_redetect_requested`` carrying the parent BoxItem — so
+    MainWindow subscribes ONCE to the canvas signal, never to per-item
+    objects.
+
+    Like :class:`CornerHandle` this is a VISUAL-ONLY overlay from the canvas
+    hit-test's perspective: ``EditorCanvas._box_item_at`` only matches
+    ``CornerHandle`` / ``BoxItem`` instances, so this child never arms a
+    move/resize; its press reaches it through the view's fall-through path.
+    """
+
+    def __init__(self, parent: "BoxItem") -> None:
+        super().__init__(0.0, 0.0, float(_REDETECT_SIZE), float(_REDETECT_SIZE), parent)
+        # Constant screen size at any zoom (the CornerHandle pattern).
+        self.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
+        self.setZValue(_REDETECT_Z)
+        # Amber fill (user-origin hue family) + 1px matte outline for
+        # separation from artwork behind it.
+        self.setBrush(QBrush(QColor("#f5a623")))
+        self.setPen(QPen(_HANDLE_OUTLINE, 1))
+        self.setToolTip("Re-run detection (box moved)")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Hidden until the parent is marked geometry-stale.
+        self.setVisible(False)
+        # Callable[[], None] installed by the canvas (weak-coupling seam — the
+        # item never references EditorCanvas directly).
+        self.activate_callback = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API casing)
+        """Accept a left-click and fire the activate callback (re-run request)."""
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.activate_callback is not None
+        ):
+            event.accept()
+            self.activate_callback()
+            return
+        super().mousePressEvent(event)
+
+    def reposition(self, parent_rect: QRectF) -> None:
+        """Place the affordance just OUTSIDE the parent rect's top-right corner.
+
+        Ignores-transformations child: ``pos()`` is in scene coords (the
+        CornerHandle reposition precedent). The 2px-outside placement keeps
+        the TR resize handle's hit area clear.
+        """
+        self.setPos(
+            parent_rect.right() + _REDETECT_OFFSET,
+            parent_rect.top() - _REDETECT_SIZE - _REDETECT_OFFSET,
+        )
 
 
 def origin_hue(origin: str) -> str:
@@ -548,6 +621,12 @@ class BoxItem(QGraphicsRectItem):
         # construction so set_edit_mode(False) restores exactly what Qt gave
         # the handles by default).
         self._handle_rest_buttons = self.handles["TL"].acceptedMouseButtons()
+        # quick-260822-gnq: ephemeral geometry-stale marker + the corner
+        # re-run affordance (RedetectHandle, z=160). View state ONLY — never
+        # persisted to .mas/project files. The canvas installs
+        # ``activate_callback`` wiring (box_redetect_requested) at creation.
+        self._geometry_stale = False
+        self._redetect = RedetectHandle(self)
         # Plan 07-02 (D-09): WEAKREF to the owning canvas, installed by
         # ``set_primary_owner``. ``_sync_handles_for_state`` asks it whether
         # THIS item is the selection PRIMARY (the last-clicked box): corner
@@ -654,6 +733,42 @@ class BoxItem(QGraphicsRectItem):
         """
         self._primary_owner = owner
 
+    # ------------------------------------------- geometry-stale marker (gnq)
+    @property
+    def geometry_stale(self) -> bool:
+        """True iff this box's on-canvas geometry changed since its last fit.
+
+        quick-260822-gnq: a committed move/resize/create marks the box stale
+        INSTEAD of triggering an immediate re-fit (the old refit-on-commit
+        annoyance). The marker drives the amber corner affordance; it is
+        cleared when the user clicks the affordance (or the stationary grace
+        timer fires), which run the explicit re-fit + OCR pass. Ephemeral
+        view state — never persisted.
+        """
+        return self._geometry_stale
+
+    @geometry_stale.setter
+    def geometry_stale(self, value: bool) -> None:
+        self._geometry_stale = bool(value)
+        # Visibility tracks ONLY the marker — children inherit the parent's
+        # visibility, so hiding the box layer (Shift+M) hides the affordance
+        # with the box automatically.
+        self._redetect.setVisible(self._geometry_stale)
+        self._reposition_redetect()
+
+    def set_redetect_callback(self, callback) -> None:
+        """Install the affordance click callback (canvas -> signal wiring).
+
+        ``callback`` is invoked with NO arguments on a left-click of the
+        re-run affordance; the canvas installs a closure that emits
+        ``box_redetect_requested`` carrying THIS item.
+        """
+        self._redetect.activate_callback = callback
+
+    def _reposition_redetect(self) -> None:
+        """Track the live rect (called from _sync_handles / the setter)."""
+        self._redetect.reposition(self.rect())
+
     def _sync_handles(self, primary: bool | None = None) -> None:
         """Show + reposition handles on the selected box (D-08/D-09).
 
@@ -679,6 +794,8 @@ class BoxItem(QGraphicsRectItem):
         for handle in self.handles.values():
             handle.setVisible(show)
             handle.reposition(rect)
+        # quick-260822-gnq: keep the stale-marker affordance on the live rect.
+        self._reposition_redetect()
         self.refresh_badge()
         self._reposition_text_overlay()
 
@@ -755,6 +872,8 @@ class BoxItem(QGraphicsRectItem):
         for handle in self.handles.values():
             handle.setVisible(show)
             handle.reposition(rect)
+        # quick-260822-gnq: keep the stale-marker affordance on the live rect.
+        self._reposition_redetect()
         self._reposition_text_overlay()
 
     # --------------------------------------------- Phase 4 display-object children

@@ -119,6 +119,14 @@ _FONT_STYLE_FLAGS = {
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
+# quick-260822-gnq: the stationary-grace window. A box whose geometry changed
+# (moved/resized/created) waits this long WITHOUT further interaction, then
+# gets exactly ONE automatic detection-fit + OCR dispatch. Any new box drag
+# cancels the pending dispatch (canvas.box_interaction_started -> timer.stop);
+# the next commit arms it again. Read at start() time from this module
+# constant so tests can monkeypatch it short.
+STATIONARY_GRACE_MS = 5000
+
 
 class MainWindow(QMainWindow):
     """Top-level application window.
@@ -148,6 +156,18 @@ class MainWindow(QMainWindow):
         # OCR worker. Connected right after construction (the canvas's
         # class-scope signal exists before any event can fire).
         self.canvas.ocr_requested.connect(self._on_canvas_ocr_requested)
+        # quick-260822-gnq: the stationary-grace machinery. ONE MainWindow-
+        # owned singleshot timer; interval is supplied at start() time from
+        # the STATIONARY_GRACE_MS module constant (monkeypatchable in tests).
+        self._stationary_timer = QTimer(self)
+        self._stationary_timer.setSingleShot(True)
+        self._stationary_timer.timeout.connect(self._on_stationary_grace_timeout)
+        # A drag START inside the grace window cancels the pending dispatch;
+        # the next commit re-arms via _mark_geometry_changed.
+        self.canvas.box_interaction_started.connect(self._stationary_timer.stop)
+        # The per-box "re-run detection" corner affordance (one signal
+        # subscription for all boxes — never per-item connections).
+        self.canvas.box_redetect_requested.connect(self._on_box_redetect_requested)
         # G-07-3: new user-drawn boxes are born with the saved default
         # family. The provider returns None when no family is saved — a
         # no-key box keeps style None and the renderer's TextStyle() defaults
@@ -3578,21 +3598,25 @@ class MainWindow(QMainWindow):
         # 07-05 (D-10): a group move/style commit reloads the Mixed state.
         self._on_canvas_selection_changed()
 
-        # Plan 08-07 (D-12, predictive): recompute-on-commit. This hook fires
-        # on box move/resize/CREATE release (never per mousemove — the canvas
-        # emits boxes_modified once per committed drag, RESEARCH §8
-        # debouncing); re-fit the geometry-changed boxes against the retained
-        # raw detection binary so their std-dev + border state re-derive and
-        # the auto plane recomposes. Skipped when no geometry changed
-        # (Inspector/OCR/text/style commits emit boxes_modified too) and when
-        # there is no retained raw mask (T-08-13).
-        self._refit_changed_boxes(before_snapshot)
+        # quick-260822-gnq: NO refit-on-commit anymore. This hook fires on box
+        # move/resize/CREATE release (never per mousemove — the canvas emits
+        # boxes_modified once per committed drag, RESEARCH §8 debouncing).
+        # Instead of the expensive synchronous full-page re-fit on EVERY
+        # commit, the geometry-changed boxes are merely MARKED stale (amber
+        # corner affordance) and the stationary-grace timer is armed: one
+        # automatic detection-fit + OCR once the box sits still ~5 s, or an
+        # immediate re-run when the user clicks the affordance. A move now
+        # costs only a setRect + undo push + Inspector reload.
+        self._mark_geometry_changed(before_snapshot)
 
     def _refit_changed_boxes(self, before_snapshot) -> None:
         """Re-fit the geometry-changed boxes and recompose the auto plane.
 
-        Plan 08-07 Task 2 (D-12 recompute-on-release): the move/resize/create
-        commit path. Compare each before-snapshot PageBox's ``box.as_tuple``
+        quick-260822-gnq: this is now the EXPLICIT/STATIONARY recompute
+        engine — invoked by the corner re-run affordance handler and the
+        stationary-grace timeout (NOT on every commit anymore; the commit
+        path calls ``_mark_geometry_changed`` instead). Compare each
+        before-snapshot PageBox's ``box.as_tuple``
         to the CURRENT canvas geometry (``boxes_snapshot()`` materializes the
         live rects via ``BoxItem.current_box`` — a moved box's ``pagebox.box``
         stays birth-geometry, so the current tuple comes from the snapshot,
@@ -3662,6 +3686,105 @@ class MainWindow(QMainWindow):
             return
         self.canvas.set_auto_binary(derivation.auto_binary)
         self.refresh_box_inpaint_states()
+
+    # ---------------------------------- quick-260822-gnq stationary re-detect
+    def _mark_geometry_changed(self, before_snapshot) -> None:
+        """Mark geometry-changed boxes stale + arm the stationary grace timer.
+
+        quick-260822-gnq: replaces the old refit-on-commit call in
+        ``_on_boxes_modified``. Mirrors ``_refit_changed_boxes``'s change-
+        detection prologue (history/suppression/page guards; a current tuple
+        absent from the before-snapshot's tuples = moved, resized OR newly
+        created) but NEVER touches masks / std_dev / the auto binary here —
+        a move must cost only a setRect + undo push + Inspector reload.
+
+        Each changed BoxItem gets ``geometry_stale = True`` (the amber corner
+        re-run affordance appears) and ONE shared singleshot timer is
+        armed/restarted: when it fires with no further interaction, every
+        stale box gets exactly one detection-fit + OCR dispatch.
+        """
+        if self.history is None or self._suppress_boxes_push:
+            return
+        idx = self._current_page_index()
+        if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        current = self.canvas.boxes_snapshot()  # CURRENT geometry, detached
+        before_tuples = {pb.box.as_tuple for pb in (before_snapshot or [])}
+        changed = False
+        # Snapshot order == _box_items order (boxes_snapshot iterates the
+        # same list), so index-wise zip pairs live items with their tuples.
+        for live_item, pb in zip(self.canvas._box_items, current):
+            if pb.box.as_tuple not in before_tuples:
+                live_item.geometry_stale = True
+                changed = True
+        if changed:
+            # Interval supplied per-start from the module constant so tests
+            # can monkeypatch STATIONARY_GRACE_MS short.
+            self._stationary_timer.start(STATIONARY_GRACE_MS)
+
+    def _on_stationary_grace_timeout(self) -> None:
+        """The ~5 s stationary grace expired: one auto detection-fit + OCR
+        per geometry-stale box (quick-260822-gnq).
+
+        T-QG-02 mitigation: gated on ``_op_running`` — if another op is
+        running when the timer fires, this is a silent skip (the boxes stay
+        marked stale; the user can still click the affordance later). Each
+        box's OCR leg is additionally gated by the D-04 edited-text rule in
+        :meth:`_redetect_single_box` (T-QG-03 — hand-edited text is never
+        silently overwritten).
+        """
+        if self._op_running:
+            return
+        for item in [
+            it for it in self.canvas._box_items if it.geometry_stale
+        ]:
+            self._redetect_single_box(item)
+
+    def _on_box_redetect_requested(self, box_item) -> None:
+        """Corner-affordance click: re-fit + re-OCR THIS box at its CURRENT
+        geometry (quick-260822-gnq).
+
+        Subscribed to ``canvas.box_redetect_requested`` (one subscription for
+        all boxes). T-QG-02: gated on ``_op_running`` like every other model-op
+        entry point.
+        """
+        if self._op_running or box_item not in self.canvas._box_items:
+            return
+        self._redetect_single_box(box_item)
+
+    def _redetect_single_box(self, item) -> None:
+        """Shared engine: clear the stale marker, re-fit, dispatch OCR once.
+
+        The re-fit runs through :meth:`_refit_changed_boxes` with a before-
+        snapshot whose tuples EXCLUDE this item's CURRENT tuple — forcing the
+        changed-set to contain at least this box even on a repeat click (the
+        derivation itself is idempotent per page and refits all boxes; that
+        is already its documented contract). When the page has no retained
+        raw mask the refit engine early-returns as an honest silent no-op,
+        but the OCR leg STILL runs — so a freshly drawn user box finally gets
+        text even before/without a detection pass.
+
+        T-QG-03 (D-04 asymmetry): the OCR leg is SKIPPED when the box carries
+        hand-edited recognized text (``has_recognized_text() and edited``) —
+        mirroring run_ocr_selected's confirm gate, minus the dialog (an auto
+        dispatch must never silently overwrite user text).
+        """
+        item.geometry_stale = False
+        current = self.canvas.boxes_snapshot()
+        live_index = self.canvas._box_items.index(item)
+        # Force-changed set: drop this item's entry from the "before" side so
+        # _refit_changed_boxes always counts it as changed.
+        before = [
+            pb for i, pb in enumerate(current) if i != live_index
+        ]
+        self._refit_changed_boxes(before)
+        if item.pagebox.has_recognized_text() and item.pagebox.edited:
+            logger.debug(
+                "Re-detect skipped OCR for an edited box (D-04 gate) — fit "
+                "refreshed only"
+            )
+            return
+        self._dispatch_ocr_for_box(item)
 
     # ----------------------------------------------------- plan 04-04 Inspector
     def _on_canvas_selection_changed(self) -> None:
@@ -5972,18 +6095,28 @@ class MainWindow(QMainWindow):
 
         Resolves the adapter via the factory (D-14; torch is imported lazily
         inside ``TorchOCRModel.load`` — no heavy import here), builds the
-        Worker on :meth:`_run_ocr_task` passing the box's vendored frozen
-        ``Box`` (a plain object — safe to cross threads, never a Qt object;
-        RESEARCH Pitfall 3), and starts it on the global QThreadPool. Sets
-        the first-run "Loading OCR model…" UX (Pitfall 6) before the worker
-        starts the ~450MB download.
+        Worker on :meth:`_run_ocr_task` passing the box's CURRENT geometry
+        via ``box_item.current_box()`` (quick-260822-gnq — the STATE.md
+        Phase 08 follow-up: the old birth ``pagebox.box`` made OCR after a
+        move recognize the PRE-move region). The vendored frozen ``Box`` is a
+        plain object — safe to cross threads, never a Qt object (RESEARCH
+        Pitfall 3).
+
+        T-QG-01 mitigation: result ROUTING uses a stable identity that
+        survives the geometry change — ``id(box_item.pagebox)`` passed as an
+        extra arg and echoed back by the worker as ``box_id``. Never route on
+        the geometry object's identity anymore: a fresh ``current_box()``
+        per dispatch makes the old ``id(it.pagebox.box)`` contract impossible.
         """
         path = self.file_table.current_path()
         if path is None:
             return
         model = backend_factory("ocr", self._ocr_backend())
+        routing_id = id(box_item.pagebox)
 
-        worker = Worker(self._run_ocr_task, path, box_item.pagebox.box, model)
+        worker = Worker(
+            self._run_ocr_task, path, box_item.current_box(), model, routing_id
+        )
         worker.signals.result.connect(self._on_ocr_finished)
         worker.signals.error.connect(self._on_ocr_error)
         worker.signals.finished.connect(self._on_ocr_cleanup)
@@ -6011,6 +6144,7 @@ class MainWindow(QMainWindow):
         image_path: Path,
         box_xyxy,
         model,
+        box_id=None,
         progress_callback=None,
         abort_flag=None,
     ) -> dict:
@@ -6018,14 +6152,18 @@ class MainWindow(QMainWindow):
 
         Runs on a QThreadPool thread — touches only numpy/Python and the
         adapter (T-01-07). Never touches Qt here. ``box_xyxy`` is the box's
-        vendored frozen ``Box``; the region crop is ``.copy()``-detached
-        (Pitfall 2). Returns ``{"text": str, "box_id": id(box_xyxy)}`` — the
-        box_id lets :meth:`_on_ocr_finished` find the right BoxItem (the
-        frozen Box is the SAME object on both sides, so its identity is
-        stable across the thread boundary).
+        CURRENT vendored frozen ``Box`` (materialized fresh by
+        ``current_box()`` at dispatch time); the region crop is ``.copy()``
+        -detached (Pitfall 2). Returns ``{"text": str, "box_id": box_id}`` —
+        quick-260822-gnq / T-QG-01: the caller passes ``id(pagebox)`` as
+        ``box_id`` (a routing id that survives the geometry change) and it is
+        echoed back verbatim; :meth:`_on_ocr_finished` matches it against
+        ``id(it.pagebox)``. The old ``id(box_xyxy)`` contract broke the moment
+        geometry became per-dispatch materialized.
 
         ``progress_callback``/``abort_flag`` are auto-injected by ``Worker``
-        (worker_thread.py:97-124).
+        (worker_thread.py:97-124) — by keyword, so the positional ``box_id``
+        arg is safe.
         """
         import cv2  # lazy import — keeps the main thread import-light
         import numpy as np
@@ -6044,7 +6182,7 @@ class MainWindow(QMainWindow):
         region = image[y1:y2, x1:x2].copy()
         model_path = self._resolve_ocr_model_path()
         model.load(model_path, device="auto")  # singleton — load-once per session
-        return {"text": model.recognize(region), "box_id": id(box_xyxy)}
+        return {"text": model.recognize(region), "box_id": box_id}
 
     def run_ocr_all(self) -> None:
         """Run manga-ocr on every text-empty box on the page (Text -> OCR All, D-03).
@@ -6080,7 +6218,10 @@ class MainWindow(QMainWindow):
         worker = Worker(
             self._run_ocr_all_task,
             path,
-            [it.pagebox.box for it in empty_boxes],
+            # quick-260822-gnq (STATE.md Phase 08 follow-up): CURRENT geometry
+            # per box, not birth pagebox.box — OCR after a move recognizes
+            # the moved region. Routing stays id(pagebox) (already correct).
+            [it.current_box() for it in empty_boxes],
             [id(it.pagebox) for it in empty_boxes],
             model,
         )
@@ -6163,8 +6304,9 @@ class MainWindow(QMainWindow):
     def _on_ocr_finished(self, result) -> None:
         """Write the recognized text back to the box (main thread only, T-01-07).
 
-        Finds the BoxItem by ``box_id`` (the frozen Box identity the worker
-        returned), writes ``set_recognized_text`` (the Plan 01 OCR-write
+        Finds the BoxItem by ``box_id`` (quick-260822-gnq / T-QG-01: the
+        stable ``id(pagebox)`` routing id echoed by the worker), writes
+        ``set_recognized_text`` (the Plan 01 OCR-write
         setter — ``edited=False``, D-04 silent-overwrite semantics),
         refreshes the text overlay + badge, and pushes a CR-01 before-state
         BOXES snapshot.
@@ -6175,8 +6317,11 @@ class MainWindow(QMainWindow):
         pattern; without the detach, undo would restore the post-OCR text).
         """
         box_id = result.get("box_id")
+        # T-QG-01 (quick-260822-gnq): route on the STABLE pagebox identity
+        # echoed by the worker — never on the geometry object's identity
+        # (a fresh current_box() Box per dispatch would orphan that contract).
         item = next(
-            (it for it in self.canvas._box_items if id(it.pagebox.box) == box_id),
+            (it for it in self.canvas._box_items if id(it.pagebox) == box_id),
             None,
         )
         if item is None:

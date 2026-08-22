@@ -191,7 +191,27 @@ class EditorCanvas(QGraphicsView):
     # itself NEVER runs on the GUI thread (RESEARCH Pitfall 6, T-01-07). A
     # box below the 8x8 create threshold never emits (the Phase 3 no-op
     # returns before this signal — UI-SPEC §14).
+    #
+    # quick-260822-gnq SEMANTIC CHANGE: ``_commit_create`` no longer emits
+    # this signal. The instant-dispatch is superseded by the stationary
+    # grace period (a fresh box gets exactly ONE automatic detection-fit +
+    # OCR once it sits still ~5 s — armed via boxes_modified ->
+    # _mark_geometry_changed). The signal + plumbing stay declared so
+    # nothing else breaks.
     ocr_requested = Signal(object)
+    # quick-260822-gnq: emitted when a box interaction STARTS (_begin_resize /
+    # _select_and_begin_move / _begin_create_box — the sites that already
+    # capture _boxes_interaction_start_snapshot). MainWindow connects it to
+    # the stationary-grace timer's stop() so a drag inside the ~5 s window
+    # cancels the pending auto detection+OCR dispatch; the next commit arms
+    # the timer again naturally.
+    box_interaction_started = Signal()
+    # quick-260822-gnq: emitted when a geometry-stale box's corner re-run
+    # affordance is clicked, carrying the parent BoxItem. The RedetectHandle
+    # child invokes an activate callback installed per item; this canvas-level
+    # signal is what MainWindow actually subscribes to (never per-item
+    # objects).
+    box_redetect_requested = Signal(object)
     # Plan 05-07 (UI-SPEC surface 24a): emitted when the Crop tool applies an
     # armed crop rect (Enter). Carries the rect in SCENE coordinates as a
     # QRectF; the MainWindow handler converts to image-pixel ints (clamped)
@@ -2061,6 +2081,9 @@ class EditorCanvas(QGraphicsView):
             # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline —
             # a strong canvas capture stalls GC + breaks Qt teardown ordering).
             item.set_primary_owner(_weakref(self))
+            # quick-260822-gnq: wire the stale-marker affordance click to the
+            # canvas-level signal (MainWindow subscribes ONCE to the signal).
+            self._install_redetect_hook(item)
             self._scene.addItem(item)
             # Parent-less items inherit their own visibility; sync to the layer
             # state so a toggle BEFORE any boxes were added still hides them.
@@ -2137,6 +2160,30 @@ class EditorCanvas(QGraphicsView):
         detected = sum(1 for it in self._box_items if it.pagebox.origin == DETECTED)
         user = sum(1 for it in self._box_items if it.pagebox.origin == USER)
         return detected, user
+
+    def _install_redetect_hook(self, item: BoxItem) -> None:
+        """Wire a BoxItem's re-run affordance click to ``box_redetect_requested``.
+
+        quick-260822-gnq: each RedetectHandle child invokes an item-installed
+        callback; this closure closes over THIS item so the canvas-level
+        signal carries the right BoxItem (MainWindow subscribes once to the
+        signal, never to per-item objects).
+
+        G-07-6 lifetime discipline: the closure must NOT strongly reference
+        the item — ``item -> _redetect -> activate_callback`` would form a
+        cycle that keeps "dropped" wrappers alive past the graveyard flush
+        (broke test_undo_style_commit_with_dropped_refs_no_crash). A weakref
+        seam mirrors ``set_primary_owner``'s cycle discipline; a dead weak
+        ref means the item is gone and the click is silently ignored.
+        """
+        item_ref = _weakref(item)
+
+        def _emit_redetect() -> None:
+            it = item_ref()
+            if it is not None:
+                self.box_redetect_requested.emit(it)
+
+        item.set_redetect_callback(_emit_redetect)
 
     def boxes_snapshot(self) -> list[PageBox]:
         """Materialize a fresh list of PageBoxes from the live BoxItem rects.
@@ -2355,6 +2402,12 @@ class EditorCanvas(QGraphicsView):
         :meth:`QGraphicsScene.itemAt` directly makes a hovered cursor swallow
         a box press.  Iterating the z-ordered hits lets the box interaction
         intentionally ignore those overlays.
+
+        quick-260822-gnq: the geometry-stale re-run affordance
+        (``RedetectHandle``) is excluded the same way — it matches neither
+        ``CornerHandle`` nor ``BoxItem`` here, so it is a visual-only overlay
+        for this hit-test; its own mousePressEvent (reached through the view's
+        fall-through path) handles the click.
         """
         candidates = self._scene.items(
             scene_pos,
@@ -2392,6 +2445,9 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        # quick-260822-gnq: a drag START cancels any pending stationary-grace
+        # auto detection+OCR (MainWindow stops its timer on this signal).
+        self.box_interaction_started.emit()
         self._sync_handles_visibility()
         # The viewport, not a graphics item, owns this drag.  This keeps the
         # canvas receiving move/release events even when the pointer leaves the
@@ -2409,6 +2465,9 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-resize snapshot (emitted on resize-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        # quick-260822-gnq: a drag START cancels any pending stationary-grace
+        # auto detection+OCR (MainWindow stops its timer on this signal).
+        self.box_interaction_started.emit()
         self.viewport().grabMouse()
 
     def _begin_create_box(self, scene_pos: QPointF) -> None:
@@ -2417,6 +2476,9 @@ class EditorCanvas(QGraphicsView):
         self._create_anchor = scene_pos
         # CR-01 fix: capture the PRE-create snapshot (emitted on create-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        # quick-260822-gnq: a drag START cancels any pending stationary-grace
+        # auto detection+OCR (MainWindow stops its timer on this signal).
+        self.box_interaction_started.emit()
         self.viewport().grabMouse()
         # Swap the preview_item pen to the amber create-preview colour for the
         # duration of the drag (UI-SPEC §12e). Restored on release.
@@ -2507,6 +2569,13 @@ class EditorCanvas(QGraphicsView):
         A rect smaller than the 8x8 min is a no-op (no zero-area box). The new
         box is added to the layer, selected, and ``boxes_modified`` is emitted.
         The preview_item pen is restored to cyan + the path is cleared (§12e).
+
+        quick-260822-gnq: NO immediate ``ocr_requested`` emission anymore.
+        The D-01 instant-dispatch is superseded by the stationary grace
+        period — the new box IS a changed tuple in the commit flow, so
+        MainWindow._mark_geometry_changed marks it stale + arms the ~5 s
+        timer, giving exactly ONE automatic detection-fit + OCR once the box
+        sits still (cancellable by starting another drag).
         """
         curr = self._scene_pos(event)
         self._creating_box = False
@@ -2530,6 +2599,11 @@ class EditorCanvas(QGraphicsView):
             ),
         )
         item = BoxItem(pb)
+        # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline).
+        item.set_primary_owner(_weakref(self))
+        # quick-260822-gnq: wire the stale-marker affordance click to the
+        # canvas-level signal.
+        self._install_redetect_hook(item)
         self._scene.addItem(item)
         item.setVisible(self._box_overlay_visible)
         item.setEnabled(self._box_overlay_visible)
@@ -2545,11 +2619,11 @@ class EditorCanvas(QGraphicsView):
         self._primary_box = item
         self._sync_handles_visibility()
         self._refresh_empty_box_hint()
-        # D-01 auto-OCR seam: the box arrives with recognized text. The
-        # signal lets MainWindow dispatch the OCR Worker off the GUI thread
-        # (the < 8x8 no-op above already returned — a real box always emits;
-        # RESEARCH Pitfall 6, T-01-07).
-        self.ocr_requested.emit(item)
+        # quick-260822-gnq: the D-01 auto-OCR instant dispatch is REMOVED —
+        # the boxes_modified emission below arms the stationary grace timer
+        # via MainWindow._mark_geometry_changed (the new box is a changed
+        # tuple). See _commit_create's docstring + the ocr_requested signal's
+        # semantic-change note.
         # CR-01 fix: emit the PRE-create snapshot (captured at _begin_create_box),
         # i.e. the layer WITHOUT the new box — what undo restores to.
         self.boxes_modified.emit(self._boxes_interaction_start_snapshot)
