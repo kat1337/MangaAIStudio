@@ -2,17 +2,17 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
-current_phase: 9
-status: completed
+status: Awaiting next milestone
 stopped_at: Completed 09-03-PLAN.md — Phase 9 all plans executed, ready for verification
-last_updated: "2026-08-22T06:11:29.247Z"
+last_updated: "2026-08-22T06:16:38.723Z"
 last_activity: 2026-08-22
-last_activity_desc: Phase 9 complete
+last_activity_desc: Milestone v1.2 completed and archived
 progress:
   total_phases: 10
   completed_phases: 10
   total_plans: 76
   completed_plans: 76
+current_phase: 9
 current_phase_name: UI Rework
 state_head: 48917b48ebe13b615b603717b62fc6834056d81a
 ---
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 
 ## Current Position
 
-Phase: 9
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-08-22 — Phase 9 complete
+Phase: Milestone v1.2 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-08-22 — Milestone v1.2 completed and archived
 
 ## Performance Metrics
 
@@ -133,6 +133,21 @@ Last activity: 2026-08-22 — Phase 9 complete
 | Phase 09 P01 | 27 min | 3 tasks | 13 files |
 | Phase 09 P02 | 34 min | 3 tasks | 12 files |
 | Phase 09 P03 | 14 min | 2 tasks | 5 files |
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close on 2026-08-22:
+
+| Category | Item | Status |
+|----------|------|--------|
+| debug | 04-01-text-overlay-tracking | diagnosed |
+| debug | ctrl-z-undo-crash | diagnosed |
+| debug | phase7-typeset-gaps-a-e | investigating |
+| uat | 02-UAT.md (Phase 02) | passed |
+| uat | 03-UAT.md (Phase 03) | superseded |
+| uat | 08.1-UAT.md (Phase 08.1) | testing |
+
+Known verification overrides: Phase 7 verification stale; Phase 08.1 no VERIFICATION.md (both recorded as Known Gaps in MILESTONES.md).
 
 ## Accumulated Context
 
@@ -370,3 +385,7 @@ Stopped at: Completed 09-03-PLAN.md — Phase 9 all plans executed, ready for ve
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
