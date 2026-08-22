@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-22 — Milestone v1.2 completed and archived
+Last activity: 2026-08-22 — Completed quick task 260822-1yu: Fix masker/filler pipeline (C key runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action)
 
 ## Performance Metrics
 
@@ -369,6 +369,12 @@ None yet.
 - [Phase 2 follow-up]: Deliberately re-verify `cleaned/` output quality before Phase 02 is considered fully shipped. The 02-04 smoke-test spot-check (check #3) passed, but the user wants a deliberate re-confirmation. Specifically: (1) outputs are visually clean (text removed, artwork restored); (2) no-text pages are byte-identical to their source (the D-03 copy2 passthrough is not silently re-encoding via PIL); (3) files are written ONLY into `cleaned/` and never into the source chapter folder. Logged from plan 02-04 completion (2026-07-25).
 - [Phase 08 follow-up]: OCR crop dispatch (`run_ocr` / `run_ocr_all`) still passes `it.pagebox.box` (birth geometry) into the worker — after a box move, OCR recognizes the pre-move region (IN-01 in 08-REVIEW.md; same CR-01 root-cause family, deliberately out of 08-10 scope). Fixes should pass per-item `box_item.current_box()`/`boxes_snapshot()` geometry to the worker while keeping `id(it.pagebox)` for result routing.
 - [Phase 09 input]: UI Rework inherits the post-08 UI-SPEC state — reused seams and the 08-07 live handlers/`boxes_snapshot` contract are load-bearing for the inspector/toolbar rework (see 08-SECURITY.md / 08-VERIFICATION.md).
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260822-1yu | Fix masker/filler pipeline: C runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action (F) | 2026-08-22 | 99cec83 | [260822-1yu-fix-masker-filler-pipeline-c-key-should-](./quick/260822-1yu-fix-masker-filler-pipeline-c-key-should-/)
 
 ## Deferred Items
 
