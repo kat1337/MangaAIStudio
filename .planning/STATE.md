@@ -4,15 +4,15 @@ milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 08.1
 current_phase_name: inpaint-correction-oom-safe-patching-invert-the-std-dev-gate
-status: verifying
-stopped_at: Phase 9 context gathered
-last_updated: "2026-08-21T19:31:00.945Z"
+status: executing
+stopped_at: Phase 9 UI-SPEC approved
+last_updated: "2026-08-22T00:18:17.417Z"
 last_activity: 2026-08-21
 last_activity_desc: Completed 08.1-03 quad override UI with 5-state pens and max size
 progress:
   total_phases: 10
   completed_phases: 9
-  total_plans: 73
+  total_plans: 76
   completed_plans: 73
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 
 Phase: 08.1 (inpaint-correction-oom-safe-patching-invert-the-std-dev-gate) — EXECUTING
 Plan: 4 of 4
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-08-21 — Completed 08.1-03 quad override UI with 5-state pens and max size
 
 ## Performance Metrics
@@ -353,8 +353,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-21T19:31:00.860Z
-Stopped at: Phase 9 context gathered
-Resume file: .planning/phases/09-ui-rework/09-CONTEXT.md
+Last session: 2026-08-21T23:30:08.132Z
+Stopped at: Phase 9 UI-SPEC approved
+Resume file: .planning/phases/09-ui-rework/09-UI-SPEC.md
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
