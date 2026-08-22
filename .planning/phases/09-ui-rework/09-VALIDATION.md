@@ -49,7 +49,7 @@ created: 2026-08-21
 ## Wave 0 Requirements
 
 - [ ] `tests/test_gui_side_panel.py` — stubs for the collapsible-section panel (UI-01/UI-02/UI-04)
-- [ ] `tests/test_gui_tool_strip.py` — stubs for the vertical tools strip (UI-03)
+- [ ] `tests/test_gui_tools_strip.py` — stubs for the vertical tools strip (UI-03)
 - [ ] `tests/test_gui_edit_section.py` — stubs for the Edit section (UI-05)
 
 *Exact stub set finalized by the planner per plan files_modified.*

@@ -345,15 +345,10 @@ btn.setIcon(_icon("brush"))
 | A4 | Strip width ~44px with 20px icons is comfortable at min window size | Code Examples | Purely cosmetic; adjust during UAT |
 | A5 | SVG rendering via shipped plugins behaves identically under offscreen test platform | Pitfall 6 | If not, tests fall back to asserting non-null QIcon + button wiring, not pixels |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Fate of `ToolsPanel` class file**
-   - What we know: D-03 keeps brush + detection-settings bodies; tool row leaves. Tests import `ToolsPanel` and emit its signals directly.
-   - What's unclear: keep `ToolsPanel` as the Brush+Detection widget inside the panel vs dissolve into `side_panel.py`.
-   - Recommendation: keep the class (least test churn) but strip its tool row/group; planner picks.
-2. **Where the exclusive QActionGroup lives**
-   - What we know: today it lives in ToolsPanel (:174-231). With the tool row gone, either move group+toggled machinery into the strip or rely purely on standalone window actions + explicit sync.
-   - Recommendation: relocate the group verbatim into the strip widget — preserves the proven toggled-emission contract with zero MainWindow changes beyond signal re-wiring.
+1. **Fate of `ToolsPanel` class file** — RESOLVED: keep the class, strip its tool row/group. Plan 09-02 Task 2 slims `tools_panel.py` to the Brush + Detection-settings bodies while preserving the class and its signal surfaces (least test churn; tests emit `tools_panel.*` signals directly). Matches the research recommendation.
+2. **Where the exclusive QActionGroup lives** — RESOLVED: relocate the group verbatim into the strip widget. Plan 09-01 Task 1 moves ToolsPanel's tool-row QActionGroup + toggled-emission machinery into `ToolsStrip.tool_group` (tools_panel.py:173-254 relocated verbatim), preserving the proven toggled-emission contract with zero MainWindow changes beyond signal re-wiring.
 
 ## Environment Availability
 
