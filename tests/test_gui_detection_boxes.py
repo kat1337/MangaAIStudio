@@ -726,11 +726,13 @@ def _mouse_event_factory(window):
 
 
 @pytest.mark.gui
-def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
-    """D-12 recompute-on-release (08.1 D-01 inverted): moving a DETECTED box
-    and releasing re-runs the per-box fit — the std_dev re-measures at the new
-    location (uniform -> will_fill solid, noisy -> will_inpaint solid; D-01
-    inverted gate)."""
+def test_move_commit_defers_refit_to_redetect(qtbot, tmp_path) -> None:
+    """quick-260822-gnq (supersedes the 08.1 D-12 recompute-on-release
+    contract): moving a DETECTED box and releasing does NOT re-fit anymore —
+    the box is marked geometry-stale with its std_dev PRESERVED, and the
+    explicit re-detect path (corner affordance / stationary grace) re-runs
+    the fit at the CURRENT geometry (uniform -> will_fill solid, noisy ->
+    will_inpaint solid; D-01 inverted gate)."""
     from manga_ai_studio.core.mask_editor import ToolMode
 
     from PySide6.QtCore import QCoreApplication
@@ -781,12 +783,27 @@ def test_move_commit_refits_box_and_border(qtbot, tmp_path) -> None:
     moved = window.canvas._box_items[0]
     assert moved.current_box().as_tuple == (85, 5, 115, 35), "the box moved"
     assert window.history.can_undo_boxes(), "the move committed a BOXES push"
-    # The refit re-measured the border over the noisy region.
+    # quick-260822-gnq: the move is CHEAP — no refit, detection info survives
+    # the move untouched, and the box is marked stale for the re-run
+    # affordance / stationary grace.
+    std_before_move = moved.pagebox.std_dev
+    assert moved.geometry_stale is True, "moved box must be marked stale"
+    assert moved.pagebox.std_dev == std_before_move, (
+        "a move must NOT re-fit: std_dev survives the move untouched"
+    )
+
+    # The explicit re-detect path re-fits at the CURRENT geometry — the
+    # border re-measures over the noisy region. The OCR leg is stubbed
+    # (hermetic: no model load).
+    moved.pagebox.payload.text = ""  # fixture payload carries no text attr
+    window._dispatch_ocr_for_box = lambda it: None
+    window._on_box_redetect_requested(moved)
     assert moved.pagebox.std_dev is not None
     assert moved.pagebox.std_dev > threshold, (
-        "moving onto the noisy region must re-measure std ABOVE the gate "
-        "(D-12 recompute-on-release, D-01 inverted -> will_inpaint)"
+        "the explicit re-detect must re-measure std ABOVE the gate at the "
+        "moved location (D-01 inverted -> will_inpaint)"
     )
+    assert moved.geometry_stale is False
     assert moved.pagebox.inpaint_state(threshold) == "will_inpaint"
     assert moved.pen().style() == Qt.PenStyle.SolidLine
 

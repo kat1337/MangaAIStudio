@@ -23,8 +23,16 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFontInfo, QImage, QKeyEvent, QMouseEvent, QTransform  # noqa: E402
+from PySide6.QtCore import QEvent, QPointF, QPoint, QRectF, Qt  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QFontInfo,
+    QImage,
+    QKeyEvent,
+    QMouseEvent,
+    QTransform,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QDialog,
@@ -4834,3 +4842,297 @@ def test_graveyard_release_against_invalidated_wrapper_safe(
     assert wr() is None, (
         "the graveyard must still release wrappers on the alive path (WR-03)"
     )
+
+
+# ===========================================================================
+# quick-260822-gnq — regression guards for the three cleaning-canvas bugs:
+# (1) move/touch no longer nukes + re-runs detection (per-box re-run
+#     affordance + 5 s stationary grace replace refit-on-commit);
+# (2) scrolling leaves no phantom brush strokes;
+# (3) Move/Pan shows no brush-dot cursor.
+# All tests are hermetic: the dispatch/refit engines are stubbed at the
+# MainWindow seam — never a model load, never network.
+# ===========================================================================
+
+
+def _stub_engines(window: MainWindow, monkeypatch) -> tuple[list, list]:
+    """Stub _refit_changed_boxes + _dispatch_ocr_for_box with recorders.
+
+    Returns ``(refit_calls, ocr_calls)``; each entry is the before-snapshot /
+    BoxItem argument respectively. The instance-attribute stub intercepts
+    both direct calls and the internal self.* dispatch in
+    ``_redetect_single_box``.
+    """
+    refit_calls: list = []
+    ocr_calls: list = []
+    monkeypatch.setattr(
+        window, "_refit_changed_boxes", lambda before: refit_calls.append(before)
+    )
+    monkeypatch.setattr(
+        window, "_dispatch_ocr_for_box", lambda item: ocr_calls.append(item)
+    )
+    return refit_calls, ocr_calls
+
+
+def _commit_move(window: MainWindow, item, dx: float, dy: float) -> None:
+    """Move ``item`` and run the REAL commit flow (setRect + boxes_modified)."""
+    canvas = window.canvas
+    before = canvas.boxes_snapshot()
+    r = item.rect()
+    item.setRect(r.translated(dx, dy))
+    item._sync_handles()
+    canvas.boxes_modified.emit(before)
+
+
+@pytest.mark.gui
+def test_move_commit_does_not_refit(qtbot, tmp_path, monkeypatch) -> None:
+    """Guard 1a: a committed box move emits boxes_modified but performs ZERO
+    refit work — the sentinel recorder sees no call and the box is marked
+    geometry-stale instead (quick-260822-gnq annoyance core)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, _ocr = _stub_engines(window, monkeypatch)
+    modified: list = []
+    window.canvas.boxes_modified.connect(lambda snap: modified.append(snap))
+
+    # A REAL drag through the canvas move path.
+    canvas = window.canvas
+    canvas.mousePressEvent(_press_at(canvas, 40, 50))  # inside the box body
+    canvas.mouseMoveEvent(_move_at(canvas, 60, 70))
+    canvas.mouseReleaseEvent(_release_at(canvas, 60, 70))
+
+    assert len(modified) == 1, "the commit must emit boxes_modified"
+    assert refit_calls == [], "move commit must NOT trigger any refit"
+    assert item.geometry_stale is True, "moved box must be marked stale"
+
+
+@pytest.mark.gui
+def test_stationary_grace_dispatches_once(qtbot, tmp_path, monkeypatch) -> None:
+    """Guard 1b: after the shortened stationary grace expires, exactly ONE
+    detection-fit + ONE OCR dispatch runs per stale box — and no repeat
+    firing afterwards."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    qtbot.waitUntil(
+        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
+    )
+    assert item.geometry_stale is False
+    # A further full grace window must NOT re-fire (single-shot timer).
+    qtbot.wait(150)
+    assert len(refit_calls) == 1
+    assert len(ocr_calls) == 1
+
+
+@pytest.mark.gui
+def test_drag_cancels_pending_grace(qtbot, tmp_path, monkeypatch) -> None:
+    """Guard 1c: starting another box drag inside the grace window cancels
+    the pending auto detection+OCR — both recorders stay empty past the
+    original deadline."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    assert window._stationary_timer.isActive()
+    # A drag START cancels the pending dispatch.
+    window.canvas.box_interaction_started.emit()
+    assert not window._stationary_timer.isActive()
+    qtbot.wait(150)  # advance well past the original deadline
+    assert refit_calls == [] and ocr_calls == []
+
+
+@pytest.mark.gui
+def test_create_defers_detection_to_grace(qtbot, tmp_path, monkeypatch) -> None:
+    """Guard 1d: a freshly drawn box dispatches NOTHING at release; exactly
+    one OCR + one refit run after the shortened grace."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    canvas = window.canvas
+    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
+    canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
+    canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
+    assert canvas.box_count() == 1
+    # Nothing at release (no instant dispatch); the timer is armed instead.
+    assert refit_calls == [] and ocr_calls == []
+    assert window._stationary_timer.isActive()
+    # Exactly one of each after the grace.
+    qtbot.waitUntil(
+        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
+    )
+    qtbot.wait(150)
+    assert len(refit_calls) == 1 and len(ocr_calls) == 1
+
+
+@pytest.mark.gui
+def test_redetect_affordance_click_refits_with_current_geometry(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Guard 1e: invoking the corner re-run affordance dispatches OCR with
+    the box's POST-move geometry (current_box()), never the birth
+    pagebox.box (STATE.md Phase 08 follow-up)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls: list = []
+    # Stub ONLY the refit engine — the REAL dispatch engine runs so we can
+    # inspect the Box that crosses the thread boundary.
+    monkeypatch.setattr(
+        window, "_refit_changed_boxes", lambda before: refit_calls.append(before)
+    )
+
+    # Real dispatch engine, but a recorded worker task so we can inspect the
+    # Box that crosses the thread boundary (backend/model fully faked).
+    ocr_boxes: list = []
+
+    def fake_task(image_path, box_xyxy, model, box_id=None,
+                  progress_callback=None, abort_flag=None):
+        ocr_boxes.append((box_xyxy, box_id))
+        return {"text": "現", "box_id": box_id}
+
+    monkeypatch.setattr(window, "_run_ocr_task", fake_task)
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.backend_factory",
+        lambda kind, backend: object(),
+    )
+    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
+
+    birth = item.pagebox.box.as_tuple
+    _commit_move(window, item, 30, 10)
+    moved_now = item.current_box().as_tuple
+    assert moved_now != birth
+
+    # The affordance click path: emit the CANVAS-level signal with the item.
+    window.canvas.box_redetect_requested.emit(item)
+    qtbot.waitUntil(lambda: len(ocr_boxes) == 1, timeout=5000)
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
+    assert len(refit_calls) == 1
+    box, routing_id = ocr_boxes[0]
+    assert box.as_tuple == moved_now, "OCR must receive POST-move geometry"
+    assert box.as_tuple != birth
+    assert routing_id == id(item.pagebox), "routing id must be id(pagebox)"
+    assert item.geometry_stale is False
+
+
+@pytest.mark.gui
+def test_edited_box_not_auto_reocred(qtbot, tmp_path, monkeypatch) -> None:
+    """Guard 1f (T-QG-03): a moved box carrying hand-edited recognized text
+    gets its fit refreshed but its OCR leg SKIPPED — silent overwrite is
+    reserved for raw/never-recognized text."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    item.pagebox.set_recognized_text_edited("手書き")
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 15, 0)
+    qtbot.waitUntil(lambda: len(refit_calls) == 1, timeout=5000)
+    qtbot.wait(150)
+    assert ocr_calls == [], "edited text must never be silently re-OCRed"
+
+
+@pytest.mark.gui
+def test_cursor_hidden_for_move_and_crop_visible_for_paint_tools(qtbot) -> None:
+    """Guards 2+3 (cursor): set_tool across ALL six ToolModes — cursor_item
+    visibility matches membership in {BRUSH, RECTANGLE, LASSO, ERASER}."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    paint_tools = {
+        ToolMode.BRUSH,
+        ToolMode.RECTANGLE,
+        ToolMode.LASSO,
+        ToolMode.ERASER,
+    }
+    for tool in ToolMode:
+        canvas.set_tool(tool)
+        expected = tool in paint_tools
+        assert canvas.cursor_item.isVisible() is expected, (
+            f"cursor visibility wrong for {tool}"
+        )
+
+
+@pytest.mark.gui
+def test_no_ghost_after_undo_and_scroll(qtbot) -> None:
+    """Guard 2 (ghost): after painting a stroke and undoing it via
+    apply_undo_mask, a wheel scroll AND a Ctrl+wheel zoom leave NO residual
+    stroke pixels in the viewport grab. FullViewportUpdate is the structural
+    guarantee — asserted alongside."""
+    from manga_ai_studio.core.mask_editor import paint_mask_stroke
+    from manga_ai_studio.core.mask_planes import MaskPlanesSnapshot
+
+    canvas = _canvas_with_image_and_boxes(qtbot, size=200)
+    from PySide6.QtWidgets import QGraphicsView
+
+    assert (
+        canvas.viewportUpdateMode()
+        == QGraphicsView.ViewportUpdateMode.FullViewportUpdate
+    )
+
+    # Paint a stroke programmatically into the displayed mask.
+    canvas.set_tool(ToolMode.BRUSH)
+    paint_mask_stroke(
+        canvas.get_mask(), QPointF(100, 100), QPointF(115, 100),
+        canvas.brush_size, False,
+    )
+    canvas.update_mask_display()
+    QApplication.processEvents()
+
+    # Sanity: the stroke IS visible before the undo (red tint drops G/B).
+    pre = QColor(canvas.viewport().grab().toImage().pixel(
+        canvas.mapFromScene(QPointF(107, 100))
+    ))
+    assert pre.green() < 200 and pre.blue() < 200, "stroke should be visible"
+
+    # Restore a CLEAN plane snapshot via the real undo application path.
+    clean_manual = QImage(200, 200, QImage.Format.Format_ARGB32)
+    clean_manual.fill(Qt.GlobalColor.transparent)
+    clean_erase = QImage(200, 200, QImage.Format.Format_ARGB32)
+    clean_erase.fill(Qt.GlobalColor.transparent)
+    canvas.apply_undo_mask(
+        MaskPlanesSnapshot(manual=clean_manual, erase=clean_erase, auto_packed=None)
+    )
+
+    def _wheel(angle: int, ctrl: bool) -> None:
+        vp = canvas.mapFromScene(QPointF(107, 100))
+        mods = (
+            Qt.KeyboardModifier.ControlModifier if ctrl
+            else Qt.KeyboardModifier.NoModifier
+        )
+        ev = QWheelEvent(
+            QPointF(vp),
+            QPointF(canvas.mapToGlobal(vp)),
+            QPoint(0, 0),
+            QPoint(0, angle),
+            Qt.MouseButton.NoButton,
+            mods,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        canvas.wheelEvent(ev)
+        QApplication.processEvents()
+
+    # Plain scroll down/up + Ctrl+wheel zoom in/out; after each, the stroke
+    # center pixel must show NO mask-overlay red (no resurrected ghost).
+    for ctrl in (False, True):
+        for angle in (-120, 120):
+            _wheel(angle, ctrl=ctrl)
+            px = QColor(canvas.viewport().grab().toImage().pixel(
+                canvas.mapFromScene(QPointF(107, 100))
+            ))
+            assert px.green() > 200 and px.blue() > 200, (
+                f"ghost stroke pixels visible after wheel (ctrl={ctrl}, "
+                f"angle={angle})"
+            )
+

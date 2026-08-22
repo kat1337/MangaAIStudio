@@ -135,11 +135,23 @@ def test_recompose_after_move_uses_live_geometry(qtbot, tmp_path) -> None:
 
     before = window.canvas.boxes_snapshot()
     item.setRect(QRectF(25, 15, 24, 29))  # birth (5,5,29,34) -> moved (25,15,49,44)
-    window.canvas.boxes_modified.emit(before)  # runs _refit_changed_boxes
+    window.canvas.boxes_modified.emit(before)  # marks the box stale (NO refit)
 
-    # The move-commit refit already recomposes at the MOVED position.
+    # quick-260822-gnq: a move commit is CHEAP — no recompose happens; the
+    # auto plane stays at the BIRTH position and the box is marked stale.
+    assert item.geometry_stale is True
+    assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(5, 5, 29, 34), (
+        "a move commit must NOT recompose: the auto plane survives untouched"
+    )
+
+    # The explicit re-detect path re-fits + recomposes at the MOVED position.
+    # OCR leg stubbed (hermetic: no model load).
+    item.pagebox.payload.text = ""  # fixture payload carries no text attr
+    window._dispatch_ocr_for_box = lambda it: None
+    window._on_box_redetect_requested(item)
+    assert item.geometry_stale is False
     assert _content_bbox(window.canvas._auto_bin) == _box_content_bbox(25, 15, 49, 44), (
-        "the refit path must compose at the moved rect"
+        "the explicit re-detect must compose at the moved rect"
     )
 
     # The threshold tweak must NOT jump the content back to the birth origin.
