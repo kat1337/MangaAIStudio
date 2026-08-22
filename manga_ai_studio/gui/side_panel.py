@@ -34,6 +34,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QScrollArea,
     QToolButton,
     QVBoxLayout,
@@ -90,6 +91,23 @@ QScrollArea > QWidget > QWidget {
 # rides the same button so the header row reads as one control.
 _EXPANDED_GLYPH = "\u25be"
 _COLLAPSED_GLYPH = "\u25b8"
+
+# Edit-section secondary chrome (UI-SPEC §40): flat buttons on the panel's
+# Secondary token with a 1px #3a3a42 border, hover lightens to the existing
+# #34343c token. Disabled greying is Qt-native — no extra QSS state needed.
+_EDIT_QSS = """
+QToolButton#edit_button {
+    background: #2d2d33;
+    border: 1px solid #3a3a42;
+    border-radius: 3px;
+    color: #e8e8ea;
+    padding: 5px 8px;
+    text-align: center;
+}
+QToolButton#edit_button:hover {
+    background: #34343c;
+}
+"""
 
 
 class CollapsibleSection(QWidget):
@@ -180,6 +198,62 @@ class CollapsibleSection(QWidget):
         self.header.setChecked(expanded)
         self.header.blockSignals(was)
         self._apply_expanded(expanded)
+
+
+class EditSection(QWidget):
+    """The Edit section body (plan 09-03, UI-05/D-08): six default-action
+    buttons in a 2-column grid.
+
+    Pure relocation of proven entry points — the constructor receives the SIX
+    LIVE MainWindow QActions (Curves…, Crop… numeric dialog, Resize…, Rotate
+    90° CW / CCW / 180°) and binds each text ``QToolButton`` with
+    ``setDefaultAction``. Labels/tooltips/status-tips and the enabled-state
+    gating (``_refresh_action_states``) are inherited from the actions for
+    free; there is NO lambda wiring, NO re-created action, and NO new op
+    logic behind any button.
+    """
+
+    def __init__(
+        self,
+        curves_action,
+        crop_dialog_action,
+        resize_action,
+        rotate_cw_action,
+        rotate_ccw_action,
+        rotate_180_action,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("edit_section")
+
+        grid = QGridLayout(self)
+        # Secondary chrome, sm (8px) grid gaps (UI-SPEC §40); tight margins —
+        # the wrapping CollapsibleSection owns the section-level spacing.
+        grid.setContentsMargins(0, 0, 0, 4)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+
+        # D-08 order: dialogs first (Curves…, Crop… dialog, Resize…), then the
+        # three instant rotates. The Crop TOOL (G) is NOT here — it stays a
+        # strip button (action_tool_crop); this grid binds action_crop_dialog.
+        actions = [
+            curves_action,
+            crop_dialog_action,
+            resize_action,
+            rotate_cw_action,
+            rotate_ccw_action,
+            rotate_180_action,
+        ]
+        self.buttons: list[QToolButton] = []
+        for i, act in enumerate(actions):
+            btn = QToolButton(self)
+            btn.setObjectName("edit_button")
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            btn.setDefaultAction(act)
+            self.buttons.append(btn)
+            grid.addWidget(btn, i // 2, i % 2)
+
+        self.setStyleSheet(_PANEL_QSS + _EDIT_QSS)
 
 
 class SidePanel(QWidget):

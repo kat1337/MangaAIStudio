@@ -90,7 +90,11 @@ from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
-from manga_ai_studio.gui.side_panel import CollapsibleSection, SidePanel
+from manga_ai_studio.gui.side_panel import (  # noqa: F401
+    CollapsibleSection,
+    EditSection,
+    SidePanel,
+)
 from manga_ai_studio.gui.text_renderer import (
     current_focus_text,
     layout as renderer_layout,
@@ -270,6 +274,9 @@ class MainWindow(QMainWindow):
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
         self._build_menus()
+        # Plan 09-03: the Edit section binds the six image-op QActions built
+        # by _build_menus — it must come after the menus exist.
+        self._build_edit_section()
         # Plan 09-01: the strip mirrors action_detect_text/action_inpaint, so
         # the central container (strip + canvas) is built AFTER the menus.
         self._build_central_widget()
@@ -364,6 +371,12 @@ class MainWindow(QMainWindow):
         self.side_panel.add_section(self.section_detection)
         self.side_panel.add_section(self.section_brush)
         self.side_panel.add_section(self.section_typesetting)
+        # NOTE (plan 09-03): the fourth section, Edit, is appended by
+        # _build_edit_section AFTER _build_menus — its body binds the six live
+        # image-op QActions (Curves/Crop-dialog/Resize/rotate x3), which only
+        # exist once the menus are built. The D-02 restore loop above covers
+        # the three sections that exist at this point; the Edit section seeds
+        # its own sidePanel/editExpanded state in _build_edit_section.
         # D-02 restore: seed each section from QSettings AFTER the build with
         # toggle signals blocked (restore_expanded) so no spurious writes
         # fire; a missing key means expanded (all sections EXPANDED on first
@@ -374,6 +387,44 @@ class MainWindow(QMainWindow):
             )
         self.dock_panel.setWidget(self.side_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
+
+    def _build_edit_section(self) -> None:
+        """Append the panel's fourth section, Edit (plan 09-03, UI-05/D-08).
+
+        The body is an :class:`EditSection` — six text QToolButtons bound via
+        ``setDefaultAction`` to the LIVE image-op QActions created in
+        _build_edit_menu (Crop… dialog) and _build_tools_menu (Curves…,
+        Resize…, rotate x3). Zero new op logic: triggering a button fires
+        exactly the handler the old menu entry fired, and the enabled-state
+        gating in _refresh_action_states reaches the buttons through the
+        default-action binding for free.
+
+        Runs AFTER _build_menus (construction-order constraint: the actions
+        must exist); completes the D-02 workflow order Detection settings →
+        Brush → Typesetting → Edit and seeds the sidePanel/editExpanded
+        persistence key with the same tolerant restore the other three
+        sections use.
+        """
+        self.edit_body = EditSection(
+            self.action_curves,
+            self.action_crop_dialog,
+            self.action_resize,
+            self.action_rotate_cw,
+            self.action_rotate_ccw,
+            self.action_rotate_180,
+        )
+        self.section_edit = CollapsibleSection(
+            "Edit",
+            self.edit_body,
+            settings_key="sidePanel/editExpanded",
+            settings_provider=self._settings,
+        )
+        self.side_panel.add_section(self.section_edit)
+        # Same D-02 seed as _build_docks' loop — signals blocked so the
+        # restore never writes back; missing key ⇒ expanded (first run).
+        self.section_edit.restore_expanded(
+            self._read_side_panel_expanded("sidePanel/editExpanded")
+        )
 
     def _build_central_widget(self) -> None:
         """Wrap the canvas in a central container with the tools strip (09-01).
