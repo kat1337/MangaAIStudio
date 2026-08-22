@@ -65,6 +65,36 @@ def _make_window(qtbot, tmp_path):
     return window
 
 
+class _FakeBoxItem:
+    """Minimal BoxItem stand-in: the fill-aware gate reads only ``.pagebox``."""
+
+    def __init__(self, pagebox):
+        self.pagebox = pagebox
+
+    def isSelected(self) -> bool:  # noqa: N802 - Qt naming
+        return False
+
+
+def _open_page_window(qtbot, tmp_path):
+    """A MainWindow with one real page open (page_open True, composite mask empty)."""
+    from PySide6.QtWidgets import QApplication
+
+    folder = tmp_path / "chapter"
+    folder.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (60, 40), color=(200, 200, 200)).save(folder / "page_01.png")
+    pm = ProfileManager(tmp_path / "config")
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    try:
+        pm.config.current_profile.masker.mask_max_standard_deviation = 15.0
+        pm.config.current_profile.masker.max_inpaint_resolution = 2048
+    except Exception:
+        pass
+    window._load_folder(folder)
+    QApplication.processEvents()
+    return window
+
+
 class _FakeModel:
     """Fake inpaint model that asserts cap and records calls."""
     def __init__(self, max_size=(2048, 2048), fill=77):
@@ -380,4 +410,60 @@ def test_single_undo_contract(qtbot, tmp_path):
     # Already checked via earlier, but ensure no mask_modified emission pushed mask undo
     # The history mask undo depth should not have grown due to consume (we didn't push mask before)
     # This is more of a sanity check
+
+
+# ---------------------------------------------------------------------------
+# Fill-aware inpaint gating (quick task 260822-1yu Task 1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.gui
+def test_inpaint_action_enabled_on_fill_only_page(qtbot, tmp_path):
+    """A will_fill box (std_dev 0, fill_color set, empty composite mask) enables C.
+
+    Root-cause fix: on text-only pages every box routes to the fill plane,
+    compose_auto_binary is empty and the composite mask has no content — the
+    legacy has_mask_content gate left C disabled forever. The gate must also
+    consult pending fill work.
+    """
+    window = _open_page_window(qtbot, tmp_path)
+    # Sanity: page open, composite mask empty (legacy gate would disable).
+    assert not window.canvas.has_mask_content()
+    pb_fill = _make_pb(10, 10, 20, 20, DETECTED, 0.0, None, (10, 20, 30))
+    window.canvas._box_items = [_FakeBoxItem(pb_fill)]
+    window._refresh_action_states()
+    assert window.action_inpaint.isEnabled() is True, (
+        "C must be enabled when a flat (will_fill) box exists even with an "
+        "empty composite mask"
+    )
+
+
+@pytest.mark.gui
+def test_inpaint_action_stays_disabled_for_will_inpaint_without_mask(qtbot, tmp_path):
+    """A high-std (will_inpaint) box with an empty composite mask does NOT enable C.
+
+    Legacy semantics preserved: without mask content or fill work there is
+    nothing to do — running LaMa needs painted/auto mask content.
+    """
+    window = _open_page_window(qtbot, tmp_path)
+    assert not window.canvas.has_mask_content()
+    pb_high = _make_pb(10, 10, 20, 20, DETECTED, 30.0, None, None)
+    assert pb_high.inpaint_state(15.0) == "will_inpaint"
+    window.canvas._box_items = [_FakeBoxItem(pb_high)]
+    window._refresh_action_states()
+    assert window.action_inpaint.isEnabled() is False
+
+
+@pytest.mark.gui
+def test_inpaint_action_disabled_no_boxes_no_mask(qtbot, tmp_path):
+    """Regression guard: no boxes + no mask content → C disabled."""
+    window = _open_page_window(qtbot, tmp_path)
+    window.canvas._box_items = []
+    window._refresh_action_states()
+    assert window.action_inpaint.isEnabled() is False
+    # And with an async op running it stays disabled even with fill work.
+    pb_fill = _make_pb(10, 10, 20, 20, DETECTED, 0.0, None, (10, 20, 30))
+    window.canvas._box_items = [_FakeBoxItem(pb_fill)]
+    window._op_running = True
+    window._refresh_action_states()
+    assert window.action_inpaint.isEnabled() is False
 
