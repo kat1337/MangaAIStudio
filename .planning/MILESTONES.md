@@ -73,3 +73,10 @@
 - 1. [Rule 3 - Blocking] Edit-section assembly moved to a dedicated post-menu build step
 
 ---
+
+### Known Gaps (override closeout, 2026-08-22)
+
+- Phase 7 verification stale at close (implementation complete, 12/12 plans) — re-run /gsd-verify-work 7 to refresh.
+- Phase 08.1 has no VERIFICATION.md (implementation complete, 4/4 plans) — re-run verification.
+- Known verification overrides: 2 (see STATE.md Deferred Items).
+- 3 open debug sessions deferred: 04-01-text-overlay-tracking (diagnosed), ctrl-z-undo-crash (diagnosed), phase7-typeset-gaps-a-e (investigating).
