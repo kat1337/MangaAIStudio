@@ -40,9 +40,11 @@ One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR
 
 ### Active
 
-<!-- v1.2 scope. UI rework remaining (was: cleaning-track activation delivered in Phase 8). -->
+<!-- v1.2 scope fully delivered (Phases 1–9). No active requirements remain. -->
 
-- [ ] UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools)
+### Recently Validated
+
+- [x] UI rework: modular side panel, inspector button moved to top, right-side toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (curves, crop, image-edit tools) — *Validated in Phase 9: UI Rework (UI-01..UI-05; D-05 deviation: strip sits LEFT of canvas per user decision)*
 
 ### Out of Scope
 
@@ -124,4 +126,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-19 after Phase 8 (Masker & Selective Inpaint) — cleaning-track activation delivered and gap-closed; next: Phase 9 UI rework*
+*Last updated: 2026-08-22 after Phase 9*
