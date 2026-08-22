@@ -256,13 +256,15 @@ def test_style_commit_signal_fires(qtbot) -> None:
     )
     panel.align_combo.setCurrentIndex(0)  # Left
     assert fired["align"] == [("left", "middle")]
-    panel._effect_checks["outline"].setChecked(False)
-    assert fired["effect"] == [("outline", {"enabled": False, "color": "#0b0b0e", "value": 2})]
+    # The default style now ships outline DISABLED (quick task 260822-347),
+    # so checking it ON is the real-change toggle.
+    panel._effect_checks["outline"].setChecked(True)
+    assert fired["effect"] == [("outline", {"enabled": True, "color": "#0b0b0e", "value": 2})]
     # ---- WR-01 no-op focus cycles: no NEW emissions.
     panel.align_combo.setCurrentIndex(0)  # unchanged
     panel.size_spin.editingFinished.emit()  # unchanged value
     panel.auto_fit_check.setChecked(False)  # unchanged
-    panel._effect_checks["outline"].setChecked(False)  # unchanged
+    panel._effect_checks["outline"].setChecked(True)  # unchanged
     panel._commit_style_color("#112233")  # unchanged
     assert fired["font"] == ["Arial"]
     assert fired["size"] == [14]
@@ -270,7 +272,7 @@ def test_style_commit_signal_fires(qtbot) -> None:
     assert fired["color"] == ["#112233"]
     assert fired["align"] == [("left", "middle")]
     assert fired["effect"] == [
-        ("outline", {"enabled": False, "color": "#0b0b0e", "value": 2})
+        ("outline", {"enabled": True, "color": "#0b0b0e", "value": 2})
     ]
 
 
