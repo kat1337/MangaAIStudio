@@ -5,15 +5,15 @@ milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 9
 current_phase_name: UI Rework
 status: executing
-stopped_at: Completed 09-01-PLAN.md
-last_updated: "2026-08-22T00:56:55.112Z"
+stopped_at: Completed 09-02-PLAN.md
+last_updated: "2026-08-22T01:43:52.656Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 9 execution started
 progress:
   total_phases: 10
   completed_phases: 9
   total_plans: 76
-  completed_plans: 74
+  completed_plans: 75
 ---
 
 # Project State
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 ## Current Position
 
 Phase: 9 (UI Rework) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-08-21 — Phase 9 execution started
 
@@ -129,6 +129,7 @@ Last activity: 2026-08-21 — Phase 9 execution started
 | Phase 08.1 P02 | 35 min | 2 tasks | 4 files |
 | Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate P04 | 59 min | 3 tasks | 8 files |
 | Phase 09 P01 | 27 min | 3 tasks | 13 files |
+| Phase 09 P02 | 34 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -320,6 +321,8 @@ Recent decisions affecting current work:
 - [Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate]: Wrapper signatures additive: batch_clean(masker_conf=None, max_inpaint_size=(2048,2048)) with _normalize_max_size 512..8192 fallback 2048 — Keeps existing callers working while threading max cap
 - [Phase ?]: 09-01: icons live ON the strip-owned actions (QToolButton re-syncs its icon FROM the default action on state changes, wiping button-side-only icons to null); shared window Detect/Inpaint actions stay icon-free and their strip buttons re-assert the icon on action.changed
 - [Phase ?]: 09-01: set_active_tool keeps BOTH tools_panel and tools_strip sync calls (zero extra emissions; panel call removed by 09-02 with the tool row); central container built after menus because the strip mirrors action_detect_text/action_inpaint
+- [Phase ?]: 09-02: CollapsibleSection owns section chrome (divider+header); DetectionSettingsBody/BrushBody carry only control forms; self.tools_panel replaced by detection_body/brush_body with test paths updated same-commit
+- [Phase ?]: 09-02: sidePanel/*Expanded tolerant parse keeps explicit falsy set (false/0/no/off) so persisted False round-trips while malformed values fall back to expanded (T-09b-01)
 
 ### Roadmap Evolution
 
@@ -356,8 +359,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-22T00:56:55.080Z
-Stopped at: Completed 09-01-PLAN.md
+Last session: 2026-08-22T01:43:52.621Z
+Stopped at: Completed 09-02-PLAN.md
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.

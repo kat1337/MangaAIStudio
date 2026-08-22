@@ -51,10 +51,10 @@ Requirements for milestone v1.2 (Masker & Selective Inpaint + UI Rework). Each m
 
 ### UI Rework
 
-- [ ] **UI-01**: The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
-- [ ] **UI-02**: The inspector toggle button is moved to the top of the side panel
+- [x] **UI-01**: The side panel is modular — composed of discrete, independently collapsible sections (Typesetting, Edit, etc.) rather than one monolithic panel
+- [x] **UI-02**: The inspector toggle button is moved to the top of the side panel
 - [x] **UI-03**: The tools toolbar is relocated from beside the file explorer to a small vertical toolbar beside the canvas — LEFT of the canvas, between the Pages file list and the canvas (D-05; wording corrected 2026-08-21 from the original "right side" per the user-locked deviation)
-- [ ] **UI-04**: The former "Inspector" panel section is renamed to "Typesetting"
+- [x] **UI-04**: The former "Inspector" panel section is renamed to "Typesetting"
 - [ ] **UI-05**: A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) currently scattered across menus/dialogs
 
 ## v2 Requirements
@@ -127,10 +127,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MASK-03 | Phase 8 | Complete |
 | MASK-05 | Phase 8 | Complete |
 | MASK-06 | Phase 8 | Complete |
-| UI-01 | Phase 9 | Pending |
-| UI-02 | Phase 9 | Pending |
+| UI-01 | Phase 9 | Complete |
+| UI-02 | Phase 9 | Complete |
 | UI-03 | Phase 9 | Complete |
-| UI-04 | Phase 9 | Pending |
+| UI-04 | Phase 9 | Complete |
 | UI-05 | Phase 9 | Pending |
 
 **Coverage:**
