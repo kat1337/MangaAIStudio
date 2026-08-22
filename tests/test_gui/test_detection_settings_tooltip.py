@@ -15,13 +15,13 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
+from manga_ai_studio.gui.tools_panel import DetectionSettingsBody  # noqa: E402
 
 
 @pytest.mark.gui
 def test_threshold_tooltip_inverted_copy(qtbot) -> None:
     """CONTEXT D-01: threshold tooltip must say fill at/below and inpaint above (inverted gate)."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     tip = panel.std_dev_threshold_spin.toolTip()
     # New copy per 08.1: at/below is color-filled, above is AI-inpainted
@@ -39,7 +39,7 @@ def test_threshold_tooltip_inverted_copy(qtbot) -> None:
 @pytest.mark.gui
 def test_max_inpaint_tooltip_present(qtbot) -> None:
     """Max LaMa size tooltip must be present (D-05, 08.1-03)."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     assert hasattr(panel, "max_inpaint_spin")
     tip = panel.max_inpaint_spin.toolTip()

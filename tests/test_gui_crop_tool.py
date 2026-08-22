@@ -22,6 +22,7 @@ from PIL import Image as PILImage
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFontInfo, QKeyEvent, QShortcut
 from PySide6.QtTest import QTest
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QDialog, QGraphicsRectItem, QToolButton
 
 from manga_ai_studio.config.profile_manager import ProfileManager
@@ -33,7 +34,7 @@ from manga_ai_studio.core.mask_editor import (
 )
 from manga_ai_studio.gui.crop_dialog import CropDialog
 from manga_ai_studio.gui.main_window import MainWindow
-from manga_ai_studio.gui.tools_panel import ToolsPanel
+from manga_ai_studio.gui.tools_strip import ToolsStrip
 from panelcleaner.structures import Box
 
 
@@ -195,21 +196,23 @@ def _seed_three_boxes(window: MainWindow) -> list[PageBox]:
 
 @pytest.mark.gui
 def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
-    """ToolsPanel exposes a Crop action in the exclusive group (D-11).
+    """ToolsStrip exposes a Crop action in the exclusive group (D-11).
 
-    The action carries data == ToolMode.CROP and sits LAST in the group
+    Plan 09-02: the tool row lives on the strip (the ToolsPanel was dissolved
+    into section bodies), so the exclusivity contract is asserted there. The
+    action carries data == ToolMode.CROP and sits LAST in the group
     (after Eraser); activating it deactivates Brush and vice versa
-    (QActionGroup exclusivity), and the panel emits ``tool_changed`` with the
+    (QActionGroup exclusivity), and the strip emits ``tool_changed`` with the
     right ToolMode on each activation.
     """
-    panel = ToolsPanel()
-    qtbot.addWidget(panel)
+    strip = ToolsStrip(QAction("Detect Text"), QAction("Inpaint"))
+    qtbot.addWidget(strip)
 
-    crop_action = panel.action_crop
+    crop_action = strip.action_crop
     assert crop_action.data() == ToolMode.CROP
-    assert crop_action.actionGroup() is panel.tool_group
+    assert crop_action.actionGroup() is strip.tool_group
 
-    tools = [panel._action_to_tool[a] for a in panel.tool_group.actions()]
+    tools = [strip._action_to_tool[a] for a in strip.tool_group.actions()]
     assert tools == [
         ToolMode.MOVE,
         ToolMode.BRUSH,
@@ -220,16 +223,16 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
     ]
 
     emitted: list = []
-    panel.tool_changed.connect(emitted.append)
+    strip.tool_changed.connect(emitted.append)
 
-    panel.action_crop.setChecked(True)
-    assert panel.active_tool() == ToolMode.CROP
-    assert panel.action_brush.isChecked() is False  # crop deactivated brush
+    strip.action_crop.setChecked(True)
+    assert strip.active_tool() == ToolMode.CROP
+    assert strip.action_brush.isChecked() is False  # crop deactivated brush
     assert emitted[-1] == ToolMode.CROP
 
-    panel.action_brush.setChecked(True)
-    assert panel.action_crop.isChecked() is False  # ...and vice versa
-    assert panel.active_tool() == ToolMode.BRUSH
+    strip.action_brush.setChecked(True)
+    assert strip.action_crop.isChecked() is False  # ...and vice versa
+    assert strip.active_tool() == ToolMode.BRUSH
     assert emitted[-1] == ToolMode.BRUSH
 
 
@@ -270,8 +273,8 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
         ]
 
     # Test 4 (group membership): the six window tool actions are STANDALONE —
-    # NOT members of the ToolsPanel's exclusive group (WR-02: a 12-action
-    # mirrored group fought itself on dock clicks). The panel group holds
+    # NOT members of the strip's exclusive group (WR-02: a mirrored
+    # multi-widget group fought itself on dock clicks). The strip group holds
     # exactly its own six actions.
     for action in (
         window.action_tool_move,
@@ -290,7 +293,7 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
     assert toolbar_btn(ToolMode.BRUSH).isChecked()
     assert checked_tools() == [ToolMode.BRUSH]
     # Test 5 (sync): the dock's active tool matches the toolbar's checked tool.
-    assert window.tools_panel.active_tool() == ToolMode.BRUSH
+    assert window.tools_strip.active_tool() == ToolMode.BRUSH
 
     # Test 2 (shortcut path): the V QShortcut drives the same sync.
     shortcut = next(
@@ -300,14 +303,14 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
     QApplication.processEvents()
     assert toolbar_btn(ToolMode.MOVE).isChecked()
     assert checked_tools() == [ToolMode.MOVE]
-    assert window.tools_panel.active_tool() == ToolMode.MOVE
+    assert window.tools_strip.active_tool() == ToolMode.MOVE
 
     # Test 3 (menu path): the Tools-menu Crop action triggers the same sync.
     window.action_tool_crop.trigger()
     QApplication.processEvents()
     assert toolbar_btn(ToolMode.CROP).isChecked()
     assert checked_tools() == [ToolMode.CROP]
-    assert window.tools_panel.active_tool() == ToolMode.CROP
+    assert window.tools_strip.active_tool() == ToolMode.CROP
 
 
 @pytest.mark.gui
@@ -347,8 +350,8 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
     # the strip button is checked — with no other tool checked anywhere.
     window.tools_strip.action_rectangle.trigger()
     QApplication.processEvents()
-    assert window.tools_panel.action_rectangle.isChecked()
-    assert window.tools_panel.active_tool() == ToolMode.RECTANGLE
+    assert window.tools_strip.action_rectangle.isChecked()
+    assert window.tools_strip.active_tool() == ToolMode.RECTANGLE
     assert window.action_tool_rectangle.isChecked()
     assert window.action_tool_move.isChecked() is False
     assert toolbar_btn(ToolMode.RECTANGLE).isChecked()
@@ -358,8 +361,8 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
     # the probe's second click desynced EVERYTHING pre-fix.
     window.tools_strip.action_brush.trigger()
     QApplication.processEvents()
-    assert window.tools_panel.action_brush.isChecked()
-    assert window.tools_panel.active_tool() == ToolMode.BRUSH
+    assert window.tools_strip.action_brush.isChecked()
+    assert window.tools_strip.active_tool() == ToolMode.BRUSH
     assert window.action_tool_brush.isChecked()
     assert window.action_tool_rectangle.isChecked() is False
     assert toolbar_btn(ToolMode.BRUSH).isChecked()
@@ -396,7 +399,7 @@ def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     menu_action.trigger()
     QApplication.processEvents()
     assert window.canvas.current_tool == ToolMode.CROP
-    assert window.tools_panel.active_tool() == ToolMode.CROP
+    assert window.tools_strip.active_tool() == ToolMode.CROP
 
     # Shortcut G triggers the same path (QShortcut registered on the window).
     window.set_active_tool(ToolMode.BRUSH)
@@ -407,7 +410,7 @@ def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     shortcut.activated.emit()
     QApplication.processEvents()
     assert window.canvas.current_tool == ToolMode.CROP
-    assert window.tools_panel.active_tool() == ToolMode.CROP
+    assert window.tools_strip.active_tool() == ToolMode.CROP
 
 
 # ===========================================================================

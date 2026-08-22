@@ -1,15 +1,18 @@
 """GUI tests for the Phase 8 detection-settings section (plan 08-05, MASK-01/02).
 
-Covers the ToolsPanel's new "Detection settings" section (UI-SPEC surface 36,
-D-05/D-06): the relocated Detect Boxes toggle, the nine masker parameters
-each with its PanelCleaner INI-comment tooltip, the QScrollArea body wrap
-(A11), and the D-15 extended paint-tool tooltips.
+Covers the "Detection settings" section body (UI-SPEC surface 36, D-05/D-06;
+plan 09-02 relocated it into the unified panel's ``DetectionSettingsBody``):
+the relocated Detect Boxes toggle, the nine masker parameters
+each with its PanelCleaner INI-comment tooltip, and the Tab-chain focus
+reachability of every section control.
 
-Task 1 owns the widget-level tests (construct ``ToolsPanel`` directly — no
-MainWindow needed): ``set_masker_values`` population without signal re-emission,
-the radius slider<->spinbox mirror's single ``dilation_changed`` emission, the
-Tab-chain focus reachability of every section control, and the four paint-tool
-+ Crop tooltip contract from UI-SPEC §Copywriting.
+Task 1 owns the widget-level tests (construct ``DetectionSettingsBody``
+directly — no MainWindow needed): ``set_masker_values`` population without
+signal re-emission, the radius slider<->spinbox mirror's single
+``dilation_changed`` emission, and the section-control focus contract from
+UI-SPEC §Copywriting. The D-15 extended paint-tool tooltips live on the
+ToolsStrip actions since plan 09-01/09-02 (the tool row's new home) — that
+contract is asserted against ``window.tools_strip`` in Task 2 below.
 
 Task 2 (in the same file) extends this with the MainWindow wiring tests:
 toggle relocation out of the Tools menu, QSettings view-state persistence,
@@ -28,11 +31,11 @@ pytest.importorskip("PySide6")
 
 from panelcleaner.config import MaskerConfig  # noqa: E402
 
-from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
+from manga_ai_studio.gui.tools_panel import DetectionSettingsBody  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Task 1 — widget-level tests (ToolsPanel constructed directly)
+# Task 1 — widget-level tests (DetectionSettingsBody constructed directly)
 # ---------------------------------------------------------------------------
 
 
@@ -44,7 +47,7 @@ def test_set_masker_values_populates_without_emission(qtbot) -> None:
     MainWindow loads the persisted profile at startup via this method; signal
     re-emission would save the profile back redundantly on boot.
     """
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
 
     dil_spy = Mock()
@@ -85,7 +88,7 @@ def test_set_masker_values_populates_without_emission(qtbot) -> None:
 def test_radius_slider_move_emits_once_and_mirrors(qtbot) -> None:
     """Moving the radius slider to 7 emits ``dilation_changed(7)`` exactly once
     and the spinbox shows 7; setting the spinbox emits once in reverse."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
 
     spy = Mock()
@@ -118,7 +121,7 @@ def test_all_section_controls_reachable_in_tab_chain(qtbot) -> None:
     Walks ``QWidget.nextInFocusChain`` from the panel — the deterministic,
     show-free traversal of Qt's focus chain (covers the QScrollArea body).
     """
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
 
     controls = [
@@ -148,35 +151,40 @@ def test_all_section_controls_reachable_in_tab_chain(qtbot) -> None:
     for c in controls:
         assert c in chain, (
             f"{type(c).__name__} ('{c.toolTip()[:40]}') is not reachable in the "
-            "ToolsPanel Tab chain"
+            "DetectionSettingsBody Tab chain"
         )
 
 
 @pytest.mark.gui
-def test_paint_tool_tooltips_extended_crop_unchanged(qtbot) -> None:
+def test_paint_tool_tooltips_extended_crop_unchanged(qtbot, tmp_path) -> None:
     """The four paint-tool action tooltips carry the D-15 Alt clause VERBATIM
     from UI-SPEC §Copywriting; Crop's tooltip is byte-identical to its
-    pre-Phase-8 text (D-17 — crop keeps today's box behavior)."""
-    panel = ToolsPanel()
-    qtbot.addWidget(panel)
+    pre-Phase-8 text (D-17 — crop keeps today's box behavior).
 
-    assert panel.action_brush.toolTip() == (
+    Plan 09-02: the tool row lives on the ToolsStrip (the strip's actions are
+    the single tooltip surface for the tools), so the D-15 copy is asserted
+    there.
+    """
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    assert strip.action_brush.toolTip() == (
         "Brush tool (B) — paints under text boxes; hold Alt to select or move"
         " a box."
     )
-    assert panel.action_rectangle.toolTip() == (
+    assert strip.action_rectangle.toolTip() == (
         "Rectangle tool (R) — paints under text boxes; hold Alt to select or"
         " move a box."
     )
-    assert panel.action_lasso.toolTip() == (
+    assert strip.action_lasso.toolTip() == (
         "Lasso tool (L) — paints under text boxes; hold Alt to select or move"
         " a box."
     )
-    assert panel.action_eraser.toolTip() == (
+    assert strip.action_eraser.toolTip() == (
         "Eraser tool (E) — paints under text boxes; hold Alt to select or move"
         " a box."
     )
-    assert panel.action_crop.toolTip() == (
+    assert strip.action_crop.toolTip() == (
         "Crop tool (G): drag a rectangle on the page, Enter applies,"
         " Esc cancels."
     )
@@ -187,7 +195,7 @@ def test_section_defaults_match_ui_spec(qtbot) -> None:
     """The section controls boot at the UI-SPEC §36 declared ranges + defaults
     (D-09): radius 0..10/2, threshold 0..100/15, fit params at their vendored
     defaults, Detect Boxes + Allow colored on, Fast selection off."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
 
     # Detect Boxes toggle (D-05): default checked (UI-SPEC A1).
@@ -222,7 +230,7 @@ def test_section_defaults_match_ui_spec(qtbot) -> None:
         assert c.toolTip(), f"{type(c).__name__} has an empty tooltip"
 
 
-def controls_for(panel: ToolsPanel) -> list:
+def controls_for(panel: DetectionSettingsBody) -> list:
     """The ten section controls (the radius pair is one row, both widgets)."""
     return [
         panel.detect_checkbox,
@@ -296,7 +304,7 @@ def test_dilation_change_updates_profile_and_ini_round_trips(
     AND the INI on disk round-trips through a second ProfileManager (D-10)."""
     window = _window(qtbot, tmp_path)
 
-    window.tools_panel.dilation_slider.setValue(7)
+    window.detection_body.dilation_slider.setValue(7)
 
     pm = window.profile_manager
     assert pm.config.current_profile.masker.mask_dilation_radius == 7
@@ -313,7 +321,7 @@ def test_std_dev_threshold_change_persists(qtbot, tmp_path) -> None:
     """The LIVE gate threshold change persists to the profile + INI (D-12)."""
     window = _window(qtbot, tmp_path)
 
-    window.tools_panel.std_dev_threshold_spin.setValue(30.0)
+    window.detection_body.std_dev_threshold_spin.setValue(30.0)
 
     pm = window.profile_manager
     assert pm.config.current_profile.masker.mask_max_standard_deviation == 30.0
@@ -329,8 +337,8 @@ def test_masker_params_change_persists_once(qtbot, tmp_path) -> None:
     INI round-trips (one shared persist fate, UI-SPEC §36)."""
     window = _window(qtbot, tmp_path)
 
-    window.tools_panel.growth_steps_spin.setValue(25)
-    window.tools_panel.allow_colored_check.setChecked(False)
+    window.detection_body.growth_steps_spin.setValue(25)
+    window.detection_body.allow_colored_check.setChecked(False)
 
     pm = window.profile_manager
     assert pm.config.current_profile.masker.mask_growth_steps == 25
@@ -356,9 +364,9 @@ def test_detect_boxes_removed_from_tools_menu_action_kept(qtbot, tmp_path) -> No
     # The state holder lives on (read by _on_detection_finished) and syncs the
     # dock checkbox via the action.toggled connection back.
     window.action_detect_boxes_mode.setChecked(False)
-    assert window.tools_panel.detect_checkbox.isChecked() is False
+    assert window.detection_body.detect_checkbox.isChecked() is False
     window.action_detect_boxes_mode.setChecked(True)
-    assert window.tools_panel.detect_checkbox.isChecked() is True
+    assert window.detection_body.detect_checkbox.isChecked() is True
 
 
 @pytest.mark.gui
@@ -370,11 +378,11 @@ def test_checkbox_toggle_syncs_action_and_persists_qsettings(
     window = _window(qtbot, tmp_path)
     _isolate_settings(window, tmp_path, monkeypatch)
 
-    window.tools_panel.detect_checkbox.setChecked(False)
+    window.detection_body.detect_checkbox.setChecked(False)
     assert window.action_detect_boxes_mode.isChecked() is False
     assert window._settings().value("detectBoxesMode") is False
 
-    window.tools_panel.detect_checkbox.setChecked(True)
+    window.detection_body.detect_checkbox.setChecked(True)
     assert window.action_detect_boxes_mode.isChecked() is True
     assert window._settings().value("detectBoxesMode") is True
 
@@ -410,9 +418,9 @@ def test_startup_renders_persisted_profile_and_qsettings(
     window = MainWindow(pm)
     qtbot.addWidget(window)
 
-    assert window.tools_panel.dilation_spinbox.value() == 7
-    assert window.tools_panel.std_dev_threshold_spin.value() == 20.0
-    assert window.tools_panel.detect_checkbox.isChecked() is False
+    assert window.detection_body.dilation_spinbox.value() == 7
+    assert window.detection_body.std_dev_threshold_spin.value() == 20.0
+    assert window.detection_body.detect_checkbox.isChecked() is False
     assert window.action_detect_boxes_mode.isChecked() is False
 
 
@@ -433,5 +441,5 @@ def test_startup_defaults_detect_boxes_on_when_no_key(
     window = MainWindow(pm)
     qtbot.addWidget(window)
 
-    assert window.tools_panel.detect_checkbox.isChecked() is True
+    assert window.detection_body.detect_checkbox.isChecked() is True
     assert window.action_detect_boxes_mode.isChecked() is True

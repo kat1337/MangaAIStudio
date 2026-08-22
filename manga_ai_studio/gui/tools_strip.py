@@ -127,17 +127,31 @@ class ToolsStrip(QToolBar):
         self.action_move = self._make_tool_action(
             "Move/Pan", "Move/Pan tool (V)", ToolMode.MOVE, checked=True
         )
+        # The brush-family tooltips carry the D-15 Alt clause verbatim (the
+        # old ToolsPanel row's copy — relocated here with the row, plan 09-02).
         self.action_brush = self._make_tool_action(
-            "Brush", "Brush tool (B)", ToolMode.BRUSH
+            "Brush",
+            "Brush tool (B) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.BRUSH,
         )
         self.action_rectangle = self._make_tool_action(
-            "Rectangle", "Rectangle tool (R)", ToolMode.RECTANGLE
+            "Rectangle",
+            "Rectangle tool (R) — paints under text boxes; hold Alt to select"
+            " or move a box.",
+            ToolMode.RECTANGLE,
         )
         self.action_lasso = self._make_tool_action(
-            "Lasso", "Lasso tool (L)", ToolMode.LASSO
+            "Lasso",
+            "Lasso tool (L) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.LASSO,
         )
         self.action_eraser = self._make_tool_action(
-            "Eraser", "Eraser tool (E)", ToolMode.ERASER
+            "Eraser",
+            "Eraser tool (E) — paints under text boxes; hold Alt to select or"
+            " move a box.",
+            ToolMode.ERASER,
         )
         # Crop tooltip per UI-SPEC §Copywriting (inherited Phase 5 copy).
         self.action_crop = self._make_tool_action(

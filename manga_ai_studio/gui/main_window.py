@@ -95,7 +95,7 @@ from manga_ai_studio.gui.text_renderer import (
     current_focus_text,
     layout as renderer_layout,
 )
-from manga_ai_studio.gui.tools_panel import ToolsPanel
+from manga_ai_studio.gui.tools_panel import BrushBody, DetectionSettingsBody
 from manga_ai_studio.gui.tools_strip import ToolsStrip
 from manga_ai_studio.gui.worker_thread import Worker
 
@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
         # Wire the plan-03 actions (Detect Text, Toggle Mask Overlay).
         self._wire_detection_actions()
-        # Wire the plan-04 actions (ToolsPanel, tool shortcuts, Clear Mask).
+        # Wire the plan-04 actions (panel bodies, tool shortcuts, Clear Mask).
         self._wire_tool_actions()
         # Wire the plan-06 actions (HistoryManager push hook + the four
         # undo/redo handlers + shortcuts + button-state refresh).
@@ -324,27 +324,34 @@ class MainWindow(QMainWindow):
         self.dock_pages.setWidget(self.file_table)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_pages)
 
-        # Unified side panel dock (D-01, plan 09-02). The Typesetting section's
-        # body IS the existing InspectorPanel instance — identity preserved, no
-        # signal renamed (UI-04 rename reach is user-visible strings only).
+        # Unified side panel dock (D-01, plan 09-02). Sections in workflow
+        # order (D-02): Detection settings → Brush → Typesetting (Edit is
+        # appended last by plan 09-03). The Typesetting section's body IS the
+        # existing InspectorPanel instance — identity preserved, no signal
+        # renamed (UI-04 rename reach is user-visible strings only).
         self.dock_panel = QDockWidget("Panel", self)
         self.dock_panel.setObjectName("dock_panel")
         self.dock_panel.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
+        # Section bodies: the relocated ToolsPanel halves (D-03) — their
+        # signals keep their exact names and semantics.
+        self.detection_body = DetectionSettingsBody()
+        self.brush_body = BrushBody()
         self.inspector_panel = InspectorPanel()
         self.section_typesetting = CollapsibleSection(
             "Typesetting", self.inspector_panel
         )
+        self.section_detection = CollapsibleSection(
+            "Detection settings", self.detection_body
+        )
+        self.section_brush = CollapsibleSection("Brush", self.brush_body)
         self.side_panel = SidePanel()
+        self.side_panel.add_section(self.section_detection)
+        self.side_panel.add_section(self.section_brush)
         self.side_panel.add_section(self.section_typesetting)
         self.dock_panel.setWidget(self.side_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
-
-        # The ToolsPanel keeps living (undocked) until Task 2 relocates its
-        # Brush + Detection-settings bodies into the panel above — its signals
-        # are still the wiring surface for brush/masker handling.
-        self.tools_panel = ToolsPanel()
 
     def _build_central_widget(self) -> None:
         """Wrap the canvas in a central container with the tools strip (09-01).
@@ -2971,17 +2978,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- tool panel (plan 04)
     def _wire_tool_actions(self) -> None:
-        """Connect the ToolsPanel, tool shortcuts, and Clear Mask.
+        """Connect the panel bodies, tool shortcuts, and Clear Mask.
 
-        - ToolsPanel.tool_changed -> set_active_tool -> canvas.set_tool
-        - ToolsPanel.brush_size_changed -> canvas.set_brush_size
+        - BrushBody.brush_size_changed -> canvas.set_brush_size
         - QShortcuts B/R/L/E/V (UI-SPEC §Keyboard) map to the 5 tools.
         - Clear Mask -> canvas.clear_mask (with the UI-SPEC confirmation in a
           follow-up; plan 04 wires the action, the destructive confirmation is
           part of the same flow).
         """
-        self.tools_panel.tool_changed.connect(self.set_active_tool)
-        self.tools_panel.brush_size_changed.connect(self.canvas.set_brush_size)
+        self.brush_body.brush_size_changed.connect(self.canvas.set_brush_size)
         # Plan 05-07: the canvas Crop tool's Enter-apply signal funnels into
         # the shared crop apply path (_apply_crop -> _apply_geometry_op).
         self.canvas.crop_committed.connect(self._on_crop_committed)
@@ -3013,18 +3018,20 @@ class MainWindow(QMainWindow):
         # Clear Mask (plan 04) — wired to the canvas.
         self.action_clear_mask.triggered.connect(self._on_clear_mask)
 
-        # Phase 8 detection-settings wiring (plan 08-05): the dock section
+        # Phase 8 detection-settings wiring (plan 08-05): the section
         # persists through the profile INI (D-10) + the QSettings view-state
-        # (A7/A8). The four signals -> commit handlers below.
-        self.tools_panel.detect_boxes_changed.connect(self._on_detect_boxes_changed)
+        # (A7/A8). The four signals -> commit handlers below. Plan 09-02: the
+        # emitting object is the DetectionSettingsBody inside the unified
+        # panel's "Detection settings" section (signal names unchanged).
+        self.detection_body.detect_boxes_changed.connect(self._on_detect_boxes_changed)
         self.action_detect_boxes_mode.toggled.connect(
             self._on_action_detect_boxes_toggled
         )
-        self.tools_panel.dilation_changed.connect(self._on_dilation_changed)
-        self.tools_panel.std_dev_threshold_changed.connect(
+        self.detection_body.dilation_changed.connect(self._on_dilation_changed)
+        self.detection_body.std_dev_threshold_changed.connect(
             self._on_std_dev_threshold_changed
         )
-        self.tools_panel.masker_params_changed.connect(self._on_masker_params_changed)
+        self.detection_body.masker_params_changed.connect(self._on_masker_params_changed)
 
         # Startup population (D-10 + RESEARCH §4.1, delivered by 08-01): render
         # the persisted profile masker values + the persisted Detect Boxes
@@ -3034,7 +3041,7 @@ class MainWindow(QMainWindow):
         was = self.action_detect_boxes_mode.blockSignals(True)
         self.action_detect_boxes_mode.setChecked(detect_boxes)
         self.action_detect_boxes_mode.blockSignals(was)
-        self.tools_panel.set_masker_values(
+        self.detection_body.set_masker_values(
             self.profile_manager.config.current_profile.masker, detect_boxes
         )
 
@@ -3078,16 +3085,16 @@ class MainWindow(QMainWindow):
         self._settings().setValue("detectBoxesMode", checked)
 
     def _on_action_detect_boxes_toggled(self, checked: bool) -> None:
-        """Action toggled (the state-holder path) -> re-populate the dock
+        """Action toggled (the state-holder path) -> re-populate the section
         checkbox with blockSignals so no feedback loop fires.
 
         The action is no longer user-reachable (removed from the Tools menu),
         but programmatic toggles (e.g. tests, future restores) must keep the
-        dock checkbox in sync.
+        Detection-settings checkbox in sync.
         """
-        was = self.tools_panel.detect_checkbox.blockSignals(True)
-        self.tools_panel.detect_checkbox.setChecked(checked)
-        self.tools_panel.detect_checkbox.blockSignals(was)
+        was = self.detection_body.detect_checkbox.blockSignals(True)
+        self.detection_body.detect_checkbox.setChecked(checked)
+        self.detection_body.detect_checkbox.blockSignals(was)
 
     def _on_dilation_changed(self, value: int) -> None:
         """Dilation radius changed (LIVE parameter) -> persist + re-dilate.
@@ -3225,7 +3232,7 @@ class MainWindow(QMainWindow):
         reader result setattrs directly.
         """
         profile = self.profile_manager.config.current_profile
-        for key, value in self.tools_panel.masker_values().items():
+        for key, value in self.detection_body.masker_values().items():
             setattr(profile.masker, key, value)
         self._save_masker_profile()
 
@@ -4295,12 +4302,13 @@ class MainWindow(QMainWindow):
         )
 
     def set_active_tool(self, tool: ToolMode) -> None:
-        """Activate ``tool`` everywhere: ToolsPanel, tools strip, and canvas.
+        """Activate ``tool`` everywhere: tools strip and canvas.
 
-        Keeps the Tools dock, the vertical ToolsStrip, and the canvas in sync
-        so a tool selected via menu, shortcut, strip button, or panel-button
-        is reflected in all of them (UI-SPEC surface 6; plan 09-01 moves the
-        strip buttons' highlight here from the old top toolbar).
+        Keeps the vertical ToolsStrip and the canvas in sync so a tool
+        selected via menu, shortcut, or strip button is reflected in all of
+        them (UI-SPEC surface 6; plan 09-01 moves the strip buttons'
+        highlight here from the old top toolbar). Plan 09-02 removed the
+        panel's tool row (D-03) — the strip is the single button home.
 
         The six WINDOW tool actions (``action_tool_*``) are standalone
         checkable actions — deliberately outside the strip's exclusive
@@ -4311,12 +4319,8 @@ class MainWindow(QMainWindow):
         its default actions, so the strip follows.
         """
         self.canvas.set_tool(tool)
-        # Sync the ToolsPanel (its actions drive the dock highlight) without
-        # re-emitting tool_changed (the canvas is already updated). Plan 09-01:
-        # the vertical strip's own actions are synced the same way (both calls
-        # block their actions' signals — zero extra emissions; the panel call
-        # is removed by plan 09-02 when the panel loses its tool row).
-        self.tools_panel.set_active_tool(tool)
+        # Sync the vertical strip's own actions without re-emitting
+        # tool_changed (the canvas is already updated; signals blocked).
         self.tools_strip.set_active_tool(tool)
         # Sync the six window tool actions explicitly: check the matching
         # action and uncheck the other five (signals blocked — the group no

@@ -930,12 +930,12 @@ def test_dilation_live_redilate_grows_shrinks_keeps_strokes(qtbot, tmp_path) -> 
     _seed_manual_stroke(window)
 
     # First emit: radius 5 -> the full-heatmap auto layer GROWS.
-    window.tools_panel.dilation_changed.emit(5)
+    window.detection_body.dilation_changed.emit(5)
     auto1 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
     assert auto1 > auto0, "raising the radius must re-dilate the retained raw"
 
     # Second emit: radius 0 -> it SHRINKS back (grow no-op -> the raw only).
-    window.tools_panel.dilation_changed.emit(0)
+    window.detection_body.dilation_changed.emit(0)
     auto2 = np.count_nonzero(mask_to_numpy_binary(window.canvas.get_mask()))
     assert auto2 < auto1, "dropping the radius to 0 must shrink the auto plane"
 
@@ -969,7 +969,7 @@ def test_dilation_live_redilate_mode_on_rederives(qtbot, tmp_path) -> None:
     with patch.object(
         MainWindow, "_rederive_auto_layer", wraps=window._rederive_auto_layer
     ) as spy:
-        window.tools_panel.dilation_changed.emit(5)
+        window.detection_body.dilation_changed.emit(5)
     spy.assert_called_once()
     raw = unpack_binary(window.image_files[0].raw_detected_mask, 80, 120)
     boxes = [it.pagebox for it in window.canvas._box_items]
@@ -1007,7 +1007,7 @@ def test_threshold_live_regate_flips_border_and_composite(qtbot, tmp_path) -> No
     assert composite[10:30, 90:110].any(), "high-std box must be in auto at default"
 
     # 100.0: threshold high, high-std (30) <=100 -> will_fill (solid but in fill plane, auto empty) (D-01 inverted)
-    window.tools_panel.std_dev_threshold_changed.emit(100.0)
+    window.detection_body.std_dev_threshold_changed.emit(100.0)
     assert item.pagebox.std_dev == std_before, (
         "threshold change must NOT re-fit — the stored std stays (D-12)"
     )
@@ -1022,7 +1022,7 @@ def test_threshold_live_regate_flips_border_and_composite(qtbot, tmp_path) -> No
     assert fill_bin[10:30, 90:110].any(), "will_fill box must be in fill plane"
 
     # 0.0: threshold low, high-std 30 >0 -> will_inpaint again (solid, in auto)
-    window.tools_panel.std_dev_threshold_changed.emit(0.0)
+    window.detection_body.std_dev_threshold_changed.emit(0.0)
     assert item.pagebox.std_dev == std_before
     assert item.pagebox.inpaint_state(0.0) == "will_inpaint"
     assert item.pen().style() == Qt.PenStyle.SolidLine
@@ -1039,7 +1039,7 @@ def test_dilation_no_raw_is_silent_noop(qtbot, tmp_path) -> None:
     profile = window.profile_manager.config.current_profile
     profile.masker.mask_dilation_radius = 7  # a state that must NOT re-derive
 
-    window.tools_panel.dilation_changed.emit(9)
+    window.detection_body.dilation_changed.emit(9)
 
     assert np.array_equal(
         mask_to_numpy_binary(window.canvas.get_mask()), mask_before
@@ -1109,7 +1109,7 @@ def test_mas_save_roundtrip_restores_planes_without_detect(
     # grows with r — proving the raw plane survived the restore.)
     window2.action_detect_boxes_mode.setChecked(False)
     before = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))
-    window2.tools_panel.dilation_changed.emit(8)
+    window2.detection_body.dilation_changed.emit(8)
     after = np.count_nonzero(mask_to_numpy_binary(window2.canvas.get_mask()))
     assert after > before, "post-load dilation must re-dilate from the raw plane"
 

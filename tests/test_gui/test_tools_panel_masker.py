@@ -17,13 +17,13 @@ from PySide6.QtWidgets import QSpinBox  # noqa: E402
 
 from panelcleaner.config import MaskerConfig  # noqa: E402
 
-from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
+from manga_ai_studio.gui.tools_panel import DetectionSettingsBody  # noqa: E402
 
 
 @pytest.mark.gui
 def test_max_inpaint_spin_exists_with_correct_range_and_tooltip(qtbot) -> None:
     """Max inpaint spin: 512..8192, default 2048, suffix px, tooltip."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     assert hasattr(panel, "max_inpaint_spin")
     spin = panel.max_inpaint_spin
@@ -39,7 +39,7 @@ def test_max_inpaint_spin_exists_with_correct_range_and_tooltip(qtbot) -> None:
 @pytest.mark.gui
 def test_threshold_tooltip_inverted(qtbot) -> None:
     """Std-dev threshold tooltip must contain inverted copy (color-filled / AI-inpainted)."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     tip = panel.std_dev_threshold_spin.toolTip()
     assert "color-filled" in tip
@@ -51,7 +51,7 @@ def test_threshold_tooltip_inverted(qtbot) -> None:
 @pytest.mark.gui
 def test_masker_values_includes_max_inpaint_resolution(qtbot) -> None:
     """masker_values includes max_inpaint_resolution from the spin."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     panel.max_inpaint_spin.setValue(3000)
     vals = panel.masker_values()
@@ -62,7 +62,7 @@ def test_masker_values_includes_max_inpaint_resolution(qtbot) -> None:
 @pytest.mark.gui
 def test_set_masker_values_restores_with_blocksignals(qtbot) -> None:
     """set_masker_values restores max_inpaint_resolution with blockSignals (no re-emit)."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     spy = Mock()
     panel.masker_params_changed.connect(spy)
@@ -81,7 +81,7 @@ def test_set_masker_values_restores_with_blocksignals(qtbot) -> None:
 @pytest.mark.gui
 def test_set_masker_values_fallback_to_2048_when_missing(qtbot) -> None:
     """Legacy masker_conf without max_inpaint_resolution falls back to 2048."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     # Create a conf and delete the attribute to simulate legacy INI
     mc = MaskerConfig()
@@ -105,7 +105,7 @@ def test_set_masker_values_fallback_to_2048_when_missing(qtbot) -> None:
 @pytest.mark.gui
 def test_max_inpaint_spin_reachable_in_tab_chain(qtbot) -> None:
     """Max inpaint spin is focusable and reachable via Tab chain."""
-    panel = ToolsPanel()
+    panel = DetectionSettingsBody()
     qtbot.addWidget(panel)
     chain: list = []
     cur = panel

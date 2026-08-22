@@ -40,7 +40,7 @@ from manga_ai_studio.gui.canvas import (  # noqa: E402
 )
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 from manga_ai_studio.gui.side_panel import SidePanel  # noqa: E402
-from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
+from manga_ai_studio.gui.tools_panel import BrushBody  # noqa: E402
 
 
 def _solid_pixmap(size: int, color: QColor) -> QPixmap:
@@ -354,68 +354,38 @@ def test_preview_path_keeps_empty_state_hidden(qtbot) -> None:
     assert canvas.get_image_numpy().shape[:2] == (100, 100)
 
 
-# --- ToolsPanel tests ---
+# --- BrushBody tests (the panel's Brush section body — plan 09-02) ---
+# The tool-row exclusivity tests moved with the row: tests/test_gui_tools_strip.py
+# owns the 6-action exclusive group + single-emission contract since plan 09-01.
 
-def test_tools_panel_tool_group_exclusive(qtbot) -> None:
-    """ToolsPanel exposes 6 exclusive checkable actions; checking one unchecks others."""
-    panel = ToolsPanel()
-    qtbot.addWidget(panel)
-
-    # 6 actions in the group (Crop is the 6th — D-11, plan 05-07), all
-    # checkable.
-    actions = panel.tool_group.actions()
-    assert len(actions) == 6
-    assert panel.tool_group.isExclusive()
-    for act in actions:
-        assert act.isCheckable()
-
-    # Move is checked initially (default tool).
-    assert panel.action_move.isChecked()
-    assert panel.active_tool() == ToolMode.MOVE
-
-    # Checking Brush unchecks Move and emits tool_changed(BRUSH).
-    with qtbot.waitSignal(panel.tool_changed, timeout=1000) as blocker:
-        panel.action_brush.setChecked(True)
-    assert blocker.args == [ToolMode.BRUSH]
-    assert not panel.action_move.isChecked()
-    assert panel.active_tool() == ToolMode.BRUSH
-
-    # Checking Crop (the 6th tool) unchecks Brush and emits tool_changed(CROP).
-    with qtbot.waitSignal(panel.tool_changed, timeout=1000) as blocker:
-        panel.action_crop.setChecked(True)
-    assert blocker.args == [ToolMode.CROP]
-    assert not panel.action_brush.isChecked()
-    assert panel.active_tool() == ToolMode.CROP
-
-
-def test_tools_panel_brush_slider_spinbox_sync(qtbot) -> None:
+def test_brush_body_slider_spinbox_sync(qtbot) -> None:
     """Slider <-> spinbox stay in sync; label updates; brush_size_changed fires."""
-    panel = ToolsPanel()
-    qtbot.addWidget(panel)
+    body = BrushBody()
+    qtbot.addWidget(body)
 
-    with qtbot.waitSignal(panel.brush_size_changed, timeout=1000) as blocker:
-        panel.brush_slider.setValue(73)
+    with qtbot.waitSignal(body.brush_size_changed, timeout=1000) as blocker:
+        body.brush_slider.setValue(73)
     assert blocker.args == [73]
-    assert panel.brush_spinbox.value() == 73
-    assert "73 px" in panel.brush_label.text()
+    assert body.brush_spinbox.value() == 73
+    assert "73 px" in body.brush_label.text()
 
     # Spinbox -> slider sync.
-    with qtbot.waitSignal(panel.brush_size_changed, timeout=1000) as blocker:
-        panel.brush_spinbox.setValue(150)
+    with qtbot.waitSignal(body.brush_size_changed, timeout=1000) as blocker:
+        body.brush_spinbox.setValue(150)
     assert blocker.args == [150]
-    assert panel.brush_slider.value() == 150
-    assert "150 px" in panel.brush_label.text()
+    assert body.brush_slider.value() == 150
+    assert "150 px" in body.brush_label.text()
 
 
-def test_tools_panel_brush_range_clamped(qtbot) -> None:
+def test_brush_body_range_clamped(qtbot) -> None:
     """The spinbox/slider enforce [1, 300] (setMinimum/setMaximum)."""
-    panel = ToolsPanel()
-    qtbot.addWidget(panel)
-    assert panel.brush_slider.minimum() == 1
-    assert panel.brush_slider.maximum() == 300
-    assert panel.brush_spinbox.minimum() == 1
-    assert panel.brush_spinbox.maximum() == 300
-    assert panel.brush_slider.value() == DEFAULT_BRUSH_SIZE == 40
+    body = BrushBody()
+    qtbot.addWidget(body)
+    assert body.brush_slider.minimum() == 1
+    assert body.brush_slider.maximum() == 300
+    assert body.brush_spinbox.minimum() == 1
+    assert body.brush_spinbox.maximum() == 300
+    assert body.brush_slider.value() == DEFAULT_BRUSH_SIZE == 40
 
 
 # --- Canvas tool-dispatch tests ---
