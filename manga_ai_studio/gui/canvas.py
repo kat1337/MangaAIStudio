@@ -353,6 +353,13 @@ class EditorCanvas(QGraphicsView):
 
         # View configuration.
         self.setRenderHint(QPainter.Antialiasing)
+        # quick-260822-gnq (Bug 2): full-viewport updates. The default
+        # MinimalViewportUpdate scroll-blit path resurrects stale stroke pixels
+        # after a commit/undo when the view scrolls/zooms (phantom brush
+        # ghosts that only vanish when an unrelated repaint covers them).
+        # Correctness over blit optimization for this canvas size: every
+        # update repaints the whole viewport, so no stale blit can survive.
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         # Zoom toward cursor (adapted from image_viewer.py:56).
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -1136,7 +1143,18 @@ class EditorCanvas(QGraphicsView):
         (QColor(255,0,0,...)). The rect is centered on the cursor origin
         (setPos in mouseMoveEvent). Reimplemented patterned after
         MangaCleaner_GPU canvas.py:54-63 (D-12 reference-only).
+
+        quick-260822-gnq (Bug 3): the circle renders ONLY under the paint
+        tools (PAINT_TOOLS = BRUSH/RECTANGLE/LASSO/ERASER). Move/Pan and
+        Crop get no brush-dot cursor — the item is hidden outright, and the
+        pen/brush/rect work is skipped entirely while hidden. set_tool /
+        set_brush_size funnel through here, so visibility tracks every tool
+        switch with no extra call sites.
         """
+        visible = self.current_tool in PAINT_TOOLS
+        self.cursor_item.setVisible(visible)
+        if not visible:
+            return
         if self._effective_eraser():
             pen = QPen(QColor(0, 212, 255, 200), 1)
             brush = QBrush(QColor(0, 212, 255, 60))
