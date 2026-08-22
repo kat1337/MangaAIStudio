@@ -25,7 +25,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Refinement & Polish** - Deferred v1.1 fixes (empty-state overlay, toolbar active-tool highlight, stale hint copy, dialog typography) + full draggable curve editor replacing the Levels dialog (completed 2026-08-09)
 - [x] **Phase 7: Typesetting (TRAN-02)** - Render translated text into the page with full styling controls (font, style, size, color, alignment, effects, tategaki) (completed 2026-08-09)
 - [x] **Phase 8: Masker & Selective Inpaint** - Mask dilation radius + box-constrained std-deviation selective per-box inpaint (Phase 3 D-15 seam) with per-box visibility and override + brush-paints-under-boxes tool behavior (gaps found — awaiting gap closure) (completed 2026-08-19)
-- [ ] **Phase 9: UI Rework** - Modular side panel, inspector toggle at top, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section
+- [x] **Phase 9: UI Rework** - Modular side panel, inspector toggle at top, right-side tools toolbar, "Inspector"→"Typesetting" rename, new "Edit" section (completed 2026-08-22)
 
 ## Phase Details
 
@@ -263,7 +263,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
 | 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
 | 8. Masker & Selective Inpaint | 10/10 | Complete    | 2026-08-19 |
-| 9. UI Rework | 3/3 | In Progress|  |
+| 9. UI Rework | 3/3 | Complete    | 2026-08-22 |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
 
@@ -435,7 +435,7 @@ Plans:
   4. The former "Inspector" panel section is labeled "Typesetting"
   5. A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) previously scattered across menus/dialogs
 
-**Plans:** 3/3 plans executed
+**Plans:** 3/3 plans complete
 
 **Wave 1**
 
