@@ -957,6 +957,18 @@ class MainWindow(QMainWindow):
         # (UI-SPEC surface 7; _refresh_action_states gates this).
         self.action_inpaint.setEnabled(False)
 
+        # Fill Boxes (F) — quick task 260822-1yu: standalone median-color fill
+        # pass with NO model load / LaMa call. Shares the one-shot worker via
+        # fill_only=True.
+        self.action_fill_boxes = QAction("Fill Boxes", self)
+        self.action_fill_boxes.setShortcut(QKeySequence("F"))
+        self.action_fill_boxes.setToolTip(
+            "Fill uniform text-bubble regions with their background color"
+            " (no AI inpainting)"
+        )
+        self.action_fill_boxes.triggered.connect(self.fill_boxes)
+        self.action_fill_boxes.setEnabled(False)
+
         # Tool selection (plan 04 mask tools — wired to ToolsPanel).
         # Shortcuts are installed via QShortcut in _wire_tool_actions so they
         # don't conflict with the ToolsPanel's own action shortcuts.
@@ -1084,6 +1096,7 @@ class MainWindow(QMainWindow):
         # Detection-settings section (the single user-facing control). The
         # action lives on as the state holder only.
         tools_menu.addAction(self.action_inpaint)
+        tools_menu.addAction(self.action_fill_boxes)
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_tool_move)
         tools_menu.addAction(self.action_tool_brush)
@@ -1245,6 +1258,11 @@ class MainWindow(QMainWindow):
             page_open
             and (has_mask_content or self._has_pending_fill_work())
             and not self._op_running
+        )
+        # Fill Boxes (F): the fill-only tool needs fill work SPECIFICALLY —
+        # mask-content-only pages belong to Inpaint (C).
+        self.action_fill_boxes.setEnabled(
+            page_open and self._has_pending_fill_work() and not self._op_running
         )
         self.action_toggle_mask_overlay.setEnabled(has_mask)
         self.action_clear_mask.setEnabled(has_mask)
@@ -5061,6 +5079,93 @@ class MainWindow(QMainWindow):
         # under the cache dir so SimpleLama surfaces a meaningful path.
         return expected
 
+    def fill_boxes(self) -> None:
+        """Run ONLY the median-color fill pass (Tools -> Fill Boxes, F).
+
+        Quick task 260822-1yu: standalone filler for text-only pages. Mirrors
+        the extraction half of :meth:`inpaint` but passes NO model — the
+        worker runs with ``fill_only=True``, which skips model.load entirely
+        and zeroes the inpaint plane so LaMa is never invoked. Results land
+        through the same finish handler (image apply + bbox undo entry +
+        "Fill complete · N filled" status).
+        """
+        if self._op_running:
+            return
+        path = self.file_table.current_path()
+        if path is None:
+            return
+        # Gate: avoid a pointless undo-entry-producing no-op. Proceed only
+        # when fill work is pending OR manual strokes exist (the worker's
+        # fill pass ignores manual strokes, but keep parity with inpaint()'s
+        # permissive pre-check).
+        if not self._has_pending_fill_work():
+            manual_has = False
+            try:
+                if (
+                    self.canvas._mask_manual is not None
+                    and not self.canvas._mask_manual.isNull()
+                ):
+                    manual_has = bool(
+                        np.any(mask_to_numpy_binary(self.canvas._mask_manual))
+                    )
+            except Exception:
+                manual_has = False
+            if not manual_has:
+                return
+
+        image_rgb = self.canvas.get_image_numpy()
+        if image_rgb is None:
+            return
+        boxes_snapshot = self.canvas.boxes_snapshot()
+        h, w = image_rgb.shape[:2]
+        try:
+            if self.canvas._mask_manual is not None and not self.canvas._mask_manual.isNull():
+                manual_bin = mask_to_numpy_binary(self.canvas._mask_manual).copy()
+            else:
+                manual_bin = np.zeros((h, w), dtype=np.uint8)
+        except Exception:
+            manual_bin = np.zeros((h, w), dtype=np.uint8)
+        try:
+            if self.canvas._mask_erase is not None and not self.canvas._mask_erase.isNull():
+                erase_bin = mask_to_numpy_binary(self.canvas._mask_erase).copy()
+            else:
+                erase_bin = np.zeros((h, w), dtype=np.uint8)
+        except Exception:
+            erase_bin = np.zeros((h, w), dtype=np.uint8)
+        # Max size cap from profile (D-05) — same clamp as inpaint().
+        try:
+            max_res = int(self.profile_manager.config.current_profile.masker.max_inpaint_resolution)
+        except Exception:
+            max_res = 2048
+        max_res = max(512, min(8192, max_res))
+
+        # NO model resolution / backend factory — fill never touches a model.
+        worker = Worker(
+            self._run_inpaint_task,
+            image_rgb,
+            boxes_snapshot,
+            manual_bin,
+            erase_bin,
+            (max_res, max_res),
+            None,
+            None,
+            True,  # fill_only
+        )
+        worker.signals.progress.connect(self._on_inpaint_progress)
+        worker.signals.result.connect(self._on_inpaint_finished)
+        worker.signals.error.connect(self._on_inpaint_error)
+        worker.signals.finished.connect(self._on_inpaint_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Filling… 0%")
+        QThreadPool.globalInstance().start(worker)
+
     def inpaint(self) -> None:
         """Run LaMa inpainting on the current page + mask (Tools -> Inpaint, C).
 
@@ -5182,9 +5287,10 @@ class MainWindow(QMainWindow):
         boxes_snapshot_or_mask: list | np.ndarray,
         manual_bin_or_path: np.ndarray | Path | None = None,
         erase_bin_or_model: np.ndarray | object | None = None,
-        max_size_or_progress=None,
+        max_size=None,
         model_path=None,
         model=None,
+        fill_only: bool = False,
         progress_callback=None,
         abort_flag=None,
     ) -> dict:
@@ -5217,19 +5323,19 @@ class MainWindow(QMainWindow):
             mask_binary = boxes_snapshot_or_mask  # type: ignore[assignment]
             legacy_model_path = manual_bin_or_path  # type: ignore[assignment]
             legacy_model = erase_bin_or_model
-            legacy_progress = max_size_or_progress
+            legacy_progress = max_size
             # abort may be in model_path slot if called via Worker auto-injection
             if isinstance(model_path, object) and hasattr(model_path, "emit"):
                 legacy_progress = model_path  # type: ignore
                 legacy_abort = model
             else:
                 legacy_abort = progress_callback
-                legacy_progress = max_size_or_progress
+                legacy_progress = max_size
             if legacy_progress is not None and hasattr(legacy_progress, "emit"):
                 progress_callback = legacy_progress  # type: ignore
                 abort_flag = legacy_abort  # type: ignore
             else:
-                progress_callback = max_size_or_progress if hasattr(max_size_or_progress, "emit") else None
+                progress_callback = max_size if hasattr(max_size, "emit") else None
                 abort_flag = model_path if hasattr(model_path, "get") else None
             if progress_callback is not None:
                 try:
@@ -5255,7 +5361,8 @@ class MainWindow(QMainWindow):
         boxes_snapshot = boxes_snapshot_or_mask  # type: ignore[assignment]
         manual_bin = manual_bin_or_path  # type: ignore[assignment]
         erase_bin = erase_bin_or_model  # type: ignore[assignment]
-        max_size = max_size_or_progress  # type: ignore[assignment]
+        # max_size already bound to the parameter (renamed from the old
+        # max_size_or_progress slot; Worker injects progress/abort by keyword).
         # Detect auto-injected Worker progress/abort mangling: if model_path is actually progress_callback
         if hasattr(model_path, "emit") and model is None:
             # Worker injected progress as model_path, real model_path is in max_size slot?
@@ -5337,6 +5444,13 @@ class MainWindow(QMainWindow):
         # Ensure uint8
         inpaint_binary = inpaint_binary.astype(np.uint8)
 
+        # Quick task 260822-1yu: fill-only run — zero the inpaint plane AFTER
+        # normal composition so every downstream has_inpaint/count branch
+        # treats this as a pure fill pass. The caller passes model=None;
+        # model.load below is skipped entirely.
+        if fill_only:
+            inpaint_binary = np.zeros((h, w), dtype=np.uint8)
+
         # Counts
         fill_count = len(fill_specs)
         # inpaint_count: auto contributing boxes + manual
@@ -5404,15 +5518,17 @@ class MainWindow(QMainWindow):
 
         if progress_callback is not None:
             try:
-                progress_callback.emit((20, "Loading model\u2026"))
+                progress_callback.emit((20, "Loading model…"))
             except Exception:
                 pass
-        # Load model once
-        try:
-            model.load(model_path)  # type: ignore[union-attr]
-        except Exception:
-            # If load fails, still try to proceed for fake models that may not need file
-            pass
+        # Load model once (skipped entirely on fill-only runs — no model is
+        # passed and none may exist).
+        if not fill_only:
+            try:
+                model.load(model_path)  # type: ignore[union-attr]
+            except Exception:
+                # If load fails, still try to proceed for fake models that may not need file
+                pass
 
         has_inpaint = bool(np.count_nonzero(inpaint_binary))
         if not has_inpaint:
@@ -5435,7 +5551,7 @@ class MainWindow(QMainWindow):
                         bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
             except Exception:
                 bbox = None
-            return {"image": result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count, "patch_count": 0}
+            return {"image": result_rgb, "bbox": bbox, "fill_count": fill_count, "inpaint_count": inpaint_count, "patch_count": 0, **({"mode": "fill_only"} if fill_only else {})}
 
         # Has inpaint: run inpaint_patches with one-patch-live ordering
         # Progress wrapper: 50 + 40*n//total
@@ -5700,16 +5816,19 @@ class MainWindow(QMainWindow):
         except Exception:
             patch_suffix = ""
         # Final status construction per spec: Inpaint finish status contains both fill and inpaint counts and, when patched, patch count N
+        # Quick task 260822-1yu: fill-only runs report a "Fill complete" prefix.
+        is_fill_only = isinstance(result, dict) and result.get("mode") == "fill_only"
+        complete_prefix = "Fill complete" if is_fill_only else "Inpainting complete"
         if isinstance(fill_cnt, int) and isinstance(inpaint_cnt, int):
             if fill_cnt > 0 and inpaint_cnt > 0:
-                base = f"Inpainting complete · {fill_cnt} filled · {inpaint_cnt} inpainted"
+                base = f"{complete_prefix} · {fill_cnt} filled · {inpaint_cnt} inpainted"
             elif fill_cnt > 0:
-                base = f"Inpainting complete · {fill_cnt} filled"
+                base = f"{complete_prefix} · {fill_cnt} filled"
             elif inpaint_cnt > 0:
-                base = f"Inpainting complete · {inpaint_cnt} inpainted"
+                base = f"{complete_prefix} · {inpaint_cnt} inpainted"
             else:
                 # No fill nor inpaint? Fallback to generic
-                base = "Inpainting complete"
+                base = complete_prefix
             # Also include legacy "filled"/"inpainted" both for test that checks both words
             # Test asserts "fill" in status.lower() and "inpaint" in status.lower() when both >0
             self.status_bar_left.setText(base + patch_suffix)
