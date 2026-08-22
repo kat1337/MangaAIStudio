@@ -40,6 +40,16 @@ from manga_ai_studio.core.mask_editor import ToolMode
 # package reach QIcon (threat T-09a-01).
 _ICONS = Path(__file__).parent / "assets" / "icons"
 
+# Bundled SVG stem per tool mode (all under _ICONS).
+_TOOL_ICONS: dict[ToolMode, str] = {
+    ToolMode.MOVE: "move",
+    ToolMode.BRUSH: "brush",
+    ToolMode.RECTANGLE: "rectangle",
+    ToolMode.LASSO: "lasso",
+    ToolMode.ERASER: "eraser",
+    ToolMode.CROP: "crop",
+}
+
 # Strip button geometry (09-UI-SPEC §Spacing exceptions): 44px strip width,
 # 36×36 square hit targets, 20px icon render size.
 _STRIP_WIDTH = 44
@@ -154,7 +164,9 @@ class ToolsStrip(QToolBar):
         for act in self._action_to_tool:
             act.toggled.connect(self._on_action_toggled)
 
-        # ---- Buttons: 6 checkable tool buttons (icon-only) ----
+        # ---- Buttons: 6 checkable tool buttons (icon-only, D-06) ----
+        # The icons live on the strip-owned actions (see _make_tool_action);
+        # the buttons inherit them via setDefaultAction.
         for action in (
             self.action_move,
             self.action_brush,
@@ -167,8 +179,6 @@ class ToolsStrip(QToolBar):
             btn.setDefaultAction(action)
             btn.setCheckable(True)
             btn.setFixedSize(_BTN_SIZE, _BTN_SIZE)
-            # Icon-only (D-06): the default action's tooltip (name + shortcut)
-            # carries the label until icons land (plan 09-01 Task 2).
             self.addWidget(btn)
 
         # ---- D-04 divider between the tool group and Detect/Inpaint ----
@@ -178,19 +188,35 @@ class ToolsStrip(QToolBar):
         # the WINDOW actions, so enablement/running-state gating from
         # _refresh_action_states follows automatically (default-action
         # tracking — no manual gating mirrors).
+        #
+        # The window actions are shared state holders (Tools menu) — their
+        # icons must stay null (icons cover the strip only). Because a
+        # default-action button re-syncs its icon FROM the action on every
+        # action change (enabled/disabled flips included), each button
+        # re-asserts its bundled icon on the action's `changed` signal.
         self.btn_detect = QToolButton(self)
         self.btn_detect.setDefaultAction(action_detect_text)
         self.btn_detect.setFixedSize(_BTN_SIZE, _BTN_SIZE)
-        self.btn_detect.setIcon(_icon("detect-text"))
+        self._bind_shared_action_icon(self.btn_detect, "detect-text")
         self.addWidget(self.btn_detect)
 
         self.btn_inpaint = QToolButton(self)
         self.btn_inpaint.setDefaultAction(action_inpaint)
         self.btn_inpaint.setFixedSize(_BTN_SIZE, _BTN_SIZE)
-        self.btn_inpaint.setIcon(_icon("inpaint"))
+        self._bind_shared_action_icon(self.btn_inpaint, "inpaint")
         self.addWidget(self.btn_inpaint)
 
         self.setStyleSheet(_STRIP_QSS)
+
+    def _bind_shared_action_icon(self, btn: QToolButton, name: str) -> None:
+        """Keep ``btn``'s bundled icon across the mirrored action's changes.
+
+        QIcon re-assertion is idempotent (same module-relative path); the
+        connected lambda never mutates the shared window action itself.
+        """
+        icon = _icon(name)
+        btn.setIcon(icon)
+        btn.defaultAction().changed.connect(lambda btn=btn, icon=icon: btn.setIcon(icon))
 
     # ------------------------------------------------------------- tool row
     def _make_tool_action(
@@ -207,6 +233,12 @@ class ToolsStrip(QToolBar):
         act.setCheckable(True)
         act.setChecked(checked)
         act.setData(tool)
+        # D-06: the icon lives ON the action (strip-private, rendered nowhere
+        # else). A QToolButton bound via setDefaultAction re-syncs its icon
+        # FROM the action whenever the action changes state (e.g. is
+        # disabled) — a button-side-only icon would be wiped to null by that
+        # sync, so the action itself must carry it.
+        act.setIcon(_icon(_TOOL_ICONS[tool]))
         self.tool_group.addAction(act)
         return act
 

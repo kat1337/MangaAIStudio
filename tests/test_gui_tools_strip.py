@@ -222,3 +222,58 @@ def test_detect_inpaint_buttons_mirror_window_actions(qtbot, tmp_path) -> None:
     # Fresh window: no page open -> both disabled (inherited gating).
     assert window.action_detect_text.isEnabled() is False
     assert window.action_inpaint.isEnabled() is False
+
+
+# ---------------------------------------------------------------------------
+# D-06 icon assets: 8 bundled module-relative SVGs, non-null QIcon
+# ---------------------------------------------------------------------------
+
+_ICON_NAMES = [
+    "move",
+    "brush",
+    "rectangle",
+    "lasso",
+    "eraser",
+    "crop",
+    "detect-text",
+    "inpaint",
+]
+
+
+@pytest.mark.gui
+def test_strip_icons_bundled_and_non_null(qtbot, tmp_path) -> None:
+    """All 8 buttons carry a non-null QIcon loaded from the module-relative
+    assets directory (offscreen-safe — no pixel assertions, RESEARCH A5)."""
+    from pathlib import Path
+
+    from manga_ai_studio.gui import tools_strip as ts_module
+
+    # The icon directory constant derives from the MODULE file location —
+    # never the CWD (Pitfall 6 / threat T-09a-01 path containment).
+    assert ts_module._ICONS == Path(ts_module.__file__).parent / "assets" / "icons"
+
+    for name in _ICON_NAMES:
+        path = ts_module._ICONS / f"{name}.svg"
+        assert path.is_file(), f"missing bundled icon {name}.svg"
+        assert not ts_module._icon(name).isNull(), f"null QIcon for {name}.svg"
+
+    # Every strip button renders a non-null icon.
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+    for btn in strip.findChildren(QToolButton):
+        if btn.objectName() == "qt_toolbar_ext_button":
+            continue
+        assert not btn.icon().isNull()
+
+
+def test_strip_icon_assets_art_direction(tmp_path) -> None:
+    """Each bundled SVG declares a 24x24 viewBox and strokes in #e8e8ea."""
+    import re
+
+    from manga_ai_studio.gui import tools_strip as ts_module
+
+    for name in _ICON_NAMES:
+        text = (ts_module._ICONS / f"{name}.svg").read_text(encoding="utf-8")
+        assert 'viewBox="0 0 24 24"' in text, name
+        assert "#e8e8ea" in text, name
+        assert 'fill="none"' in text, name

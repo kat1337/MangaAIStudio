@@ -51,3 +51,6 @@ packages = ["manga_ai_studio", "panelcleaner"]
 
 [tool.setuptools.package-data]
 panelcleaner = ["py.typed"]
+# Plan 09-01 (D-06): bundled strip SVG icons — keeps the assets directory out
+# of a silent drop in any future packaging pass.
+manga_ai_studio = ["gui/assets/icons/*.svg"]
