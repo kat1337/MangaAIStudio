@@ -40,8 +40,8 @@ from manga_ai_studio.gui.text_renderer import (  # noqa: E402
     qimage_to_numpy,
 )
 
-_FILL = (232, 232, 234)  # #e8e8ea — the default opaque fill
-_OUTLINE = (11, 11, 14)  # #0b0b0e — the default outline
+_FILL = (232, 232, 234)  # #e8e8ea — PINNED probe fill (the FORMER app default)
+_OUTLINE = (11, 11, 14)  # #0b0b0e — pinned outline stroke color
 _WHITE = (255, 255, 255)
 
 
@@ -128,8 +128,13 @@ def test_effects_outline_ring_horizontal(qapp) -> None:
     (an 'A' apex is a point, too thin for a reliable above-glyph probe).
     """
     rect = QRectF(0, 0, 140, 100)
-    style = TextStyle(font_size_px=48.0, auto_fit=False)
-    img_ring = _render("I", style, rect)  # outline defaults ON at 2 px
+    style = TextStyle(
+        font_size_px=48.0,
+        auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill (former default)
+        outline={"enabled": True, "color": "#0b0b0e", "width_px": 2.0},  # pinned ON
+    )
+    img_ring = _render("I", style, rect)
     img_plain = _render(
         "I", replace(style, outline={**style.outline, "enabled": False}), rect
     )
@@ -180,6 +185,7 @@ def test_effects_glow_halo(qapp) -> None:
     style = TextStyle(
         font_size_px=64.0,
         auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill (former default)
         outline={"enabled": False, "color": "#0b0b0e", "width_px": 0.0},
         glow=glow,
     )
@@ -224,6 +230,7 @@ def test_effects_shadow_offset(qapp) -> None:
     style = TextStyle(
         font_size_px=24.0,
         auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill (former default)
         outline={"enabled": False, "color": "#0b0b0e", "width_px": 0.0},
         shadow=shadow,
     )
@@ -257,6 +264,7 @@ def test_effects_padding(qapp) -> None:
     style = TextStyle(
         font_size_px=24.0,
         auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill (former default)
         outline={"enabled": True, "color": "#0b0b0e", "width_px": 2.0},
         glow={"enabled": True, "color": "#ff0000", "radius_px": 6.0, "opacity": 1.0},
         shadow={
@@ -279,6 +287,7 @@ def test_effects_padding(qapp) -> None:
     glow_style = TextStyle(
         font_size_px=64.0,
         auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill (former default)
         outline={"enabled": False, "color": "#0b0b0e", "width_px": 0.0},
         glow={"enabled": True, "color": "#ff0000", "radius_px": 6.0, "opacity": 1.0},
     )
@@ -313,6 +322,7 @@ def test_effects_allocation_bounded_degrade(qapp) -> None:
         auto_fit=False,
         align_h="left",
         align_v="top",
+        color="#e8e8ea",  # pinned probe fill (former default)
         outline={"enabled": False, "color": "#0b0b0e", "width_px": 0.0},
         glow=glow,
     )
@@ -359,8 +369,10 @@ def test_effects_vertical_composition(qapp) -> None:
         align_h="center",
         align_v="middle",
         vertical=True,
+        color="#e8e8ea",  # pinned probe fill (former default)
         shadow=shadow,
-        # outline defaults ON at 2 px #0b0b0e
+        # pinned ON — no longer inherited from the (disabled) app default
+        outline={"enabled": True, "color": "#0b0b0e", "width_px": 2.0},
     )
     rect = QRectF(0, 0, 160, 100)
     img = _render("あA", style, rect, vertical=True)

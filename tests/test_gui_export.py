@@ -297,6 +297,7 @@ def test_typeset_export_action(qtbot, tmp_path, monkeypatch) -> None:
         auto_fit=False,
         align_h="left",
         align_v="top",
+        color="#e8e8ea",  # pinned fill (former default — quick task 260822-347)
         outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
     )
     pagebox = PageBox(box=Box(2, 2, 62, 22), origin=DETECTED, payload=payload, style=style)
@@ -320,7 +321,7 @@ def test_typeset_export_action(qtbot, tmp_path, monkeypatch) -> None:
     with PILImage.open(target) as im:
         baked = np.array(im)
     # The page is a 16x16 solid (40, 80, 120); the box is (2,2,62,22).
-    fill = np.array([232, 232, 234])  # the default opaque fill (UI-SPEC A1)
+    fill = np.array([232, 232, 234])  # the pinned probe fill (former default)
     box_region = baked[2:22, 2:62]
     assert ((box_region == fill).all(axis=2)).any(), (
         "opaque fill-colored glyph pixels must exist inside the box rect"

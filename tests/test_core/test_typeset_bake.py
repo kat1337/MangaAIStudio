@@ -30,16 +30,19 @@ from manga_ai_studio.gui.text_renderer import (  # noqa: E402
 )
 from panelcleaner.structures import Box  # noqa: E402
 
-# The default fill (UI-SPEC A1) as an RGB tuple — opaque (D-01).
+# PINNED probe fill (the FORMER app default) as an RGB tuple — opaque (D-01).
 _FILL_RGB = (232, 232, 234)
-# A deterministic fixed-size style for pixel probes: outline OFF so the fill
-# pixels are observable (the default 2px outline swallows glyph interiors at
-# small sizes), left/top so the ink starts at the inner rect's top-left.
+# A deterministic fixed-size style for pixel probes: the fill is pinned to
+# #e8e8ea (not inherited from the app default, which changed to black in
+# quick task 260822-347) and outline OFF so the fill pixels are observable
+# (a 2px outline swallows glyph interiors at small sizes), left/top so the
+# ink starts at the inner rect's top-left.
 _PIXEL_STYLE = TextStyle(
     font_size_px=12.0,
     auto_fit=False,
     align_h="left",
     align_v="top",
+    color="#e8e8ea",
     outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
 )
 
@@ -95,7 +98,7 @@ def test_bake_renders_recognized_when_no_translation(qapp) -> None:
     """A box with recognized text only bakes the recognized text (D-04)."""
     page = _page(24)
     baked = bake_typeset_page(page, [_box_with_text(recognized="TRANS")])
-    # Opaque fill pixels (the default #e8e8ea) exist inside the box rect.
+    # Opaque fill pixels (the pinned probe fill #e8e8ea) exist inside the box rect.
     region = baked[2:22, 2:62]
     assert ((region == _FILL_RGB).all(axis=2)).any(), (
         "opaque fill-colored glyph pixels must exist inside the box rect"

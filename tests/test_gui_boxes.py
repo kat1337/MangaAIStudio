@@ -1130,7 +1130,8 @@ def test_text_overlay_renders_literal_plain_text(qtbot) -> None:
 @pytest.mark.gui
 def test_text_overlay_renders_through_shared_renderer(qtbot) -> None:
     """The overlay renders through the SHARED renderer (layout + pixmap cache)
-    with the flat per-box TextStyle (default outline 2px scene px — D-01/D-14)."""
+    with the flat per-box TextStyle (default: black fill, outline disabled —
+    quick task 260822-347)."""
     from manga_ai_studio.core.text_style import TextStyle
 
     pb = _pagebox_with_text(recognized="hello")
@@ -1140,10 +1141,10 @@ def test_text_overlay_renders_through_shared_renderer(qtbot) -> None:
     assert item._text_overlay.layout_result is not None
     assert item._text_overlay.layout_result.text == "hello"
     assert item._text_overlay.pixmap() is not None
-    # The flat style default: 2px scene-px outline (the 2/zoom viewport
-    # outline is superseded — the width is the style's scene-px width).
+    # The flat style defaults: black fill; the 2px stroke width is retained
+    # as the enable-time default but the outline ships DISABLED.
     assert TextStyle().outline["width_px"] == 2.0
-    assert TextStyle().outline["enabled"] is True
+    assert TextStyle().outline["enabled"] is False
 
 
 @pytest.mark.gui

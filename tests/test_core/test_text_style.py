@@ -33,18 +33,19 @@ def _pagebox_with_style(style: TextStyle) -> PageBox:
 
 @pytest.mark.unit
 def test_defaults_match_ui_spec_a1() -> None:
-    """TextStyle() defaults = the Phase 4 overlay look made opaque (UI-SPEC A1)."""
+    """TextStyle() defaults = black fill, outline disabled (quick task
+    260822-347); glow/shadow defaults unchanged."""
     s = TextStyle()
     assert s.font_family == "Liberation Sans"
     assert s.bold is False
     assert s.italic is False
     assert s.font_size_px is None  # None = Auto (D-15)
     assert s.auto_fit is True
-    assert s.color == "#e8e8ea"
+    assert s.color == "#000000"
     assert s.align_h == "center"
     assert s.align_v == "middle"
     assert s.vertical is False
-    assert s.outline == {"enabled": True, "color": "#0b0b0e", "width_px": 2.0}
+    assert s.outline == {"enabled": False, "color": "#0b0b0e", "width_px": 2.0}
     assert s.glow == {"enabled": False, "color": "#e8e8ea", "radius_px": 4.0, "opacity": 0.8}
     assert s.shadow == {"enabled": False, "color": "#000000", "radius_px": 4.0, "dx": 2.0, "dy": 2.0, "opacity": 0.6}
 
@@ -149,11 +150,11 @@ def test_non_numeric_inputs_fall_back_to_defaults_without_raising() -> None:
         }
     )
     assert s.font_size_px is None
-    assert s.color == "#e8e8ea"
+    assert s.color == "#000000"
     assert s.bold is False
     assert s.auto_fit is True
     assert s.outline["width_px"] == 2.0
-    assert s.outline["enabled"] is True
+    assert s.outline["enabled"] is False
     assert s.glow["radius_px"] == 4.0
     assert s.glow["opacity"] == 0.8
 
@@ -184,7 +185,7 @@ def test_wrong_effect_key_shape_falls_back_to_defaults() -> None:
     # Partial dicts keep the untouched fields at their defaults.
     s2 = TextStyle.from_dict({"outline": {"width_px": 5.0}})
     assert s2.outline["width_px"] == 5.0
-    assert s2.outline["enabled"] is True
+    assert s2.outline["enabled"] is False
     assert s2.outline["color"] == "#0b0b0e"
 
 
@@ -218,7 +219,7 @@ def test_v5_edges_absorb_garbage_without_raising() -> None:
         }
     )
     assert isinstance(s, TextStyle)
-    assert s.color == "#e8e8ea"  # list color -> default
+    assert s.color == "#000000"  # list color -> default
     assert s.font_size_px is None  # "big" -> default (None = Auto)
     assert s.outline == TextStyle().outline  # non-dict -> whole default
     assert s.glow == TextStyle().glow  # non-dict -> whole default
