@@ -6,10 +6,13 @@ The dataclass COMPOSES on ``PageBox`` (D-14 anti-pattern — vendored
 ``Box``/``TextBlock`` stay untouched); ``PageBox.copy()`` detaches it so BOXES
 undo snapshots never alias the live style (RESEARCH Pitfall 8/1).
 
-Defaults are the Phase 4 overlay look made opaque (UI-SPEC A1): Liberation
-Sans, Auto-fit on, ``#e8e8ea`` opaque fill, 2px ``#0b0b0e`` outline, glow and
-shadow OFF, center/middle alignment, horizontal. ``font_size_px=None`` means
-Auto (D-15) — the 04-09 fit-in-box machinery governs.
+Defaults are the Phase 4 overlay look made opaque, with a black-text
+default (quick task 260822-347): Liberation Sans, Auto-fit on,
+``#000000`` opaque fill, outline DISABLED by default (the stroke's
+``#0b0b0e`` color / 2px width are retained as the enable-time defaults),
+glow and shadow OFF, center/middle alignment, horizontal.
+``font_size_px=None`` means Auto (D-15) — the 04-09 fit-in-box machinery
+governs.
 
 Serialization (``to_dict`` / ``from_dict``) is the SINGLE spelling shared by
 the persistence writers (D-07 — one dict builder under test). ``from_dict``
@@ -30,8 +33,8 @@ from dataclasses import dataclass, field
 # Defaults (UI-SPEC A1 — the Phase 4 overlay look made opaque; D-01)
 # ---------------------------------------------------------------------------
 DEFAULT_FONT_FAMILY = "Liberation Sans"
-DEFAULT_COLOR = "#e8e8ea"
-DEFAULT_OUTLINE = {"enabled": True, "color": "#0b0b0e", "width_px": 2.0}
+DEFAULT_COLOR = "#000000"
+DEFAULT_OUTLINE = {"enabled": False, "color": "#0b0b0e", "width_px": 2.0}
 DEFAULT_GLOW = {"enabled": False, "color": "#e8e8ea", "radius_px": 4.0, "opacity": 0.8}
 DEFAULT_SHADOW = {
     "enabled": False,

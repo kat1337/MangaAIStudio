@@ -326,7 +326,7 @@ def _build_document(
     doc.setDefaultTextOption(opt)
 
     font = _style_font(style, size_px)
-    fill = _valid_color(style.color, "#e8e8ea")
+    fill = _valid_color(style.color, "#000000")
     fmt = QTextCharFormat()
     fmt.setFont(font)
     fmt.setForeground(QBrush(fill))
@@ -737,7 +737,7 @@ def _paint_vertical(painter: QPainter, result: LayoutResult, style: TextStyle) -
     module docstring and the 07-01 deviation note).
     """
     font = _style_font(style, result.used_font_size_px)
-    fill = _valid_color(style.color, "#e8e8ea")
+    fill = _valid_color(style.color, "#000000")
     pen = _outline_pen(style)
     for p in result.vertical_placements:
         doc = _char_document(p["char"], font, fill, pen)
