@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-22 — Completed quick task 260822-1yu: Fix masker/filler pipeline (C key runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action)
+Last activity: 2026-08-22 — Completed quick task 260822-347: Change default text overlay style to black text without an outline
 
 ## Performance Metrics
 
@@ -375,6 +375,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260822-1yu | Fix masker/filler pipeline: C runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action (F) | 2026-08-22 | 99cec83 | [260822-1yu-fix-masker-filler-pipeline-c-key-should-](./quick/260822-1yu-fix-masker-filler-pipeline-c-key-should-/)
+| 260822-347 | Change default text overlay style to black text without an outline | 2026-08-22 | a39df29 | [260822-347-change-default-text-overlay-style-from-w](./quick/260822-347-change-default-text-overlay-style-from-w/)
 
 ## Deferred Items
 
