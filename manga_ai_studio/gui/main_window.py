@@ -948,8 +948,9 @@ class MainWindow(QMainWindow):
         self.action_inpaint = QAction("Inpaint", self)
         self.action_inpaint.setShortcut(QKeySequence("C"))
         self.action_inpaint.setToolTip(
-            "Inpaint the mask layer with LaMa (C). Hand-painted mask is always"
-            " inpainted; detected text is inpainted only inside text boxes."
+            "Clean detected text (C): uniform bubble regions are filled with"
+            " their median background color, complex regions are inpainted"
+            " with LaMa. Hand-painted mask is always inpainted."
         )
         self.action_inpaint.triggered.connect(self.inpaint)
         # Enabled iff a page is open AND a mask exists AND no async op is running
@@ -1233,11 +1234,17 @@ class MainWindow(QMainWindow):
         has_mask = self.canvas.has_mask()
         # Inpaint requires actual mask CONTENT (not just an initialized
         # transparent mask) — running LaMa on an empty mask is a wasted model
-        # load (UI-SPEC surface 7; plan 05 Task 2 behavior).
+        # load (UI-SPEC surface 7; plan 05 Task 2 behavior). Quick task
+        # 260822-1yu: on text-only pages every box routes to the FILL plane
+        # (std-dev <= threshold), the composite mask is empty, yet C must
+        # still run — the one-shot worker fills those boxes and skips LaMa.
+        # So the gate also accepts pending fill work.
         has_mask_content = self.canvas.has_mask_content()
         self.action_detect_text.setEnabled(page_open and not self._op_running)
         self.action_inpaint.setEnabled(
-            page_open and has_mask_content and not self._op_running
+            page_open
+            and (has_mask_content or self._has_pending_fill_work())
+            and not self._op_running
         )
         self.action_toggle_mask_overlay.setEnabled(has_mask)
         self.action_clear_mask.setEnabled(has_mask)
@@ -4952,6 +4959,38 @@ class MainWindow(QMainWindow):
         )
         for item in self.canvas._box_items:
             item.set_inpaint_state(item.pagebox.inpaint_state(threshold))
+
+    def _has_pending_fill_work(self) -> bool:
+        """True iff any live box would route to the FILL plane (quick 260822-1yu).
+
+        Fill-aware enablement seam: on text-only pages every box is flat
+        (std-dev <= threshold), the composite auto mask is empty, and the
+        legacy ``has_mask_content`` gate left Inpaint (C) permanently
+        disabled. This helper mirrors :meth:`refresh_box_inpaint_states`'s
+        cost class — O(boxes), pure per-item field comparison (mask getbbox +
+        ``inpaint_state`` enum compare); no numpy page-sized composition.
+
+        A box has pending fill work iff it carries mask content, a fill
+        color, and its derived state is fill-routed (``will_fill`` /
+        ``forced_fill``).
+        """
+        try:
+            threshold = float(
+                self.profile_manager.config.current_profile.masker
+                .mask_max_standard_deviation
+            )
+        except Exception:
+            threshold = 15.0
+        for item in self.canvas._box_items:
+            pb = item.pagebox
+            if pb.mask is None or pb.mask.getbbox() is None:
+                continue
+            if pb.fill_color is None:
+                continue
+            if pb.inpaint_state(threshold) not in ("will_fill", "forced_fill"):
+                continue
+            return True
+        return False
 
     # --------------------------------------------------------- inpaint (plan 05)
     def _inpainting_backend(self) -> str:
