@@ -263,7 +263,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. Refinement & Polish | 8/8 | Complete | 2026-08-09 |
 | 7. Typesetting (TRAN-02) | 12/12 | Complete | 2026-08-09 |
 | 8. Masker & Selective Inpaint | 10/10 | Complete    | 2026-08-19 |
-| 9. UI Rework | 2/3 | In Progress|  |
+| 9. UI Rework | 3/3 | In Progress|  |
 
 ### Phase 6: Refinement & Polish: deferred fixes + full curve editor
 
@@ -435,7 +435,7 @@ Plans:
   4. The former "Inspector" panel section is labeled "Typesetting"
   5. A new "Edit" panel section houses the image-editing tools (curves, crop, rotate, resize, levels) previously scattered across menus/dialogs
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans executed
 
 **Wave 1**
 
@@ -447,7 +447,7 @@ Plans:
 
 **Wave 3** *(blocked on 09-02; side_panel.py ownership)*
 
-- [ ] 09-03-PLAN.md — Edit section (6 default-action buttons) + menu slimming with zero shortcut loss (UI-05, D-08/D-09)
+- [x] 09-03-PLAN.md — Edit section (6 default-action buttons) + menu slimming with zero shortcut loss (UI-05, D-08/D-09)
 
 **UI hint**: yes
 

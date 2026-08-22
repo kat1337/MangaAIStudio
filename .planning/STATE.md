@@ -1,19 +1,20 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.2
-milestone_name: Masker & Selective Inpaint + UI Rework
 current_phase: 9
 current_phase_name: UI Rework
-status: executing
-stopped_at: Completed 09-02-PLAN.md
-last_updated: "2026-08-22T01:43:52.656Z"
+status: verifying
+stopped_at: Completed 09-03-PLAN.md — Phase 9 all plans executed, ready for verification
+last_updated: "2026-08-22T02:04:12.393Z"
 last_activity: 2026-08-21
 last_activity_desc: Phase 9 execution started
+state_head: 48917b48ebe13b615b603717b62fc6834056d81a
 progress:
   total_phases: 10
-  completed_phases: 9
+  completed_phases: 7
   total_plans: 76
-  completed_plans: 75
+  completed_plans: 76
+milestone_name: Masker & Selective Inpaint + UI Rework
 ---
 
 # Project State
@@ -29,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 
 Phase: 9 (UI Rework) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-21 — Phase 9 execution started
 
 ## Performance Metrics
@@ -130,6 +131,7 @@ Last activity: 2026-08-21 — Phase 9 execution started
 | Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate P04 | 59 min | 3 tasks | 8 files |
 | Phase 09 P01 | 27 min | 3 tasks | 13 files |
 | Phase 09 P02 | 34 min | 3 tasks | 12 files |
+| Phase 09 P03 | 14 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -323,6 +325,9 @@ Recent decisions affecting current work:
 - [Phase ?]: 09-01: set_active_tool keeps BOTH tools_panel and tools_strip sync calls (zero extra emissions; panel call removed by 09-02 with the tool row); central container built after menus because the strip mirrors action_detect_text/action_inpaint
 - [Phase ?]: 09-02: CollapsibleSection owns section chrome (divider+header); DetectionSettingsBody/BrushBody carry only control forms; self.tools_panel replaced by detection_body/brush_body with test paths updated same-commit
 - [Phase ?]: 09-02: sidePanel/*Expanded tolerant parse keeps explicit falsy set (false/0/no/off) so persisted False round-trips while malformed values fall back to expanded (T-09b-01)
+- [Phase 9]: 09-03: Edit section built in a dedicated _build_edit_section step AFTER _build_menus (construction-order constraint — the six image-op actions don't exist during _build_docks); D-02 workflow order complete
+- [Phase 9]: 09-03: D-09 menu slimming is membership-removal-only — all six image-op QActions stay constructed/wired as state holders with zero setShortcut changes; keyboard reachability test-locked
+- [Phase 9]: 09-03: EditSection binds the six live QActions via setDefaultAction (never lambdas) — enablement/tooltip/status-tip inheritance from _refresh_action_states is free and test-locked (trigger parity + gating parity)
 
 ### Roadmap Evolution
 
@@ -359,8 +364,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-22T01:43:52.621Z
-Stopped at: Completed 09-02-PLAN.md
+Last session: 2026-08-22T02:04:10.175Z
+Stopped at: Completed 09-03-PLAN.md — Phase 9 all plans executed, ready for verification
 Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
