@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
-current_phase: 08.1
-current_phase_name: inpaint-correction-oom-safe-patching-invert-the-std-dev-gate
+current_phase: 9
+current_phase_name: UI Rework
 status: executing
-stopped_at: Phase 9 UI-SPEC approved
-last_updated: "2026-08-22T00:18:17.417Z"
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-08-22T00:56:55.112Z"
 last_activity: 2026-08-21
-last_activity_desc: Completed 08.1-03 quad override UI with 5-state pens and max size
+last_activity_desc: Phase 9 execution started
 progress:
   total_phases: 10
   completed_phases: 9
   total_plans: 76
-  completed_plans: 73
+  completed_plans: 74
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-19)
 
 **Core value:** One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR, and lay out translation text — instead of switching between PanelCleaner, mokuro, and an image editor.
-**Current focus:** Phase 08.1 — inpaint-correction-oom-safe-patching-invert-the-std-dev-gate
+**Current focus:** Phase 9 — UI Rework
 
 ## Current Position
 
-Phase: 08.1 (inpaint-correction-oom-safe-patching-invert-the-std-dev-gate) — EXECUTING
-Plan: 4 of 4
+Phase: 9 (UI Rework) — EXECUTING
+Plan: 2 of 3
 Status: Ready to execute
-Last activity: 2026-08-21 — Completed 08.1-03 quad override UI with 5-state pens and max size
+Last activity: 2026-08-21 — Phase 9 execution started
 
 ## Performance Metrics
 
@@ -128,6 +128,7 @@ Last activity: 2026-08-21 — Completed 08.1-03 quad override UI with 5-state pe
 | Phase 08.1 P01 | 42 min | 3 tasks | 12 files |
 | Phase 08.1 P02 | 35 min | 2 tasks | 4 files |
 | Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate P04 | 59 min | 3 tasks | 8 files |
+| Phase 09 P01 | 27 min | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -317,6 +318,8 @@ Recent decisions affecting current work:
 - [Phase 08.1-03]: ToolsPanel max_inpaint_spin 512..8192/2048 reuses masker_params_changed plumbing for atomic Profile.safe_write and blockSignals mirror with 2048 fallback — Inverted threshold tooltip now says color-filled/AI-inpainted
 - [Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate]: Batch clean now derives fill_specs via compose_fill_specs and inpaint_binary via compose_auto_binary + manual/erase, applies headless PIL fill, then patched LaMa via inpaint_patches capped at max_size with one-patch-live and halo 5 — Closes D-09 batch-interactive parity with OOM guard
 - [Phase 08.1-inpaint-correction-oom-safe-patching-invert-the-std-dev-gate]: Wrapper signatures additive: batch_clean(masker_conf=None, max_inpaint_size=(2048,2048)) with _normalize_max_size 512..8192 fallback 2048 — Keeps existing callers working while threading max cap
+- [Phase ?]: 09-01: icons live ON the strip-owned actions (QToolButton re-syncs its icon FROM the default action on state changes, wiping button-side-only icons to null); shared window Detect/Inpaint actions stay icon-free and their strip buttons re-assert the icon on action.changed
+- [Phase ?]: 09-01: set_active_tool keeps BOTH tools_panel and tools_strip sync calls (zero extra emissions; panel call removed by 09-02 with the tool row); central container built after menus because the strip mirrors action_detect_text/action_inpaint
 
 ### Roadmap Evolution
 
@@ -353,8 +356,8 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-21T23:30:08.132Z
-Stopped at: Phase 9 UI-SPEC approved
-Resume file: .planning/phases/09-ui-rework/09-UI-SPEC.md
+Last session: 2026-08-22T00:56:55.080Z
+Stopped at: Completed 09-01-PLAN.md
+Resume file: None
 
 > **Pause note (2026-07-21, updated):** All 6 implementation waves complete and committed (110/110 tests green; all 8 requirements CLEAN-01..06 + FLOW-01..02 done). Paused by user request BEFORE the post-execution phase — code-review gate, gsd-verifier goal-check, and formal `phase.complete` have NOT yet run. The executor's tracking writes (STATE/ROADMAP/REQUIREMENTS marking 6/6 plans) reflect plan completion, but the phase is not yet GSD-verified. Next: `/gsd-execute-phase 1` resumes into post-execution (code-review → verify_phase_goal via gsd-verifier subagent → update_roadmap → routing). Expected cost: ~1 subagent spawn (verifier) + orchestrator bookkeeping, similar to one moderate wave.
