@@ -39,6 +39,7 @@ from manga_ai_studio.gui.canvas import (  # noqa: E402
     validate_image_path,
 )
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
+from manga_ai_studio.gui.side_panel import SidePanel  # noqa: E402
 from manga_ai_studio.gui.tools_panel import ToolsPanel  # noqa: E402
 
 
@@ -557,8 +558,10 @@ def test_main_window_tool_shortcuts(qtbot, tmp_path) -> None:
     window = MainWindow(pm)
     qtbot.addWidget(window)
 
-    # The Tools dock is populated with the ToolsPanel (not the placeholder).
-    assert isinstance(window.dock_tools.widget(), ToolsPanel)
+    # The unified "Panel" dock hosts the SidePanel (plan 09-02 D-01 — the
+    # tabified Tools+Inspector dock pair is gone).
+    assert isinstance(window.dock_panel.widget(), SidePanel)
+    assert window.dock_panel.windowTitle() == "Panel"
 
     # Tool actions exist and are enabled when a page is open. Without a page,
     # Move is enabled (no-op safe) and the painting tools are disabled.

@@ -90,6 +90,7 @@ from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+from manga_ai_studio.gui.side_panel import CollapsibleSection, SidePanel
 from manga_ai_studio.gui.text_renderer import (
     current_focus_text,
     layout as renderer_layout,
@@ -305,7 +306,14 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- docks
     def _build_docks(self) -> None:
-        """Build the Pages (left) and Tools (right) docks."""
+        """Build the Pages (left) and the unified Panel (right) docks (09-02).
+
+        D-01: ONE right-side dock ("Panel") hosts the SidePanel — a vertical
+        stack of independently collapsible sections in workflow order (D-02).
+        This task lands the Typesetting section (the InspectorPanel instance
+        relocated verbatim — UI-04 renames user-visible strings only); the
+        Detection-settings + Brush sections join in Task 2.
+        """
         # Pages dock -> FileTable (UI-SPEC surface 3).
         self.dock_pages = QDockWidget("Pages", self)
         self.dock_pages.setObjectName("dock_pages")
@@ -316,30 +324,27 @@ class MainWindow(QMainWindow):
         self.dock_pages.setWidget(self.file_table)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_pages)
 
-        # Tools dock -> ToolsPanel (plan 04: the 5-tool panel + brush slider).
-        self.dock_tools = QDockWidget("Tools", self)
-        self.dock_tools.setObjectName("dock_tools")
-        self.dock_tools.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.tools_panel = ToolsPanel()
-        self.dock_tools.setWidget(self.tools_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_tools)
-
-        # Inspector dock -> InspectorPanel (plan 04-04 Task 2, D-08). Tabbed
-        # with the Tools dock (UI-SPEC §18) so the two right-side docks share the
-        # right edge; the user toggles between them via the dock tab or drags to
-        # undock. The Inspector becomes active when a box is selected (the
-        # selection-follower below drives load_box on selection change).
-        self.dock_inspector = QDockWidget("Inspector", self)
-        self.dock_inspector.setObjectName("dock_inspector")
-        self.dock_inspector.setAllowedAreas(
+        # Unified side panel dock (D-01, plan 09-02). The Typesetting section's
+        # body IS the existing InspectorPanel instance — identity preserved, no
+        # signal renamed (UI-04 rename reach is user-visible strings only).
+        self.dock_panel = QDockWidget("Panel", self)
+        self.dock_panel.setObjectName("dock_panel")
+        self.dock_panel.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self.inspector_panel = InspectorPanel()
-        self.dock_inspector.setWidget(self.inspector_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_inspector)
-        self.tabifyDockWidget(self.dock_tools, self.dock_inspector)
+        self.section_typesetting = CollapsibleSection(
+            "Typesetting", self.inspector_panel
+        )
+        self.side_panel = SidePanel()
+        self.side_panel.add_section(self.section_typesetting)
+        self.dock_panel.setWidget(self.side_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
+
+        # The ToolsPanel keeps living (undocked) until Task 2 relocates its
+        # Brush + Detection-settings bodies into the panel above — its signals
+        # are still the wiring surface for brush/masker handling.
+        self.tools_panel = ToolsPanel()
 
     def _build_central_widget(self) -> None:
         """Wrap the canvas in a central container with the tools strip (09-01).
@@ -674,17 +679,15 @@ class MainWindow(QMainWindow):
         self.action_show_original.toggled.connect(self._on_show_original_toggled)
         self.action_show_original.setEnabled(False)
 
-        # Toggle Sidebar / Tools / Inspector (the docks).
+        # Toggle Sidebar / Toggle Panel (the docks). Plan 09-02 (UI-02): ONE
+        # "Toggle Panel" action replaces the old Toggle Tools/Toggle Inspector
+        # pair (both docks are gone) and drives the unified panel's BODY
+        # toggle — the dock itself stays docked.
         self.action_toggle_sidebar = QAction("Toggle Sidebar", self)
         self.action_toggle_sidebar.triggered.connect(self.dock_pages.toggleViewAction().trigger)
 
-        self.action_toggle_tools = QAction("Toggle Tools", self)
-        self.action_toggle_tools.triggered.connect(self.dock_tools.toggleViewAction().trigger)
-
-        self.action_toggle_inspector = QAction("Toggle Inspector", self)
-        self.action_toggle_inspector.triggered.connect(
-            self.dock_inspector.toggleViewAction().trigger
-        )
+        self.action_toggle_panel = QAction("Toggle Panel", self)
+        self.action_toggle_panel.triggered.connect(self._on_toggle_panel_triggered)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.action_fit_to_window)
@@ -698,8 +701,15 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.action_show_original)
         view_menu.addSeparator()
         view_menu.addAction(self.action_toggle_sidebar)
-        view_menu.addAction(self.action_toggle_tools)
-        view_menu.addAction(self.action_toggle_inspector)
+        view_menu.addAction(self.action_toggle_panel)
+
+    def _on_toggle_panel_triggered(self) -> None:
+        """View ▸ Toggle Panel: flip the side panel's BODY visibility (UI-02).
+
+        Same toggle as the panel-top chevron — the dock itself never hides
+        through this path, so QMainWindow dock state is never fought.
+        """
+        self.side_panel.set_body_visible(not self.side_panel.is_body_visible())
 
     def _build_text_menu(self) -> None:
         """Build the Text menu (UI-SPEC §Surface 1 — between View and Tools).

@@ -1,0 +1,234 @@
+"""SidePanel — the unified right-side panel of collapsible sections (plan 09-02).
+
+Phase 9 plan 09-02 (UI-01/UI-02/D-01/D-02): ONE right-side dock ("Panel")
+whose body is a vertical stack of independently collapsible
+:class:`CollapsibleSection` widgets in workflow order (Detection settings →
+Brush → Typesetting → Edit), replacing the tabified ``dock_tools`` +
+``dock_inspector`` pair.
+
+Design contracts (09-UI-SPEC §38):
+
+- **Independent collapse (UI-01):** each section is a custom header+body
+  widget — a checkable ``QToolButton`` header row (▸/▾ arrow + title, the
+  muted 12px-Semibold section-header token style) whose ``toggled`` shows or
+  hides its body via plain ``setVisible``. NO animation (QPropertyAnimation
+  on heights fights QScrollArea sizing) and NO QToolBox (single-current-item
+  semantics violate the independence requirement).
+- **Panel-body toggle (UI-02):** a chevron ``QToolButton`` at the very top of
+  the panel collapses/expands the whole scroll-area body while the dock STAYS
+  DOCKED — the toggle path never touches QMainWindow dock visibility.
+- **One scroll wrap (A11 rule carried over):** exactly ONE vertical-only
+  ``QScrollArea`` (``setWidgetResizable(True)``, horizontal scrollbar always
+  off) wraps ALL sections — never per-section scroll areas.
+
+Per-section collapse persistence (QSettings ``sidePanel/*Expanded`` keys,
+D-02) is wired by MainWindow through each section's optional ``settings_key``
+(Task 3); the chevron toggle itself is session-transient and NEVER persisted.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import (
+    QFrame,
+    QScrollArea,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+# Dark QSS for the panel chrome (UI-SPEC §Color tokens; the section-header
+# typography role: 12px/600/muted #9a9aa2, min-height 28px; dividers 1px
+# #3a3a42). Applied by BOTH classes so a standalone CollapsibleSection (tests)
+# renders identically to one inside a SidePanel.
+_PANEL_QSS = """
+QToolButton#_section_header {
+    background: transparent;
+    border: none;
+    color: #9a9aa2;
+    font-weight: 600;
+    font-size: 12px;
+    min-height: 28px;
+    padding: 4px 2px;
+    text-align: left;
+}
+QToolButton#_section_header:hover {
+    color: #e8e8ea;
+}
+QToolButton#panel_chevron {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #3a3a42;
+    color: #e8e8ea;
+    font-weight: 600;
+    font-size: 12px;
+    min-height: 26px;
+    padding: 4px 8px;
+    text-align: left;
+}
+QToolButton#panel_chevron:hover {
+    color: #00d4ff;
+}
+QFrame#_section_divider {
+    background: #3a3a42;
+    border: none;
+    max-height: 1px;
+}
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+QScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+"""
+
+# Chevron glyphs (UI-SPEC §38): ▾ expanded / ▸ collapsed. The panel title
+# rides the same button so the header row reads as one control.
+_EXPANDED_GLYPH = "\u25be"
+_COLLAPSED_GLYPH = "\u25b8"
+
+
+class CollapsibleSection(QWidget):
+    """A checkable-header section whose body collapses via plain setVisible.
+
+    Members per the plan artifact contract: ``header`` (checkable QToolButton
+    carrying "▸/▾ {title}"), ``body`` (the relocated content widget, e.g. the
+    InspectorPanel for Typesetting), and an optional ``settings_key`` that
+    Task 3's QSettings persistence writes on every user toggle.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        body: QWidget,
+        parent: QWidget | None = None,
+        settings_key: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title = title
+        self.settings_key = settings_key
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self.header = QToolButton(self)
+        self.header.setObjectName("_section_header")
+        self.header.setCheckable(True)
+        self.header.setChecked(True)  # expanded default (D-02 first run)
+        self.header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        lay.addWidget(self.header)
+
+        self.body = body
+        lay.addWidget(self.body)
+
+        # 1px #3a3a42 bottom divider per section (the _detection_divider
+        # visual language from tools_panel.py).
+        self._divider = QFrame(self)
+        self._divider.setObjectName("_section_divider")
+        self._divider.setFrameShape(QFrame.Shape.HLine)
+        self._divider.setFixedHeight(1)
+        lay.addWidget(self._divider)
+
+        self.header.toggled.connect(self._on_header_toggled)
+        self.setStyleSheet(_PANEL_QSS)
+
+        self._apply_expanded(True)
+
+    # ------------------------------------------------------------- collapse
+    def _on_header_toggled(self, checked: bool) -> None:
+        """Header toggled -> body visibility flip (+ persistence in Task 3)."""
+        self._apply_expanded(checked)
+
+    def _apply_expanded(self, expanded: bool) -> None:
+        """Render ``expanded``: arrow glyph + plain body setVisible (NO animation)."""
+        glyph = _EXPANDED_GLYPH if expanded else _COLLAPSED_GLYPH
+        self.header.setText(f"{glyph} {self.title}")
+        self.body.setVisible(expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Programmatically expand/collapse (signals delivered normally)."""
+        self.header.setChecked(expanded)
+
+
+class SidePanel(QWidget):
+    """The unified panel body: chevron header row + scroll-wrapped sections."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("side_panel")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ---- UI-02 chevron row: collapses/expands the whole scroll body ----
+        # The DOCK stays docked — this path only flips body visibility and is
+        # session-transient (never persisted; D-02 contracts per-section keys
+        # only).
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setObjectName("panel_chevron")
+        self.toggle_button.setText(f"{_EXPANDED_GLYPH} Panel")
+        self.toggle_button.setToolTip("Toggle panel")
+        self.toggle_button.setAccessibleName("Toggle panel")
+        self.toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.toggle_button.clicked.connect(self._on_toggle_clicked)
+        root.addWidget(self.toggle_button)
+
+        # ---- ONE vertical-only scroll wrap around all sections (A11 rule) —
+        # copied from tools_panel.py:149-171: widgetResizable, horizontal
+        # scrollbar permanently off, vertical as-needed, frame-less.
+        self.body_scroll = QScrollArea(self)
+        self.body_scroll.setObjectName("side_panel_body_scroll")
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.body_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        body = QWidget()
+        self.body_layout = QVBoxLayout(body)
+        # sm (8px) contents margins + sm spacing (UI-SPEC §Spacing).
+        self.body_layout.setContentsMargins(8, 8, 8, 8)
+        self.body_layout.setSpacing(8)
+        # Sections pin to the top; the stretch absorbs leftover height so the
+        # stack never stretches its last member.
+        self.body_layout.addStretch(1)
+        self.body_scroll.setWidget(body)
+        root.addWidget(self.body_scroll, 1)
+
+        self.sections: list[CollapsibleSection] = []
+        self._body_visible = True
+
+        self.setStyleSheet(_PANEL_QSS)
+
+    # -------------------------------------------------------------- sections
+    def add_section(self, section: CollapsibleSection) -> None:
+        """Append a CollapsibleSection (call order = workflow order, D-02).
+
+        The count is deliberately NOT hard-coded — plan 09-03 appends the Edit
+        section through this same API.
+        """
+        self.sections.append(section)
+        # Insert BEFORE the trailing stretch.
+        self.body_layout.insertWidget(self.body_layout.count() - 1, section)
+
+    # ------------------------------------------------------- panel-body toggle
+    def set_body_visible(self, visible: bool) -> None:
+        """Show/hide the whole scroll body (UI-02; the dock is untouched)."""
+        self._body_visible = visible
+        self.body_scroll.setVisible(visible)
+        glyph = _EXPANDED_GLYPH if visible else _COLLAPSED_GLYPH
+        self.toggle_button.setText(f"{glyph} Panel")
+
+    def is_body_visible(self) -> bool:
+        """The session-transient body toggle state."""
+        return self._body_visible
+
+    def _on_toggle_clicked(self) -> None:
+        self.set_body_visible(not self.is_body_visible())

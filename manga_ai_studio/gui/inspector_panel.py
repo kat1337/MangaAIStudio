@@ -1,8 +1,10 @@
-"""``InspectorPanel`` — the Phase 4 text-edit / metadata dock (plan 04-04 Task 2).
+"""``InspectorPanel`` — the Phase 4 text-edit / metadata panel (plan 04-04 Task 2).
 
-This is the D-08 "always-present view of both fields + metadata" — a
-``QDockWidget`` "Inspector" (instantiated + tabbed with the Tools dock in
-:meth:`MainWindow._build_docks`) whose body is this ``QWidget``. It surfaces,
+This is the D-08 "always-present view of both fields + metadata" — since plan
+09-02 it is the body of the **Typesetting** collapsible section inside the
+unified right-side "Panel" dock (built in :meth:`MainWindow._build_docks`;
+formerly the tabified "Inspector" QDockWidget — the UI-04 rename is
+user-visible strings only, the class name stays). It surfaces,
 for the currently-selected box:
 
 - **Bubble #** — a bounded ``QSpinBox`` (0..9999 — 0 is the unset sentinel,
@@ -93,7 +95,7 @@ from manga_ai_studio.core.box_model import DETECTED, USER
 from manga_ai_studio.core.text_style import TextStyle
 
 # Dark QSS for the Inspector panel (UI-SPEC §Color tokens — copied from the
-# ToolsPanel _TOOLS_QSS so the two right-side docks share a look). Adds
+# ToolsPanel _TOOLS_QSS so the panel sections share a look). Adds
 # QTextEdit styling (the ToolsPanel has no text edit) reusing the same tokens.
 # Plan 07-05 (D-05): the styling-section widgets (QFontComboBox/QComboBox/
 # QToolButton swatch/QFrame divider/section header) join the same token set —
@@ -282,7 +284,7 @@ class _CommitTextEdit(QTextEdit):
 
 
 class InspectorPanel(QWidget):
-    """The Inspector dock body — text fields + metadata + the Style section.
+    """The Typesetting section body — text fields + metadata + the Style section.
 
     Class-scope ``Signal``s carry field edits out to the MainWindow (which owns
     the pagebox mutation + the ``boxes_modified`` BOXES-stack push + the overlay
