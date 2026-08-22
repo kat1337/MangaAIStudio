@@ -1013,13 +1013,17 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- toolbar
     def _build_toolbar(self) -> None:
-        """Build the single top toolbar (UI-SPEC surface 1).
+        """Build the single top toolbar (UI-SPEC surface 1, D-07 slim-down).
 
         The toolbar's open action is Open Folder (Ctrl+Shift+O) — the
         phase-2 manga-workflow default (open a folder of pages); Open Image
-        lives in the File menu. Rest: Fit / 100% / Zoom Out / Zoom
-        In | (sep) | Toggle Mask Overlay. Other sections (Detect/Inpaint/
-        Tools/Undo) are added by their plans.
+        lives in the File menu. Final D-07 contents (plan 09-01): Open
+        Folder | Fit / 100% / Out / In | Undo · Redo | Mask Overlay toggle |
+        Preview (hold). The six tool buttons, Detect Text, and Inpaint LEFT
+        the toolbar — they live on the vertical ToolsStrip beside the canvas
+        now; the underlying QActions stay alive as the state/gating holders
+        the strip mirrors. Text-label style kept (icons on the top toolbar
+        were explicitly declined for this phase).
         """
         self.toolbar = QToolBar("Main", self)
         self.toolbar.setMovable(False)
@@ -1032,20 +1036,6 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_actual_size)
         self.toolbar.addAction(self.action_zoom_out)
         self.toolbar.addAction(self.action_zoom_in)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.action_detect_text)
-        self.toolbar.addAction(self.action_inpaint)
-        self.toolbar.addSeparator()
-        # Tool-buttons section (plan 04): checkable QToolButtons mirroring
-        # their default (window) actions — the standalone action_tool_* whose
-        # checked state set_active_tool drives explicitly, so the toolbar and
-        # dock stay in sync (WR-02, UI-SPEC surface 1 toolbar layout).
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_move))
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_brush))
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_rectangle))
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_lasso))
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_eraser))
-        self.toolbar.addWidget(self._make_tool_toolbar_button(self.action_tool_crop))
         # Surface 13 (plan 03-05): the 4-button undo toolbar collapses to 2
         # ([Undo][Redo]). Ctrl+Z pops the merged MASK/IMAGE/BOXES timeline; the
         # Phase 1 image/mask pair + inner divider are gone. Tooltips name the
@@ -4294,38 +4284,21 @@ class MainWindow(QMainWindow):
             has_page and history_ready and self.history.can_redo()
         )
 
-    def _make_tool_toolbar_button(self, action: QAction) -> QToolButton:
-        """Build a checkable toolbar tool-button bound to ``action``.
-
-        The button's checked state mirrors its DEFAULT ACTION (QToolButton
-        syncs its checkability to the action): the six window tool actions
-        are standalone checkable-actions — outside the ToolsPanel's
-        exclusive QActionGroup — whose checked state is driven explicitly by
-        ``set_active_tool``'s action-sync loop (check the matching action,
-        uncheck the other five), so the toolbar stays in sync with the Tools
-        dock on every entry path (menu, shortcut, dock click, programmatic).
-        """
-        btn = QToolButton(self.toolbar)
-        btn.setDefaultAction(action)
-        btn.setCheckable(True)
-        btn.setText(action.text())
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        return btn
-
     def set_active_tool(self, tool: ToolMode) -> None:
-        """Activate ``tool`` everywhere: ToolsPanel, toolbar, and canvas.
+        """Activate ``tool`` everywhere: ToolsPanel, tools strip, and canvas.
 
-        Keeps the Tools dock, the toolbar tool-buttons, and the canvas in sync
-        so a tool selected via menu, shortcut, or panel-button is reflected in
-        all three (UI-SPEC surface 6).
+        Keeps the Tools dock, the vertical ToolsStrip, and the canvas in sync
+        so a tool selected via menu, shortcut, strip button, or panel-button
+        is reflected in all of them (UI-SPEC surface 6; plan 09-01 moves the
+        strip buttons' highlight here from the old top toolbar).
 
         The six WINDOW tool actions (``action_tool_*``) are standalone
-        checkable actions — deliberately outside the ToolsPanel's
-        exclusive QActionGroup (WR-02: a 12-action mirrored group fought
-        itself on dock clicks). Their checked state is driven explicitly:
-        check the matching action and uncheck the other five, with signals
-        blocked so no toggled-driven re-emission happens. The toolbar
-        QToolButtons mirror their default actions, so the buttons follow.
+        checkable actions — deliberately outside the strip's exclusive
+        QActionGroup (WR-02: a mirrored multi-widget group fought itself on
+        clicks). Their checked state is driven explicitly: check the matching
+        action and uncheck the other five, with signals blocked so no
+        toggled-driven re-emission happens. The strip's own buttons mirror
+        its default actions, so the strip follows.
         """
         self.canvas.set_tool(tool)
         # Sync the ToolsPanel (its actions drive the dock highlight) without
@@ -4349,15 +4322,6 @@ class MainWindow(QMainWindow):
             was = act.blockSignals(True)
             act.setChecked(act.data() == tool)
             act.blockSignals(was)
-        # Sync the toolbar buttons: the QToolButtons mirror their default
-        # actions (the window actions just checked above). Match by data (the
-        # ToolMode stored on the action).
-        for btn in self.toolbar.findChildren(QToolButton):
-            act = btn.defaultAction()
-            if act is not None and act.data() == tool:
-                was = btn.blockSignals(True)
-                btn.setChecked(True)
-                btn.blockSignals(was)
 
     def _on_clear_mask(self) -> None:
         """Edit -> Clear Mask: clear the canvas mask (destructive, plan 04).

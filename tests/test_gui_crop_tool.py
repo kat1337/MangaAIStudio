@@ -53,6 +53,16 @@ def _window_with_page(qtbot, tmp_path, size=(60, 40)) -> MainWindow:
     return window
 
 
+def _strip_tool_buttons(window: MainWindow) -> list[QToolButton]:
+    """The strip's 8 buttons (the toolbar tool buttons left in plan 09-01)."""
+    return [
+        btn
+        for btn in window.tools_strip.findChildren(QToolButton)
+        # QToolBar auto-creates an internal extension-popup button — not ours.
+        if btn.objectName() != "qt_toolbar_ext_button"
+    ]
+
+
 def _crop_ready(window: MainWindow) -> None:
     """Activate the Crop tool at 100% zoom.
 
@@ -225,25 +235,27 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
 
 @pytest.mark.gui
 def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
-    """D-10 RED gate: toolbar tool buttons highlight the active tool on every
+    """D-10 RED gate: the strip tool buttons highlight the active tool on every
     entry path (programmatic set_active_tool, V/B/R/L/E/G shortcut, Tools-menu
-    trigger), in sync with the ToolsPanel's active tool.
+    trigger), in sync with the panel's active tool.
 
-    The six window tool actions are standalone checkable-actions
-    (``actionGroup() is None`` — NOT members of the ToolsPanel's exclusive
-    QActionGroup, which holds only the panel's own six actions): set_active_tool's
+    Plan 09-01: the buttons live on the vertical ToolsStrip beside the canvas
+    now — the top toolbar lost its tool-button section (D-07). The six window
+    tool actions are standalone checkable-actions
+    (``actionGroup() is None`` — NOT members of the strip's exclusive
+    QActionGroup, which holds only the strip's own six actions): set_active_tool's
     action-sync loop checks the matching window action explicitly and unchecks
-    the other five, and the toolbar buttons mirror their default actions, so
-    the dock + toolbar always agree (UI-SPEC surface 31 / E3). Fails on the
-    pre-fix code — a non-checkable action makes ``setChecked`` a no-op
-    (QToolButton mirrors its default action's checkable state).
+    the other five, and the strip buttons mirror their default actions, so
+    dock + strip always agree. Fails on the pre-fix code — a non-checkable
+    action makes ``setChecked`` a no-op (QToolButton mirrors its default
+    action's checkable state).
     """
     window = _window_with_page(qtbot, tmp_path)
 
     def toolbar_btn(mode: ToolMode) -> QToolButton:
         return next(
             btn
-            for btn in window.toolbar.findChildren(QToolButton)
+            for btn in _strip_tool_buttons(window)
             if btn.defaultAction() is not None
             and btn.defaultAction().data() == mode
         )
@@ -251,7 +263,7 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
     def checked_tools() -> list:
         return [
             btn.defaultAction().data()
-            for btn in window.toolbar.findChildren(QToolButton)
+            for btn in _strip_tool_buttons(window)
             if btn.defaultAction() is not None
             and btn.defaultAction().data() is not None
             and btn.isChecked()
@@ -300,23 +312,23 @@ def test_toolbar_buttons_track_active_tool(qtbot, tmp_path) -> None:
 
 @pytest.mark.gui
 def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> None:
-    """WR-02 RED gate: dock-button clicks sync dock + toolbar + window actions.
+    """WR-02 RED gate: strip-button clicks sync strip + window actions + canvas.
 
-    The dock-click path — the most common entry — flows through the panel's
-    toggled -> tool_changed -> set_active_tool chain (main_window.py:2574).
-    Before the WR-02 fix the 12-action exclusive group (6 panel + 6 window
-    mirrored actions) fought itself: after a dock Rectangle click the panel
-    action ended up UNCHECKED (the dock button loses its highlight),
-    ``active_tool()`` fell back to ToolMode.MOVE, and a SECOND dock click
-    desynced everything. This test locks the D-10 contract on the dock path,
-    including two consecutive dock clicks (probe-verified pre-fix).
+    Plan 09-01: the click path under contract now flows through the STRIP's
+    toggled -> tool_changed -> set_active_tool chain (the dock panel keeps its
+    own row until plan 09-02). Before the WR-02 fix a mirrored multi-widget
+    exclusive group fought itself: after a Rectangle click the action ended
+    up UNCHECKED (the button loses its highlight), ``active_tool()`` fell
+    back to ToolMode.MOVE, and a SECOND click desynced everything. This test
+    locks the D-10 contract on the strip path, including two consecutive
+    clicks.
     """
     window = _window_with_page(qtbot, tmp_path)
 
     def toolbar_btn(mode: ToolMode) -> QToolButton:
         return next(
             btn
-            for btn in window.toolbar.findChildren(QToolButton)
+            for btn in _strip_tool_buttons(window)
             if btn.defaultAction() is not None
             and btn.defaultAction().data() == mode
         )
@@ -324,16 +336,16 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
     def checked_tools() -> list:
         return [
             btn.defaultAction().data()
-            for btn in window.toolbar.findChildren(QToolButton)
+            for btn in _strip_tool_buttons(window)
             if btn.defaultAction() is not None
             and btn.defaultAction().data() is not None
             and btn.isChecked()
         ]
 
-    # First dock click (Rectangle): the panel action stays checked, the active
-    # tool is RECTANGLE everywhere, the window action mirrors it, and the
-    # toolbar button is checked — with no other tool checked anywhere.
-    window.tools_panel.action_rectangle.trigger()
+    # First strip click (Rectangle): the strip action stays checked, the
+    # active tool is RECTANGLE everywhere, the window action mirrors it, and
+    # the strip button is checked — with no other tool checked anywhere.
+    window.tools_strip.action_rectangle.trigger()
     QApplication.processEvents()
     assert window.tools_panel.action_rectangle.isChecked()
     assert window.tools_panel.active_tool() == ToolMode.RECTANGLE
@@ -342,9 +354,9 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
     assert toolbar_btn(ToolMode.RECTANGLE).isChecked()
     assert checked_tools() == [ToolMode.RECTANGLE]
 
-    # Second consecutive dock click (Brush): the same contract for BRUSH —
+    # Second consecutive strip click (Brush): the same contract for BRUSH —
     # the probe's second click desynced EVERYTHING pre-fix.
-    window.tools_panel.action_brush.trigger()
+    window.tools_strip.action_brush.trigger()
     QApplication.processEvents()
     assert window.tools_panel.action_brush.isChecked()
     assert window.tools_panel.active_tool() == ToolMode.BRUSH
@@ -358,9 +370,9 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
 def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     """The Tools-menu Crop action exists with the same data and wires end-to-end.
 
-    Triggering it activates the tool everywhere (canvas + ToolsPanel,
-    exclusive with the other tools); the G shortcut (window-level QShortcut,
-    focus-robust per the V/B/R/L/E pattern) drives the same path. The toolbar
+    Triggering it activates the tool everywhere (canvas + strip, exclusive
+    with the other tools); the G shortcut (window-level QShortcut,
+    focus-robust per the V/B/R/L/E pattern) drives the same path. The strip
     carries a Crop button bound to the same action (data == ToolMode.CROP).
     """
     window = _window_with_page(qtbot, tmp_path)
@@ -368,11 +380,11 @@ def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     assert menu_action.data() == ToolMode.CROP
     assert "Enter applies" in menu_action.toolTip()
 
-    # The toolbar button for Crop is wired to the same action.
+    # The strip button for Crop is wired to the same action.
     crop_btn = next(
         (
             btn
-            for btn in window.toolbar.findChildren(QToolButton)
+            for btn in _strip_tool_buttons(window)
             if btn.defaultAction() is not None
             and btn.defaultAction().data() == ToolMode.CROP
         ),

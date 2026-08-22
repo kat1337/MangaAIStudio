@@ -266,6 +266,71 @@ def test_strip_icons_bundled_and_non_null(qtbot, tmp_path) -> None:
         assert not btn.icon().isNull()
 
 
+# ---------------------------------------------------------------------------
+# D-07: the shrunken top toolbar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_top_toolbar_shrunk_to_d07_contents(qtbot, tmp_path) -> None:
+    """The top toolbar holds exactly the D-07 set — the 6 tool buttons, Detect
+    Text, and Inpaint have LEFT it (they live on the strip now). The QAction
+    objects themselves survive with their shortcuts (state/gating holders)."""
+    window = _window(qtbot, tmp_path)
+
+    widget_actions = [a for a in window.toolbar.actions() if not a.isSeparator()]
+    # Plain actions render themselves; the Preview button was added as a
+    # WIDGET (widgetForAction resolves it).
+    plain_actions = [
+        a
+        for a in widget_actions
+        if window.toolbar.widgetForAction(a) is not window.btn_preview_hold
+    ]
+    assert plain_actions == [
+        window.action_open_folder,
+        window.action_fit_to_window,
+        window.action_actual_size,
+        window.action_zoom_out,
+        window.action_zoom_in,
+        window.action_undo,
+        window.action_redo,
+        window.action_toggle_mask_overlay,
+    ]
+
+    # Preview (hold) is the only added WIDGET on the toolbar.
+    assert window.toolbar.widgetForAction(
+        [a for a in widget_actions if a not in plain_actions][0]
+    ) is window.btn_preview_hold
+
+    # Every removed entry is absent from the top toolbar's action list.
+    for removed in (
+        window.action_detect_text,
+        window.action_inpaint,
+        window.action_tool_move,
+        window.action_tool_brush,
+        window.action_tool_rectangle,
+        window.action_tool_lasso,
+        window.action_tool_eraser,
+        window.action_tool_crop,
+    ):
+        assert removed not in widget_actions
+
+    # The QActions remain alive as state holders with their shortcuts intact.
+    from PySide6.QtGui import QKeySequence
+
+    assert window.action_detect_text.shortcut() == QKeySequence("D")
+    assert window.action_inpaint.shortcut() == QKeySequence("C")
+    for action in (
+        window.action_tool_move,
+        window.action_tool_brush,
+        window.action_tool_rectangle,
+        window.action_tool_lasso,
+        window.action_tool_eraser,
+        window.action_tool_crop,
+    ):
+        assert action.isCheckable()
+
+
 def test_strip_icon_assets_art_direction(tmp_path) -> None:
     """Each bundled SVG declares a 24x24 viewBox and strokes in #e8e8ea."""
     import re
