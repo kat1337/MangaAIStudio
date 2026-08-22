@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDockWidget,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
@@ -53,6 +54,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QToolBar,
     QToolButton,
+    QWidget,
 )
 
 from manga_ai_studio.adapters.factory import backend_factory
@@ -93,6 +95,7 @@ from manga_ai_studio.gui.text_renderer import (
     layout as renderer_layout,
 )
 from manga_ai_studio.gui.tools_panel import ToolsPanel
+from manga_ai_studio.gui.tools_strip import ToolsStrip
 from manga_ai_studio.gui.worker_thread import Worker
 
 # Maximum number of entries kept in the Recent Files submenu (UI-SPEC surface 1).
@@ -130,9 +133,11 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.profile_manager = profile_manager
 
-        # Central canvas.
+        # Central canvas. Plan 09-01 (D-05): the canvas is no longer the
+        # direct central widget — it is wrapped in a container with the
+        # vertical tools strip (see _build_central_widget, called after the
+        # menus exist because the strip mirrors action_detect_text/inpaint).
         self.canvas = EditorCanvas(self)
-        self.setCentralWidget(self.canvas)
         # D-01 auto-OCR hook (plan 06): a user box created on Alt+drag
         # draw-release emits canvas.ocr_requested; MainWindow dispatches the
         # OCR worker. Connected right after construction (the canvas's
@@ -264,6 +269,9 @@ class MainWindow(QMainWindow):
         # Build child widgets, docks, menus, toolbar, status bar.
         self._build_docks()
         self._build_menus()
+        # Plan 09-01: the strip mirrors action_detect_text/action_inpaint, so
+        # the central container (strip + canvas) is built AFTER the menus.
+        self._build_central_widget()
         self._build_toolbar()
         self._build_status_bar()
 
@@ -332,6 +340,32 @@ class MainWindow(QMainWindow):
         self.dock_inspector.setWidget(self.inspector_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_inspector)
         self.tabifyDockWidget(self.dock_tools, self.dock_inspector)
+
+    def _build_central_widget(self) -> None:
+        """Wrap the canvas in a central container with the tools strip (09-01).
+
+        D-04/D-05/D-06 (plan 09-01): the vertical icon-only ``ToolsStrip``
+        becomes the FIRST item of a horizontal container wrapping the canvas,
+        giving the window left→right order **Pages | strip | canvas | side
+        panel** (D-05).
+
+        NEVER pass the strip through ``addToolBar(Qt.LeftToolBarArea, ...)`` —
+        QMainWindow lays toolbar columns OUTSIDE the dock columns and
+        ``setCorner()`` cannot fix it (the strip would land left of Pages;
+        probe-verified, RESEARCH Pattern 2).
+        """
+        self.tools_strip = ToolsStrip(self.action_detect_text, self.action_inpaint)
+        # Strip selections drive the same set_active_tool sync the dock panel
+        # uses — exactly one tool_changed emission per selection (WR-02).
+        self.tools_strip.tool_changed.connect(self.set_active_tool)
+
+        central = QWidget()
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.tools_strip)
+        row.addWidget(self.canvas, 1)
+        self.setCentralWidget(central)
 
     # ---------------------------------------------------------------- menus
     def _build_menus(self) -> None:
@@ -1157,6 +1191,19 @@ class MainWindow(QMainWindow):
             self.action_tool_lasso,
             self.action_tool_eraser,
             self.action_tool_crop,
+        ):
+            act.setEnabled(page_open)
+        # Plan 09-01: the strip's own six actions mirror the same page-open
+        # gating (Move always enabled as the no-op-safe default) — the strip's
+        # Detect/Inpaint buttons need nothing here (they mirror the window
+        # actions via setDefaultAction and are gated above).
+        self.tools_strip.action_move.setEnabled(True)
+        for act in (
+            self.tools_strip.action_brush,
+            self.tools_strip.action_rectangle,
+            self.tools_strip.action_lasso,
+            self.tools_strip.action_eraser,
+            self.tools_strip.action_crop,
         ):
             act.setEnabled(page_open)
 
@@ -4282,8 +4329,12 @@ class MainWindow(QMainWindow):
         """
         self.canvas.set_tool(tool)
         # Sync the ToolsPanel (its actions drive the dock highlight) without
-        # re-emitting tool_changed (the canvas is already updated).
+        # re-emitting tool_changed (the canvas is already updated). Plan 09-01:
+        # the vertical strip's own actions are synced the same way (both calls
+        # block their actions' signals — zero extra emissions; the panel call
+        # is removed by plan 09-02 when the panel loses its tool row).
         self.tools_panel.set_active_tool(tool)
+        self.tools_strip.set_active_tool(tool)
         # Sync the six window tool actions explicitly: check the matching
         # action and uncheck the other five (signals blocked — the group no
         # longer does this for the window actions).
