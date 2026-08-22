@@ -572,23 +572,32 @@ def test_refresh_is_single_preview_driver(qtbot) -> None:
 # Plan 06-05 — MainWindow wiring: lifecycle tests migrated from the Levels
 # suite (D-01 supersession): apply-one-entry + b376f8a restore semantics,
 # cancel-restores-exactly, preview no-baseline-poison, defaults/clamp, and
-# the Tools ▸ Image menu surface rename.
+# the dialog-entry surface contract (Tools ▸ Image until 09-03; the panel's
+# Edit section since plan 09-03 / D-08/D-09).
 # ===========================================================================
 
 @pytest.mark.gui
-def test_curves_action_in_tools_menu(qtbot, tmp_path) -> None:
-    """Tools ▸ Image shows 'Curves…' — the Levels slot is renamed (D-01)."""
+def test_curves_action_bound_in_edit_section(qtbot, tmp_path) -> None:
+    """The live Curves… action is mirrored by the panel Edit section's
+    default-action button and stays alive on the window (plan 09-03 D-09:
+    the Tools-menu entry is gone — membership removal only)."""
     window = _window_with_page(qtbot, tmp_path)
     assert window.action_curves.text() == "Curves\u2026"
-    # PySide6 wrapper-lifetime quirk: hold the top-level action wrappers
-    # while resolving the menu, or the C++ QMenus vanish with the temps.
-    menu_actions = window.menuBar().actions()
-    menus = [a.menu() for a in menu_actions]
-    tools_menu = next(m for m in menus if m is not None and m.title() == "&Tools")
-    assert window.action_curves in tools_menu.actions()
-    # The Levels action/surface is gone — replaced, not appended.
+
+    # The Edit section hosts the entry: a button whose defaultAction IS the
+    # live action (identity — gating/labels inherited).
+    from PySide6.QtWidgets import QToolButton
+
+    edit_section = next(
+        s for s in window.side_panel.sections if s.title == "Edit"
+    )
+    buttons = edit_section.body.findChildren(QToolButton)
+    assert any(
+        btn.defaultAction() is window.action_curves for btn in buttons
+    ), "no Edit-section button binds action_curves via setDefaultAction"
+
+    # The Levels action/surface never came back.
     assert not hasattr(window, "action_levels")
-    assert not any(a.text() == "Levels\u2026" for a in tools_menu.actions())
 
 
 @pytest.mark.gui

@@ -670,7 +670,9 @@ class MainWindow(QMainWindow):
         # Crop… (D-11, plan 05-07): the numeric crop dialog (UI-SPEC surface
         # 24b). No shortcut — the canvas Crop tool is the gesture path; the
         # dialog is the precision path (menu-accelerable). Dialog-opening
-        # ellipsis per §Copywriting.
+        # ellipsis per §Copywriting. Plan 09-03 (D-08/D-09): the action is no
+        # longer an Edit-menu entry — the panel's Edit section mirrors it via
+        # setDefaultAction; the action stays alive as the state/gating holder.
         self.action_crop_dialog = QAction("Crop\u2026", self)
         self.action_crop_dialog.setToolTip(
             "Crop the page by exact coordinates (x, y, width, height)."
@@ -683,8 +685,9 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.action_redo)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_select_all_boxes)
-        edit_menu.addSeparator()
-        edit_menu.addAction(self.action_crop_dialog)
+        # NOTE (plan 09-03, D-09): the Crop… entry left this menu — the panel's
+        # Edit section hosts the numeric crop-dialog entry now. Membership
+        # removal ONLY: the QAction and its wiring stay intact above.
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_clear_mask)
 
@@ -1024,12 +1027,15 @@ class MainWindow(QMainWindow):
         self.action_cancel_batch.triggered.connect(self._cancel_batch)
         self.action_cancel_batch.setEnabled(False)
 
-        # Image section (plan 05-06/06-05, UI-SPEC surfaces 23/25/26/30):
-        # Rotate ▸ (90° CW / 90° CCW / 180°), Curves…, Resize…. Rotate applies
+        # Image ops (plan 05-06/06-05, UI-SPEC surfaces 23/25/26/30):
+        # Rotate 90° CW / CCW / 180°, Curves…, Resize…. Rotate applies
         # SILENTLY (D-14 — no confirmation); Curves/Resize open dialogs.
         # All three are synchronous and enabled iff a page is open AND no
         # async op is running (gated in _refresh_action_states). No shortcuts
-        # (menu-accelerable per UI-SPEC §Accessibility).
+        # (menu-accelerable per UI-SPEC §Accessibility). Plan 09-03 (D-08/
+        # D-09): these actions are no longer menu entries — the panel's Edit
+        # section mirrors them via setDefaultAction; they stay alive as the
+        # state/gating holders.
         self.action_rotate_cw = QAction("Rotate 90\u00b0 CW", self)
         self.action_rotate_cw.setToolTip(
             "Rotate the page 90\u00b0 clockwise. Masks and text boxes rotate"
@@ -1085,12 +1091,16 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_eraser)
         tools_menu.addAction(self.action_tool_crop)
         tools_menu.addSeparator()
-        rotate_menu = tools_menu.addMenu("Rotate")
-        rotate_menu.addAction(self.action_rotate_cw)
-        rotate_menu.addAction(self.action_rotate_ccw)
-        rotate_menu.addAction(self.action_rotate_180)
-        tools_menu.addAction(self.action_curves)
-        tools_menu.addAction(self.action_resize)
+        # NOTE (plan 09-03, D-09): the Image section — the Rotate ▸ submenu
+        # (action_rotate_cw/ccw/180), Curves… (action_curves), and Resize…
+        # (action_resize) — is deliberately NOT added here anymore. The
+        # panel's Edit section is the single mouse-driven home for these entry
+        # points; its buttons mirror the actions via setDefaultAction. The six
+        # QAction objects stay constructed exactly as before and live on as
+        # the state/gating holders (the action_detect_boxes_mode state-holder
+        # precedent above). Menu-membership removal ONLY: no QAction
+        # construction and NO setShortcut call was touched (these actions
+        # carry no shortcuts — keyboard reachability is unchanged).
         tools_menu.addSeparator()
         tools_menu.addAction(self.action_cancel_batch)
 

@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtGui import QKeySequence, QShortcut  # noqa: E402
 from PySide6.QtWidgets import QApplication, QGridLayout, QToolButton  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
@@ -245,6 +246,92 @@ def test_rotate_button_click_rotates_page(qtbot, tmp_path) -> None:
     after = window.canvas.get_image_numpy().shape
     # 90° rotation swaps the page dimensions (real op, zero new logic).
     assert after == (before[1], before[0]) + before[2:]
+
+
+# ===========================================================================
+# Menu slimming (D-09) — membership removal only, actions stay alive
+# ===========================================================================
+
+
+def _menu_texts(window: MainWindow, title_fragment: str) -> list[str] | None:
+    """A top-level menu's action texts (None if absent), resolved with the
+    bar wrappers held — the PySide6 wrapper-lifetime precedent (06-05)."""
+    bar_actions = window.menuBar().actions()
+    for bar_act in bar_actions:
+        menu = bar_act.menu()
+        if menu is not None and title_fragment in menu.title():
+            menu_actions = menu.actions()
+            return [act.text() for act in menu_actions]
+    return None
+
+
+@pytest.mark.gui
+def test_tools_menu_no_longer_lists_image_entries(qtbot, tmp_path) -> None:
+    """D-09: the Tools menu carries neither Curves…, nor Resize…, nor a
+    Rotate submenu — while all four action objects stay ALIVE on the window
+    as the state/gating holders."""
+    window = _window(qtbot, tmp_path)
+
+    texts = _menu_texts(window, "Tools")
+    assert texts is not None, "Tools menu not found"
+    assert "Curves\u2026" not in texts
+    assert "Resize\u2026" not in texts
+    assert "Rotate" not in texts
+
+    # The state holders live on with their user-visible copy intact.
+    assert window.action_curves.text() == "Curves\u2026"
+    assert window.action_resize.text() == "Resize\u2026"
+    assert window.action_rotate_cw.text() == "Rotate 90\u00b0 CW"
+    assert window.action_rotate_ccw.text() == "Rotate 90\u00b0 CCW"
+    assert window.action_rotate_180.text() == "Rotate 180\u00b0"
+    assert "clockwise" in window.action_rotate_cw.toolTip()
+
+
+@pytest.mark.gui
+def test_edit_menu_no_longer_lists_crop_dialog(qtbot, tmp_path) -> None:
+    """D-09: the Edit menu carries neither the numeric Crop… dialog entry —
+    while action_crop_dialog stays alive (and distinct from the strip's crop
+    TOOL action)."""
+    window = _window(qtbot, tmp_path)
+
+    texts = _menu_texts(window, "Edit")
+    assert texts is not None, "Edit menu not found"
+    assert "Crop\u2026" not in texts
+
+    # The state holder lives on, wired to the same dialog handler.
+    assert window.action_crop_dialog.text() == "Crop\u2026"
+    assert "exact coordinates" in window.action_crop_dialog.toolTip()
+
+
+@pytest.mark.gui
+def test_slimmed_actions_carry_no_shortcuts(qtbot, tmp_path) -> None:
+    """Keyboard-reachability contract (D-09/T-09c-02): the slimmed image-op
+    actions carried NO shortcuts before the slimming and gained none — the
+    tool shortcuts (V/B/R/L/E/G, D, C) live on window-level actions/QShortcuts
+    independent of menus."""
+    window = _window(qtbot, tmp_path)
+
+    for act in (
+        window.action_curves,
+        window.action_resize,
+        window.action_crop_dialog,
+        window.action_rotate_cw,
+        window.action_rotate_ccw,
+        window.action_rotate_180,
+    ):
+        assert act.shortcut() == QKeySequence(), (
+            f"{act.text()} unexpectedly carries a shortcut"
+        )
+
+    # The keyboard bindings are untouched (window level): D/C live on the
+    # Detect/Inpaint actions; V/B/R/L/E/G are window-level QShortcuts.
+    assert window.action_detect_text.shortcut() == QKeySequence("D")
+    assert window.action_inpaint.shortcut() == QKeySequence("C")
+    shortcut_keys = {
+        sc.key().toString() for sc in window.findChildren(QShortcut)
+    }
+    for key in ("V", "B", "R", "L", "E", "G"):
+        assert key in shortcut_keys, f"{key} window-level shortcut missing"
 
 
 # ===========================================================================

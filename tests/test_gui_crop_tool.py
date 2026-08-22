@@ -371,12 +371,15 @@ def test_dock_button_click_syncs_dock_toolbar_and_window(qtbot, tmp_path) -> Non
 
 @pytest.mark.gui
 def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
-    """The Tools-menu Crop action exists with the same data and wires end-to-end.
+    """The crop TOOL action exists with the same data and wires end-to-end.
 
     Triggering it activates the tool everywhere (canvas + strip, exclusive
     with the other tools); the G shortcut (window-level QShortcut,
     focus-robust per the V/B/R/L/E pattern) drives the same path. The strip
     carries a Crop button bound to the same action (data == ToolMode.CROP).
+    D-08 (plan 09-03): the strip hosts ONLY the interactive tool — the
+    numeric Crop… dialog entry lives in the panel's Edit section, bound to
+    the distinct action_crop_dialog.
     """
     window = _window_with_page(qtbot, tmp_path)
     menu_action = window.action_tool_crop
@@ -395,7 +398,7 @@ def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     )
     assert crop_btn is not None
 
-    # Triggering the menu action activates the tool everywhere.
+    # Triggering the action activates the tool everywhere.
     menu_action.trigger()
     QApplication.processEvents()
     assert window.canvas.current_tool == ToolMode.CROP
@@ -411,6 +414,23 @@ def test_crop_action_in_tools_menu(qtbot, tmp_path) -> None:
     QApplication.processEvents()
     assert window.canvas.current_tool == ToolMode.CROP
     assert window.tools_strip.active_tool() == ToolMode.CROP
+
+    # D-08 distinction: the Edit section hosts the numeric dialog entry — a
+    # different button bound to the DIFFERENT action (action_crop_dialog),
+    # never the strip's tool action.
+    from PySide6.QtWidgets import QToolButton
+
+    edit_section = next(
+        s for s in window.side_panel.sections if s.title == "Edit"
+    )
+    dialog_btn = next(
+        btn
+        for btn in edit_section.body.findChildren(QToolButton)
+        if btn.defaultAction() is not None
+        and btn.defaultAction().text().startswith("Crop")
+    )
+    assert dialog_btn.defaultAction() is window.action_crop_dialog
+    assert dialog_btn.defaultAction() is not window.action_tool_crop
 
 
 # ===========================================================================
