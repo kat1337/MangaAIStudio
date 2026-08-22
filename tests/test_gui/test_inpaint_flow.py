@@ -467,3 +467,80 @@ def test_inpaint_action_disabled_no_boxes_no_mask(qtbot, tmp_path):
     window._refresh_action_states()
     assert window.action_inpaint.isEnabled() is False
 
+
+# ---------------------------------------------------------------------------
+# Standalone Fill Boxes action + fill-only worker path (quick task Task 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.gui
+def test_fill_only_worker_path_skips_model(qtbot, tmp_path):
+    """fill_only=True runs ONLY the median fill pass: no model load/inpaint,
+    will_inpaint regions untouched, mode marker present."""
+    window = _make_window(qtbot, tmp_path)
+    page_h, page_w = 40, 40
+    image_rgb = np.full((page_h, page_w, 3), 200, dtype=np.uint8)
+    pb_fill = _make_pb(5, 5, 15, 15, DETECTED, 0.0, None, (10, 20, 30))
+    pb_inpaint = _make_pb(20, 20, 30, 30, DETECTED, 35.0, None, (40, 50, 60))
+    boxes_snapshot = [pb_fill, pb_inpaint]
+    manual_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+    erase_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+
+    result = window._run_inpaint_task(
+        image_rgb, boxes_snapshot, manual_bin, erase_bin,
+        max_size=(2048, 2048), model_path=None, model=None, fill_only=True,
+    )
+    assert result["fill_count"] == 1, f"expected 1 fill, got {result['fill_count']}"
+    assert result["inpaint_count"] == 0, "fill-only must not count inpaint work"
+    assert result["patch_count"] == 0, "fill-only must not run patches"
+    assert result.get("mode") == "fill_only", "mode marker missing"
+    # Fill color composited inside the fill box region...
+    assert tuple(result["image"][10, 10]) == (10, 20, 30), (
+        f"fill pixel {tuple(result['image'][10, 10])} != fill_color"
+    )
+    # ...and the will_inpaint box region UNCHANGED (no model was available).
+    assert tuple(result["image"][25, 25]) == (200, 200, 200), (
+        "will_inpaint region must be untouched in fill-only mode"
+    )
+    # Outside both boxes pixel-exact.
+    assert tuple(result["image"][0, 0]) == (200, 200, 200)
+
+
+@pytest.mark.gui
+def test_action_fill_boxes_exists_with_shortcut_f_and_gating(qtbot, tmp_path):
+    """Tools > Fill Boxes exists with shortcut F and enables iff page open +
+    pending fill work + no async op running."""
+    from PySide6.QtGui import QKeySequence
+
+    window = _open_page_window(qtbot, tmp_path)
+    action = getattr(window, "action_fill_boxes", None)
+    assert action is not None, "action_fill_boxes must exist"
+    assert action.shortcut() == QKeySequence("F"), (
+        f"Fill Boxes shortcut should be F, got {action.shortcut().toString()}"
+    )
+    # In the Tools menu.
+    menubar = window.menuBar()
+    tools_action = next(
+        a for a in menubar.actions() if a.text() == "&Tools"
+    )
+    texts = [a.text() for a in tools_action.menu().actions()]
+    assert "Fill Boxes" in texts, f"Fill Boxes missing from Tools menu: {texts}"
+    # No fill work yet -> disabled despite page being open.
+    window.canvas._box_items = []
+    window._refresh_action_states()
+    assert action.isEnabled() is False
+    # A will_fill box -> enabled.
+    pb_fill = _make_pb(10, 10, 20, 20, DETECTED, 0.0, None, (10, 20, 30))
+    window.canvas._box_items = [_FakeBoxItem(pb_fill)]
+    window._refresh_action_states()
+    assert action.isEnabled() is True
+    # Async op running -> disabled again.
+    window._op_running = True
+    window._refresh_action_states()
+    assert action.isEnabled() is False
+    window._op_running = False
+    # A will_inpaint-only page does NOT enable the fill tool (that's C's job).
+    pb_high = _make_pb(10, 10, 20, 20, DETECTED, 30.0, None, None)
+    window.canvas._box_items = [_FakeBoxItem(pb_high)]
+    window._refresh_action_states()
+    assert action.isEnabled() is False
+
