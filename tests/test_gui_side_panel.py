@@ -161,3 +161,110 @@ def test_view_menu_toggle_panel_drives_body(qtbot, tmp_path) -> None:
     assert window.side_panel.body_scroll.isHidden()
     toggle.trigger()
     assert not window.side_panel.body_scroll.isHidden()
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — collapse persistence (D-02, QSettings sidePanel/*Expanded keys)
+# ---------------------------------------------------------------------------
+
+
+from PySide6.QtCore import QSettings  # noqa: E402
+
+
+_SECTION_KEYS = [
+    "sidePanel/detectionExpanded",
+    "sidePanel/brushExpanded",
+    "sidePanel/typesettingExpanded",
+]
+
+
+def _patched_settings(ini):
+    return lambda self: QSettings(str(ini), QSettings.Format.IniFormat)
+
+
+def _stored(window, key: str):
+    return window._settings().value(key, None)
+
+
+@pytest.mark.gui
+def test_first_run_all_sections_expanded(qtbot, tmp_path, monkeypatch) -> None:
+    """A fresh QSettings store (no sidePanel/* keys) boots ALL sections expanded."""
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(MainWindow, "_settings", _patched_settings(ini))
+
+    window = _window(qtbot, tmp_path)
+
+    for section in window.side_panel.sections:
+        assert not section.body.isHidden(), f"{section.title} should be expanded"
+        assert section.header.isChecked()
+
+
+@pytest.mark.gui
+def test_collapse_round_trips_through_qsettings(qtbot, tmp_path, monkeypatch) -> None:
+    """Collapsing Brush persists; a rebuilt window restores exactly that section
+    collapsed (the D-02 restart contract)."""
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(MainWindow, "_settings", _patched_settings(ini))
+
+    window = _window(qtbot, tmp_path)
+    # USER toggle path: the header's toggled slot writes the key.
+    window.section_brush.header.setChecked(False)
+    assert _stored(window, "sidePanel/brushExpanded") is False
+    del window
+
+    # "Second session": a fresh MainWindow over the same INI.
+    window2 = _window(qtbot, tmp_path)
+    assert window2.section_brush.body.isHidden(), "Brush should restore collapsed"
+    assert not window2.section_detection.body.isHidden()
+    assert not window2.section_typesetting.body.isHidden()
+    # And the restored state round-trips again (toggle back on).
+    window2.section_brush.header.setChecked(True)
+    assert _stored(window2, "sidePanel/brushExpanded") is True
+
+
+@pytest.mark.gui
+def test_malformed_stored_value_falls_back_to_expanded(qtbot, tmp_path, monkeypatch) -> None:
+    """A stored value outside the accepted truthy set (T-09b-01) falls back to
+    expanded — the tolerant parse accepts only true/1/yes/on."""
+    ini = tmp_path / "settings.ini"
+    pre = QSettings(str(ini), QSettings.Format.IniFormat)
+    pre.setValue("sidePanel/brushExpanded", "banana")
+    pre.sync()
+    del pre
+    monkeypatch.setattr(MainWindow, "_settings", _patched_settings(ini))
+
+    window = _window(qtbot, tmp_path)
+    assert not window.section_brush.body.isHidden()
+
+
+@pytest.mark.gui
+def test_chevron_toggle_writes_no_settings_keys(qtbot, tmp_path, monkeypatch) -> None:
+    """The chevron/panel-body toggle is session-transient (UI-SPEC §38): zero
+    writes to any sidePanel/* key, asserted by comparing stored values."""
+    ini = tmp_path / "settings.ini"
+    monkeypatch.setattr(MainWindow, "_settings", _patched_settings(ini))
+
+    window = _window(qtbot, tmp_path)
+    before = {k: _stored(window, k) for k in _SECTION_KEYS}
+
+    window.side_panel.toggle_button.click()
+    window.side_panel.toggle_button.click()
+    window.side_panel.set_body_visible(False)
+
+    after = {k: _stored(window, k) for k in _SECTION_KEYS}
+    assert before == after == {k: None for k in _SECTION_KEYS}
+
+
+@pytest.mark.gui
+def test_rename_sweep_positive_assertions(qtbot, tmp_path) -> None:
+    """UI-04 positive rename assertions: dock title 'Panel', Typesetting
+    section title, View menu holds 'Toggle Panel' (no negative-grep)."""
+    window = _window(qtbot, tmp_path)
+
+    assert window.dock_panel.windowTitle() == "Panel"
+    ts = next(
+        s for s in window.side_panel.sections if s.title == "Typesetting"
+    )
+    assert ts.header.text().endswith("Typesetting")
+    texts = _view_menu_texts(window)
+    assert "Toggle Panel" in texts

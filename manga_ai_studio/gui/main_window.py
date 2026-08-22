@@ -335,21 +335,43 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         # Section bodies: the relocated ToolsPanel halves (D-03) — their
-        # signals keep their exact names and semantics.
+        # signals keep their exact names and semantics. Each section carries
+        # its QSettings persistence key (D-02/UI-SPEC §38) + the window's
+        # single-sourced _settings() accessor; Edit's key is written lazily
+        # when plan 09-03 adds that section (the mechanism is generic).
         self.detection_body = DetectionSettingsBody()
         self.brush_body = BrushBody()
         self.inspector_panel = InspectorPanel()
         self.section_typesetting = CollapsibleSection(
-            "Typesetting", self.inspector_panel
+            "Typesetting",
+            self.inspector_panel,
+            settings_key="sidePanel/typesettingExpanded",
+            settings_provider=self._settings,
         )
         self.section_detection = CollapsibleSection(
-            "Detection settings", self.detection_body
+            "Detection settings",
+            self.detection_body,
+            settings_key="sidePanel/detectionExpanded",
+            settings_provider=self._settings,
         )
-        self.section_brush = CollapsibleSection("Brush", self.brush_body)
+        self.section_brush = CollapsibleSection(
+            "Brush",
+            self.brush_body,
+            settings_key="sidePanel/brushExpanded",
+            settings_provider=self._settings,
+        )
         self.side_panel = SidePanel()
         self.side_panel.add_section(self.section_detection)
         self.side_panel.add_section(self.section_brush)
         self.side_panel.add_section(self.section_typesetting)
+        # D-02 restore: seed each section from QSettings AFTER the build with
+        # toggle signals blocked (restore_expanded) so no spurious writes
+        # fire; a missing key means expanded (all sections EXPANDED on first
+        # run). The chevron/panel-body toggle is session-transient — no key.
+        for section in self.side_panel.sections:
+            section.restore_expanded(
+                self._read_side_panel_expanded(section.settings_key)
+            )
         self.dock_panel.setWidget(self.side_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
 
@@ -1000,8 +1022,8 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_detect_text)
         # NOTE (plan 08-05, A8): action_detect_boxes_mode is deliberately NOT
-        # added here — the Detect Boxes toggle moved to the Tools dock's
-        # detection-settings section (the single user-facing control). The
+        # added here — the Detect Boxes toggle moved to the panel's
+        # Detection-settings section (the single user-facing control). The
         # action lives on as the state holder only.
         tools_menu.addAction(self.action_inpaint)
         tools_menu.addSeparator()
@@ -3048,6 +3070,28 @@ class MainWindow(QMainWindow):
         self._refresh_action_states()
 
     # ------------------------------------------- detection settings (Phase 8)
+    def _read_side_panel_expanded(self, key: str | None) -> bool:
+        """Read one side-panel section's collapse state (D-02, tolerant parse).
+
+        The ``_read_detect_boxes_mode`` parse shape: bool passthrough, then a
+        case-insensitive truthy set (true/1/yes/on) and its explicit falsy
+        complement (false/0/no/off — what ``setValue(key, False)`` stores on
+        INI backends). Anything ELSE — a missing key or a malformed/crafted
+        value (T-09b-01) — falls back to EXPANDED: garbage can never inject a
+        collapsed state beyond a per-section visibility flip.
+        """
+        if not key:
+            return True
+        raw = self._settings().value(key, None)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in ("true", "1", "yes", "on"):
+            return True
+        if text in ("false", "0", "no", "off"):
+            return False
+        return True
+
     def _read_detect_boxes_mode(self) -> bool:
         """Read the Detect Boxes view-state from QSettings (default True = on).
 

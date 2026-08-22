@@ -28,6 +28,8 @@ D-02) is wired by MainWindow through each section's optional ``settings_key``
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
@@ -105,10 +107,17 @@ class CollapsibleSection(QWidget):
         body: QWidget,
         parent: QWidget | None = None,
         settings_key: str | None = None,
+        settings_provider: Callable[[], object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.title = title
+        # D-02 persistence hook: when both are set, every USER toggle writes
+        # the checked state under ``settings_key`` through the supplied
+        # provider (MainWindow._settings — the single-sourced accessor). The
+        # restore path deliberately does NOT round-trip through the toggle
+        # handler (see restore_expanded) so seeding never re-writes.
         self.settings_key = settings_key
+        self._settings_provider = settings_provider
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -139,8 +148,15 @@ class CollapsibleSection(QWidget):
 
     # ------------------------------------------------------------- collapse
     def _on_header_toggled(self, checked: bool) -> None:
-        """Header toggled -> body visibility flip (+ persistence in Task 3)."""
+        """Header toggled -> body visibility flip + persistence write (D-02).
+
+        Only USER-driven toggles reach this slot; the restore path seeds via
+        :meth:`restore_expanded` (signals blocked) so no spurious writes fire
+        during startup.
+        """
         self._apply_expanded(checked)
+        if self.settings_key is not None and self._settings_provider is not None:
+            self._settings_provider().setValue(self.settings_key, checked)
 
     def _apply_expanded(self, expanded: bool) -> None:
         """Render ``expanded``: arrow glyph + plain body setVisible (NO animation)."""
@@ -151,6 +167,19 @@ class CollapsibleSection(QWidget):
     def set_expanded(self, expanded: bool) -> None:
         """Programmatically expand/collapse (signals delivered normally)."""
         self.header.setChecked(expanded)
+
+    def restore_expanded(self, expanded: bool) -> None:
+        """Seed the restored collapse state WITHOUT writing back to QSettings.
+
+        The build-time seed precedent (main_window's blockSignals seeding):
+        header signals are blocked around ``setChecked`` so the toggled slot
+        — whose job is persisting user changes — never fires during restore;
+        the visual state is applied directly.
+        """
+        was = self.header.blockSignals(True)
+        self.header.setChecked(expanded)
+        self.header.blockSignals(was)
+        self._apply_expanded(expanded)
 
 
 class SidePanel(QWidget):

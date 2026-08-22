@@ -377,7 +377,7 @@ class InspectorPanel(QWidget):
         self.std_dev_label.setObjectName("stdDevLabel")
         self.std_dev_label.setToolTip(
             "Color variation along this box's detected mask edge. Skipped when "
-            "above the Std-dev threshold (Tools dock \u2192 Detection settings)."
+            "above the Std-dev threshold (Panel \u2192 Detection settings)."
         )
         form.addRow("Std dev", self.std_dev_label)
 
