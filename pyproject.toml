@@ -28,6 +28,11 @@ dependencies = [
     # natsort is required by manga_ai_studio/gui/file_table.py natural-sort
     # (plan 02).
     "natsort",
+    # uniseg + pyphen are required by manga_ai_studio/core/text_wrap.py
+    # UAX #14 tokenization and Latin hyphenation (quick-260823-hge); both
+    # pure-Python, both degrade gracefully when absent at runtime.
+    "uniseg",
+    "pyphen",
 ]
 
 [project.scripts]
