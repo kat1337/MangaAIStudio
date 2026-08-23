@@ -62,6 +62,10 @@ WIDOW_PENALTY = 500_000.0
 #: Charged per emitted line — prefers fewer, fuller lines (comic-lettering
 #: convention: few words per line, but never one-word lines).
 PER_LINE_COST = 1.0
+#: Charged for an infeasible line (wider than ``width + eps``) — dominates
+#: every raggedness/penalty term so feasible layouts win whenever they exist,
+#: while an unavoidable oversized glyph still yields a layout.
+INFEASIBLE_COST = 1_000_000_000.0
 #: Defensive cap (T-QW-02): beyond this many atoms the DP is skipped in
 #: favour of a greedy fill — bubble text is tens of atoms, never thousands.
 MAX_ATOMS_FOR_DP = 2000
@@ -206,16 +210,19 @@ def _dp_break(
 
     for j in range(1, n + 1):
         # Shrink the line from the left; span width grows as i decreases,
-        # so stop at the first infeasible span.
+        # so stop at the first infeasible span. The i == j - 1 (single-atom)
+        # candidate is ALWAYS costed, even when infeasible — a glyph wider
+        # than the box (kept whole by _split_oversized) would otherwise
+        # leave best[j] / prev_line_len[j] unset and the reconstruction
+        # below would spin forever on k == 0 (unbounded memory).
         i = j - 1
-        while i >= 0:
+        while True:
             lw = span_width(i, j)
-            if lw > width + eps:
-                break
+            feasible = lw <= width + eps
             cost = best[i]
-            if j != n:
+            if j != n and feasible:
                 cost += (width - lw) ** 2
-            cost += PER_LINE_COST
+            cost += PER_LINE_COST + (INFEASIBLE_COST if not feasible else 0.0)
             if (j - i) == 1 and n > 1:
                 if j == n:
                     cost += ORPHAN_PENALTY
@@ -224,13 +231,15 @@ def _dp_break(
             if cost < best[j]:
                 best[j] = cost
                 prev_line_len[j] = j - i
+            if not feasible or i == 0:
+                break
             i -= 1
-
-    # Every single-atom line is feasible post-split, so best[n] < INF.
     lines: list[list[str]] = []
     j = n
     while j > 0:
         k = prev_line_len[j]
+        if k <= 0:  # defensive: never spin (k is always >= 1 post-fix)
+            k = 1
         lines.append(atoms[j - k : j])
         j -= k
     lines.reverse()
@@ -316,6 +325,7 @@ __all__ = [
     "ORPHAN_PENALTY",
     "WIDOW_PENALTY",
     "PER_LINE_COST",
+    "INFEASIBLE_COST",
     "MAX_ATOMS_FOR_DP",
     "tokenize_atoms",
     "break_lines",

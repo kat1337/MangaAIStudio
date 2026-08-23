@@ -227,3 +227,34 @@ def test_qt_free_module() -> None:
     src = inspect.getsource(text_wrap)
     for token in ("PySide6", "QTextOption", "QFontMetrics", "QApplication"):
         assert token not in src, f"text_wrap.py must not reference {token}"
+
+
+# ---------------------------------------------------------------------------
+# OOM regression (quick-260822-wvf follow-up): a glyph wider than the box
+# (kept whole by _split_oversized) used to leave best[j]=INF and
+# prev_line_len[j]=0 — the DP reconstruction spun forever appending empty
+# lines (unbounded memory, the full-suite 19GB OOM). Must terminate.
+# ---------------------------------------------------------------------------
+
+
+def test_break_lines_terminates_when_single_glyph_exceeds_width() -> None:
+    lines = break_lines(
+        "WWWW",
+        measure=lambda s: len(s) * 100.0,
+        width=50.0,
+        eps=1.0,
+    )
+    assert lines == ["W", "W", "W", "W"]
+
+
+def test_break_lines_mixed_normal_and_oversized_glyphs() -> None:
+    # Normal words fit; the oversized glyph gets its own line each time.
+    atoms = ["hi", "there", "X", "ok"]
+    widths = {"h": 10.0, "i": 10.0, " ": 5.0}
+    def measure(s: str) -> float:
+        if s == "X":
+            return 500.0
+        return sum(widths.get(ch, 10.0) for ch in s)
+    lines = break_lines(atoms, measure=measure, width=100.0, eps=1.0)
+    assert all(isinstance(ln, str) for ln in lines)
+    assert "".join(lines).replace(" ", "").replace("X", "") == "hithereok"
