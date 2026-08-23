@@ -633,3 +633,69 @@ def test_layout_preserves_manual_newlines(qapp) -> None:
     assert "\n" in result.document.toPlainText()
     texts = [ln.strip() for ln in _doc_line_texts(result)]
     assert "Ah!" in texts
+
+
+# ===========================================================================
+# Auto-fit ordering fix (quick-260823-hge Task 2): a candidate whose owned
+# break had to split a LATIN word is a FAILED FIT, not a result — the loop
+# shrinks before ever accepting it. Only the 5 px floor escapes (accepting
+# whatever it gets, overflow honest). Manual size keeps today's semantics.
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_auto_fit_rejects_latin_split_shrinks_instead(qapp) -> None:
+    """Narrow-box 'Herta!': the old loop accepted the char-split 'Hert'/'a!'
+    layout AT the oversized base size (vertical-only fit test). The fixed
+    loop treats the split candidate as not-fitting and lands on a STRICTLY
+    SMALLER font where 'Herta!' sits whole (or hyphenated at worst) — never
+    a dash-less mid-word split above the floor."""
+    rect = QRectF(0, 0, 45, 160)  # inner_w = 41 — 'Herta!' overflows at 14 px
+    result = layout("Herta!", TextStyle(), rect, vertical=False)
+    # The shrink loop engaged: accepted size strictly below the 14 px base.
+    assert 5.0 <= result.used_font_size_px < 14.0, (
+        f"expected a shrunken font below the base, got "
+        f"{result.used_font_size_px}"
+    )
+    texts = [ln.strip() for ln in _doc_line_texts(result) if ln.strip()]
+    # No dash-less mid-word split above the floor: either the whole word on
+    # one line, or a properly hyphenated prefix ending in '-'.
+    assert any(t == "Herta!" or t.endswith("-") for t in texts), (
+        f"'Herta!' was split without a hyphen dash: {texts!r}"
+    )
+
+
+@pytest.mark.unit
+def test_auto_fit_floor_escapes_with_honest_overflow(qapp) -> None:
+    """Text that cannot avoid splitting even at the 5 px floor still yields
+    a LayoutResult (the floor deadlock escape) — never an exception or an
+    empty document."""
+    rect = QRectF(0, 0, 60, 60)
+    text = "supercalifragilisticexpialidocious " * 6
+    result = layout(text, TextStyle(), rect, vertical=False)
+    assert result.used_font_size_px >= 5.0 - 1e-6, (
+        "the loop must never render below the 5 px floor"
+    )
+    assert result.overflow is True, (
+        "unavoidable Latin splits at the floor report honest overflow"
+    )
+    assert result.ink.height() > 0.0
+    assert result.document.toPlainText().strip(), "document must not be empty"
+
+
+@pytest.mark.unit
+def test_manual_size_keeps_vertical_only_overflow_contract(qapp) -> None:
+    """Manual-size path: author intent wins — owned breaks (hyphenated when
+    needed) render at the chosen size and overflow stays VERTICALLY
+    computed (the split-latin rejection applies only to the auto-fit
+    predicate)."""
+    style = TextStyle(font_size_px=16.0, auto_fit=False)
+    rect = QRectF(0, 0, 34, 300)  # 'Herta!' cannot fit whole at 16 px
+    result = layout("Herta!", style, rect, vertical=False)
+    assert result.used_font_size_px == pytest.approx(16.0, abs=0.1)
+    texts = [ln.strip() for ln in _doc_line_texts(result) if ln.strip()]
+    assert len(texts) >= 2, "narrow manual box must wrap/hyphenate"
+    _, inner_h = _inner(34, 300)
+    assert result.overflow == (result.document.size().height() > inner_h + 0.5), (
+        "manual overflow must remain the vertical-only honesty contract"
+    )
