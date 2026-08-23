@@ -5068,6 +5068,108 @@ def test_create_defers_detection_to_grace(qtbot, tmp_path, monkeypatch) -> None:
     assert len(refit_calls) == 1 and len(ocr_calls) == 1
 
 
+# ---- quick-260822-vk7: stationary-grace defers while an edit session is active
+
+
+@pytest.mark.gui
+def test_grace_defers_while_translation_focused(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260822-vk7 Task 2: with the translation field focused when the
+    grace timer fires, NO refit/OCR dispatch happens — the timer RE-ARMS
+    instead and the stale marker survives."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    assert window._stationary_timer.isActive()
+    panel = window.inspector_panel
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    assert panel.is_text_edit_active() is True
+
+    # Advance well past the original deadline: deferred, not dispatched.
+    qtbot.wait(150)
+    assert refit_calls == [] and ocr_calls == []
+    assert window._stationary_timer.isActive(), "timer must be re-armed"
+    assert item.geometry_stale is True, "stale marker untouched by the deferral"
+
+
+@pytest.mark.gui
+def test_grace_defers_while_inline_editor_active(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260822-vk7 Task 2: an active canvas INLINE editor also defers
+    the grace work (timer re-arms instead of dispatching)."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    monkeypatch.setattr(
+        window.canvas._inline_editor, "is_active", lambda: True
+    )
+
+    qtbot.wait(150)
+    assert refit_calls == [] and ocr_calls == []
+    assert window._stationary_timer.isActive(), "timer must be re-armed"
+
+
+@pytest.mark.gui
+def test_grace_without_edit_session_dispatches_normally(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick-260822-vk7 Task 2 control: with NO edit session the existing
+    single-dispatch contract holds unchanged."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    assert window.inspector_panel.is_text_edit_active() is False
+    qtbot.waitUntil(
+        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
+    )
+    qtbot.wait(150)
+    assert len(refit_calls) == 1 and len(ocr_calls) == 1
+
+
+@pytest.mark.gui
+def test_deferred_grace_runs_exactly_once_after_focus_out(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick-260822-vk7 Task 2: a DEFERRED grace is not dropped — once the
+    edit session ends (focus-out), the re-armed timer fires exactly ONE
+    detection-fit + OCR dispatch."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    panel = window.inspector_panel
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    qtbot.wait(150)  # original + first re-armed firing both defer
+    assert refit_calls == [] and ocr_calls == []
+
+    panel.translation_edit.clearFocus()
+    QApplication.processEvents()
+    qtbot.waitUntil(
+        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
+    )
+    qtbot.wait(150)
+    assert len(refit_calls) == 1 and len(ocr_calls) == 1
+
+
 @pytest.mark.gui
 def test_redetect_affordance_click_refits_with_current_geometry(
     qtbot, tmp_path, monkeypatch
