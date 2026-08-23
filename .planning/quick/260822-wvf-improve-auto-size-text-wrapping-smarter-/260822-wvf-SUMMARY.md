@@ -17,6 +17,7 @@ orphan breaks like `can / 't`, `don' / t`, and `Are / you / free / ?`.
 - `7d9f488` feat(quick-260822-wvf): Qt-free line breaker — tokenize_atoms + Knuth-Plass-lite break_lines
 - `d7a4fea` feat(quick-260822-wvf): wire owned line breaking into layout() — both paths, NoWrap documents
 - `bf8091f` fix(quick-260822-wvf): DP reconstruction hang/OOM when a glyph exceeds box width *(orchestrator-applied)*
+- `4db1851` fix(quick-260822-wvf): translate per-block line rects by block offset; preserve author hard newlines *(orchestrator-applied, live-reported)*
 
 ### Implementation
 1. **Task 1** — New Qt-free `core/text_wrap.py`: `tokenize_atoms()` (whitespace-only splitting keeps
@@ -44,3 +45,15 @@ has a defensive k==0 guard. Repro: `tests/test_gui_export.py::test_batch_export_
 ## Deviations
 - SUMMARY written by orchestrator (executor session interrupted twice mid-run).
 - `INFEASIBLE_COST` constant added beyond plan scope (OOM fix).
+
+### Post-ship live regression (4db1851)
+User-reported after first deploy: bubbles rendered a single clipped line and author
+hard newlines in the translation field were flattened. Two root causes, both fixed:
+1. `_line_rects` read `naturalTextRect()` per block WITHOUT the block's document
+   offset — with one block (Qt soft-wrap) y=0 was always correct; explicit `\n`
+   blocks all reported y=0 so every line stacked and `ink` collapsed to one line
+   height (clipped pixmap). Fix: translate by
+   `documentLayout().blockBoundingRect(block).topLeft()` (PySide6 returns a plain
+   int for QTextBlock.position()).
+2. `tokenize_atoms` split on ALL whitespace including `\n`. Fix: `break_lines`
+   now wraps each hard-line paragraph independently (blank lines preserved).

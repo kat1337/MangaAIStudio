@@ -378,7 +378,7 @@ None yet.
 | 260822-347 | Change default text overlay style to black text without an outline | 2026-08-22 | a39df29 | [260822-347-change-default-text-overlay-style-from-w](./quick/260822-347-change-default-text-overlay-style-from-w/)
 | 260822-gnq | Fix box-move auto re-detect annoyance + brush ghost on scroll + pan tool brush cursor | 2026-08-22 | ed00312 | [260822-gnq-fix-box-move-auto-re-detect-annoyance-br](./quick/260822-gnq-fix-box-move-auto-re-detect-annoyance-br/)
 | 260822-vk7 | Fix translation field bug: resizing a box then typing a translation freezes the app momentarily and resets the translation status | 2026-08-23 | 77e09bf | [260822-vk7-fix-translation-field-bug-resizing-a-box](./quick/260822-vk7-fix-translation-field-bug-resizing-a-box/)
-| 260822-wvf | Improve auto-size text wrapping: smarter line breaking (no can/'t, don'/t, Are/you/free/? orphans) via Knuth-Plass-lite DP | 2026-08-23 | bf8091f | [260822-wvf-improve-auto-size-text-wrapping-smarter-](./quick/260822-wvf-improve-auto-size-text-wrapping-smarter-/)
+| 260822-wvf | Improve auto-size text wrapping: smarter line breaking (no can/'t, don'/t, Are/you/free/? orphans) via Knuth-Plass-lite DP | 2026-08-23 | 4db1851 | [260822-wvf-improve-auto-size-text-wrapping-smarter-](./quick/260822-wvf-improve-auto-size-text-wrapping-smarter-/)
 
 ## Deferred Items
 
