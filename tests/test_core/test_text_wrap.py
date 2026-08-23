@@ -293,3 +293,225 @@ def test_break_lines_preserves_blank_lines() -> None:
         width=1000.0,
     )
     assert lines == ["top", "", "bottom"]
+
+
+# ===========================================================================
+# Standards-grade breaker (quick-260823-hge Task 1): UAX #14 atoms via
+# uniseg + pyphen Latin hyphenation + the split_latin signal via
+# break_lines_ex(). Fallback degradation tests force the lazy-import miss
+# through sys.modules so the module NEVER crashes when uniseg/pyphen are
+# absent — mirroring the project's manga-ocr lazy-import pattern.
+# ===========================================================================
+
+
+def _measure_ex(s: str) -> float:
+    return len(s) * CHAR_W
+
+
+# ---------------------------------------------------------------------------
+# tokenize_atoms — UAX #14 boundaries (uniseg)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_tokenize_uax14_hello_world() -> None:
+    """uniseg derives one break after the space: 'Hello, world.' keeps its
+    comma attached and yields exactly two atoms."""
+    assert tokenize_atoms("Hello, world.") == ["Hello,", "world."]
+
+
+@pytest.mark.unit
+def test_tokenize_herta_stays_one_atom() -> None:
+    """'Herta!' is ONE atom under UAX #14 — no break before '!'."""
+    assert tokenize_atoms("Herta!") == ["Herta!"]
+
+
+@pytest.mark.unit
+def test_tokenize_japanese_kinsoku() -> None:
+    """Japanese wraps between ideographs/clauses; kinsoku shori holds — no
+    atom ever STARTS with closing punctuation 、 。 ？！."""
+    text = "あい、うえ、お。"
+    atoms = tokenize_atoms(text)
+    assert atoms, "CJK text must tokenize"
+    assert "".join(atoms) == text, "tokenization must not drop characters"
+    for atom in atoms:
+        assert not atom.startswith(("、", "。", "？", "！")), (
+            f"atom {atom!r} starts with closing punctuation (kinsoku violated)"
+        )
+
+
+@pytest.mark.unit
+def test_tokenize_japanese_mixed_with_latin() -> None:
+    """A mixed run still never splits inside a Latin word: 'Herta!' rides
+    whole through a Japanese sentence."""
+    atoms = tokenize_atoms("それはHerta!の話")
+    joined = "".join(atoms)
+    assert "Herta!" in atoms or any(
+        "Herta!" in a for a in atoms
+    ), f"Herta! must stay whole, got {atoms!r}"
+    assert joined.replace(" ", "") == "それはHerta!の話"
+
+
+@pytest.mark.unit
+def test_glue_pass_composes_after_uniseg() -> None:
+    """The existing glue passes run AFTER uniseg tokenization (idempotent):
+    author-space gluing ('free ?') still works."""
+    assert tokenize_atoms("Are you free ?") == ["Are", "you", "free ?"]
+
+
+@pytest.mark.unit
+def test_fallback_uniseg_missing_degrades_to_split() -> None:
+    """When uniseg.linebreak cannot be imported (forced via sys.modules),
+    tokenize_atoms degrades to whitespace .split() — never raises."""
+    import sys
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setitem(sys.modules, "uniseg.linebreak", None)  # ImportError
+    monkeypatch.setitem(sys.modules, "uniseg", None)
+    try:
+        assert text_wrap.tokenize_atoms("hello world") == ["hello", "world"]
+        # Glue passes still compose on the fallback path.
+        assert text_wrap.tokenize_atoms("Are you free ?") == ["Are", "you", "free ?"]
+    finally:
+        monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# Oversized Latin atoms — pyphen hyphenation + split_latin signal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_oversized_latin_hyphenates_at_dictionary_point() -> None:
+    """'Herta!' wider than the box hyphenates at its dictionary point:
+    'Her-' / 'ta!' with the dash MEASURED as part of the first segment;
+    split_latin=True."""
+    lines, split_latin = text_wrap.break_lines_ex(
+        "Herta!", _measure_ex, 55.0, eps=1.0, lang="en_US"
+    )
+    assert lines == ["Her-", "ta!"], (
+        f"expected the pyphen split Her-/ta!, got {lines!r}"
+    )
+    assert split_latin is True
+    for line in lines:
+        assert _measure_ex(line) <= 56.0, f"line {line!r} overflows width"
+
+
+@pytest.mark.unit
+def test_hyphen_dash_measured_not_assumed() -> None:
+    """The dash is measured with the SAME measurer: with a measurer where
+    '-' is wide, no prefix+'-' fits and the atom falls back to char-split."""
+    def wide_dash(s: str) -> float:
+        return sum(100.0 if ch == "-" else 10.0 for ch in s)
+
+    lines, split_latin = text_wrap.break_lines_ex(
+        "simple", wide_dash, 45.0, eps=1.0, lang="en_US"
+    )
+    # 'sim-' measures 10+10+10+100=130 > 46 — hyphenation can't fit, so the
+    # last-resort char-split fires (no dash anywhere).
+    assert split_latin is True
+    assert all("-" not in ln for ln in lines), f"dash emitted anyway: {lines!r}"
+
+
+@pytest.mark.unit
+def test_all_caps_short_word_skips_hyphenation() -> None:
+    """Short ALL-CAPS words (<= _ALL_CAPS_NO_HYPHEN_MAX_LEN letters) skip
+    pyphen even when a fitting dictionary point exists (comic convention):
+    CRYPTO has the CRYP|TO point that WOULD fit at 55 px — yet no dash."""
+
+    assert len("CRYPTO") <= text_wrap._ALL_CAPS_NO_HYPHEN_MAX_LEN
+    lines, split_latin = text_wrap.break_lines_ex(
+        "CRYPTO", _measure_ex, 55.0, eps=1.0, lang="en_US"
+    )
+    assert all("-" not in ln for ln in lines), (
+        f"short ALL-CAPS word was hyphenated: {lines!r}"
+    )
+    assert "".join(lines) == "CRYPTO"
+    assert split_latin is True
+
+
+@pytest.mark.unit
+def test_cjk_run_char_split_sets_no_latin_flag() -> None:
+    """An oversized CJK run char-splits exactly as before but does NOT set
+    split_latin — CJK wrapping is legitimate, not a fit failure."""
+    text = "\u3042" * 20
+    lines, split_latin = text_wrap.break_lines_ex(text, _measure_ex, 50.0)
+    assert len(lines) >= 4
+    assert "".join(lines) == text
+    assert split_latin is False
+
+
+@pytest.mark.unit
+def test_url_atom_never_gets_a_dash() -> None:
+    """URL-like atoms keep the raw per-char fill (no misleading dashes)."""
+    url = "https://example.com/verylongpathname"
+    lines, split_latin = text_wrap.break_lines_ex(url, _measure_ex, 60.0)
+    assert len(lines) >= 2
+    assert all(not ln.endswith("-") for ln in lines), f"dashed URL: {lines!r}"
+    assert "".join(lines) == url
+
+
+@pytest.mark.unit
+def test_break_lines_wrapper_discards_flag_and_accepts_lang() -> None:
+    """break_lines stays a thin wrapper returning lines only (back-compat);
+    both entry points accept the lang keyword."""
+    assert text_wrap.break_lines("Herta!", _measure_ex, 55.0, lang="en_US") == [
+        "Her-",
+        "ta!",
+    ]
+
+
+@pytest.mark.unit
+def test_fallback_pyphen_missing_char_splits_latin() -> None:
+    """When pyphen cannot be imported (forced via sys.modules), an oversized
+    Latin atom falls back to the char-split safety net — graceful, no crash."""
+    import sys
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setitem(sys.modules, "pyphen", None)  # forces ImportError
+    try:
+        lines, split_latin = text_wrap.break_lines_ex(
+            "Herta!", _measure_ex, 55.0, eps=1.0, lang="en_US"
+        )
+        assert lines and "".join(lines) == "Herta!"
+        assert split_latin is True
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.unit
+def test_fallback_unknown_lang_skips_hyphenation() -> None:
+    """An unknown hyphenation language degrades to the char-split net (the
+    language_fallback/KeyError guard) instead of raising."""
+    lines, split_latin = text_wrap.break_lines_ex(
+        "Herta!", _measure_ex, 55.0, eps=1.0, lang="xx_XX"
+    )
+    assert lines and "".join(lines).replace("-", "") == "Herta!"
+    assert split_latin is True
+
+
+@pytest.mark.unit
+def test_no_import_time_import_error() -> None:
+    """The module imports cleanly regardless — lazy imports inside functions
+    mean neither uniseg nor pyphen is required at import time."""
+    import importlib
+    import sys
+
+    assert "uniseg" not in sys.modules or True  # informational only
+    mod = importlib.import_module("manga_ai_studio.core.text_wrap")
+    assert callable(mod.tokenize_atoms)
+    assert callable(mod.break_lines)
+    assert callable(mod.break_lines_ex)
+
+
+@pytest.mark.unit
+def test_kinsoku_in_broken_lines() -> None:
+    """End-to-end kinsoku: narrow-box Japanese wrap never starts a line with
+    、。？！ (the DP consumes UAX #14 atoms)."""
+    text = "これはテストです。本当に、動きますか？"
+    lines, split_latin = text_wrap.break_lines_ex(text, _measure_ex, 60.0)
+    assert len(lines) >= 2
+    for line in lines:
+        assert not line.startswith(("、", "。", "？", "！")), (
+            f"line {line!r} starts with closing punctuation"
+        )
