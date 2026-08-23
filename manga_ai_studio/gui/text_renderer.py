@@ -82,6 +82,7 @@ from PySide6.QtGui import (
 )
 
 from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.core.text_wrap import break_lines
 
 # ---------------------------------------------------------------------------
 # Auto-fit constants (plan 04-09 machinery preserved at scene px — D-15)
@@ -309,12 +310,19 @@ def _outline_pen(style: TextStyle) -> QPen | None:
 
 
 def _build_document(
-    text: str, style: TextStyle, size_px: float, inner_w: float
+    text: str,
+    style: TextStyle,
+    size_px: float,
+    inner_w: float,
+    wrap: QTextOption.WrapMode = QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere,
 ) -> QTextDocument:
-    """Lay out ``text`` as a PLAIN document at ``size_px`` wrapped at ``inner_w``.
+    """Lay out ``text`` as a PLAIN document at ``size_px`` wrapped per ``wrap``.
 
     The merged ``QTextCharFormat`` carries the opaque fill (D-01) and the
-    outline pen (Pattern 3). The document layout is FORCED before returning
+    outline pen (Pattern 3). ``wrap`` defaults to the legacy greedy engine
+    mode so any caller that has not adopted the owned line breaker keeps its
+    behavior; ``layout()`` passes ``NoWrap`` for pre-broken lines
+    (quick-260822-wvf). The document layout is FORCED before returning
     so the caller's block-layout reads are safe on this stack.
     """
     doc = QTextDocument()
@@ -322,7 +330,7 @@ def _build_document(
     doc.setDocumentMargin(0.0)
     doc.setTextWidth(inner_w)
     opt = QTextOption(_ALIGN_H_TO_QT.get(style.align_h, Qt.AlignmentFlag.AlignHCenter))
-    opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    opt.setWrapMode(wrap)
     doc.setDefaultTextOption(opt)
 
     font = _style_font(style, size_px)
@@ -344,10 +352,37 @@ def _build_document(
 
 
 def _line_rects(doc: QTextDocument) -> list:
-    """Per-line natural rects from the laid-out document (engine-aligned)."""
+    """Per-line natural rects from the laid-out document (engine-aligned).
+
+    Iterates ALL blocks — the owned breaker (quick-260822-wvf) renders
+    pre-broken lines as explicit ``\\n``, and each ``\\n`` starts a new
+    QTextDocument block; reading only ``firstBlock()`` would drop every
+    line after the first.
+    """
+    rects: list = []
     block = doc.firstBlock()
-    layout = block.layout()
-    return [layout.lineAt(i).naturalTextRect() for i in range(layout.lineCount())]
+    while block.isValid():
+        block_layout = block.layout()
+        for i in range(block_layout.lineCount()):
+            rects.append(block_layout.lineAt(i).naturalTextRect())
+        block = block.next()
+    return rects
+
+
+def _break_lines_for(
+    text: str, style: TextStyle, size_px: float, inner_w: float
+) -> list[str]:
+    """The owned line breaks for ``text`` at ``size_px`` (quick-260822-wvf).
+
+    Measures with ``_style_font``'s QFontMetrics horizontalAdvance — the
+    SAME rounded pixel size ``_build_document`` renders with (RESEARCH
+    pitfall 1; ``_style_font`` int-rounds setPixelSize) — then delegates to
+    the Qt-free core breaker (contraction/punctuation atoms + Knuth-Plass-
+    lite balancing).
+    """
+    font = _style_font(style, size_px)
+    fm = QFontMetricsF(font)
+    return break_lines(text, fm.horizontalAdvance, inner_w)
 
 
 # ---------------------------------------------------------------------------
@@ -531,9 +566,11 @@ def layout(
     """Lay out ``text`` inside ``box_rect`` per ``style``.
 
     Horizontal mode (the default): the box rect is shrunk by the inner
-    inset on every side; lines wrap at the inner width (engine word wrap
-    with anywhere fallback); the engine applies ``align_h``; ``align_v``
-    offsets the block via the result's ``origin``. A manual size
+    inset on every side; lines are pre-broken by the owned breaker
+    (``core/text_wrap`` — balanced, no contraction/punctuation fragments)
+    and rendered as explicit ``\\n`` in a NoWrap document; the engine
+    applies ``align_h`` per line; ``align_v`` offsets the block via the
+    result's ``origin``. A manual size
     (``font_size_px`` set, ``auto_fit`` False) renders exactly at that size
     and reports ``overflow`` when the block exceeds the inner height.
     Auto-fit (the default) runs the 04-09 bounded loop at scene px.
@@ -565,7 +602,17 @@ def layout(
     manual = style.font_size_px is not None and not style.auto_fit
     if manual:
         size = min(_FONT_SIZE_MAX, max(_FONT_SIZE_MIN, float(style.font_size_px)))
-        doc = _build_document(text, style, size, inner_w)
+        # Owned line breaks (quick-260822-wvf): pre-broken \n lines in a
+        # NoWrap document — no contraction fragments, glued punctuation, or
+        # one-word orphans. The overflow check stays honest (vertical only).
+        lines = _break_lines_for(text, style, size, inner_w)
+        doc = _build_document(
+            "\n".join(lines),
+            style,
+            size,
+            inner_w,
+            wrap=QTextOption.WrapMode.NoWrap,
+        )
         overflow = doc.size().height() > inner_h + _EPS
     else:
         # Auto-fit (D-15 / G-07-4): box-adaptive base + [10,28] clamp as the
@@ -587,7 +634,16 @@ def layout(
             # Floor check at the loop TOP — no iteration renders below it.
             if target <= _OVERLAY_FIT_FLOOR_PX:
                 break
-            candidate = _build_document(text, style, target, inner_w)
+            # Owned line breaks re-computed per candidate size (the same
+            # rounded pixel size the candidate document renders with).
+            lines = _break_lines_for(text, style, target, inner_w)
+            candidate = _build_document(
+                "\n".join(lines),
+                style,
+                target,
+                inner_w,
+                wrap=QTextOption.WrapMode.NoWrap,
+            )
             if candidate.size().height() <= inner_h + _EPS:
                 # Fits: keep the last-fitting candidate, then grow (bounded
                 # by the cap — the fit check and the cap share the inner box).

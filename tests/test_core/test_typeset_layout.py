@@ -503,3 +503,97 @@ def test_vertical_code_point_indexing(qapp) -> None:
     placements = layout_vertical("日本語ABC", style, 96.0, 96.0)
     assert len(placements) == 6
     assert placements[3]["char"] == "A"
+
+
+# ===========================================================================
+# Owned line breaking — quick-260822-wvf Task 2 regression tests
+#
+# layout() pre-breaks lines via core/text_wrap (contraction/punctuation
+# atoms + balancing) and renders them as explicit \n in a NoWrap document,
+# on BOTH the manual and the auto-fit path. These tests inspect the laid-out
+# document's line texts (platform-robust property assertions — never
+# hard-coded pixel positions, per the STATE.md platform lesson).
+# ===========================================================================
+
+
+def _doc_line_texts(result) -> list[str]:
+    """The laid-out document's per-line texts across ALL blocks (the owned
+    breaker renders pre-broken lines as explicit \\n — one QTextDocument
+    block each; block layout is forced by _build_document)."""
+    plain = result.document.toPlainText()
+    texts: list[str] = []
+    block = result.document.firstBlock()
+    while block.isValid():
+        lo = block.layout()
+        for i in range(lo.lineCount()):
+            line = lo.lineAt(i)
+            texts.append(plain[line.textStart() : line.textStart() + line.textLength()])
+        block = block.next()
+    return texts if texts else plain.split("\n")
+
+
+@pytest.mark.unit
+def test_layout_never_splits_contraction(qapp) -> None:
+    """(a) "I can't believe it": no committed line ends in "can" or starts
+    with "'t" — the contraction rides one atom (manual-size path)."""
+    style = TextStyle(font_size_px=14.0, auto_fit=False)
+    rect = QRectF(0, 0, 90, 120)  # narrow: forces wrapping
+    for mode_style in (style, TextStyle()):  # manual AND auto-fit paths
+        result = layout("I can't believe it", mode_style, rect, vertical=False)
+        lines = _doc_line_texts(result)
+        assert len(lines) >= 2, "narrow box must wrap"
+        for line in lines:
+            assert not line.rstrip().endswith("can"), (
+                f"line {line!r} splits the can't contraction"
+            )
+            assert not line.lstrip().startswith("'t"), (
+                f"line {line!r} starts with a contraction fragment"
+            )
+
+
+@pytest.mark.unit
+def test_layout_never_splits_dont_contraction(qapp) -> None:
+    """(b) "don't stop believing": same contraction contract through the
+    auto-fit path — no "don" / "t"-fragment lines."""
+    rect = QRectF(0, 0, 80, 100)
+    result = layout("don't stop believing", TextStyle(), rect, vertical=False)
+    lines = _doc_line_texts(result)
+    assert len(lines) >= 2
+    for line in lines:
+        stripped = line.strip()
+        assert not stripped.endswith("don"), f"line {line!r} splits don't"
+        assert stripped not in ("t", "n't", "'t"), (
+            f"line {line!r} is a contraction fragment"
+        )
+
+
+@pytest.mark.unit
+def test_layout_never_starts_line_with_punctuation(qapp) -> None:
+    """(c) "Are you free ?": the glued 'free ?' atom wraps whole — no line
+    starts with '?' (both render paths)."""
+    rect = QRectF(0, 0, 90, 120)
+    for mode_style in (TextStyle(font_size_px=14.0, auto_fit=False), TextStyle()):
+        result = layout("Are you free ?", mode_style, rect, vertical=False)
+        lines = _doc_line_texts(result)
+        assert len(lines) >= 2
+        for line in lines:
+            assert not line.lstrip().startswith("?"), (
+                f"line {line!r} starts with glued punctuation"
+            )
+
+
+@pytest.mark.unit
+def test_layout_lines_balance_no_orphan_last_line(qapp) -> None:
+    """Balancing smoke: multi-word text that wraps into exactly two lines
+    never leaves a one-short-word orphan last line when both words fit on
+    either line — range/property-based, no pixel positions."""
+    rect = QRectF(0, 0, 200, 200)
+    result = layout("good grief charlie brown", TextStyle(), rect, vertical=False)
+    lines = [ln.strip() for ln in _doc_line_texts(result)]
+    lines = [ln for ln in lines if ln]
+    if len(lines) == 2:
+        first_words, last_words = lines[0].split(), lines[-1].split()
+        # A balanced 2+2 split must beat a greedy 3+1 orphan.
+        assert len(last_words) > 1 or len(first_words) <= 1, (
+            f"orphan last line {lines!r}: balanced alternative existed"
+        )
