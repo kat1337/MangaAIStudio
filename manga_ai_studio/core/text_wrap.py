@@ -297,18 +297,39 @@ def break_lines(
         ``<= width + eps`` (oversized atoms are char-split first); the
         assignment minimizes raggedness² + demerits with soft
         orphan/widow/per-line penalties.
+
+    HARD NEWLINES: when given raw text, explicit ``\\n`` breaks are
+    AUTHOR INTENT — each source line is wrapped independently and never
+    merged with its neighbours (an empty source line yields an empty
+    output line, preserving blank lines).
     """
     if isinstance(atoms_or_text, str):
-        atoms = tokenize_atoms(atoms_or_text)
-    else:
-        # Pre-tokenized input gets the same glue passes (idempotent on
-        # already-glued atoms) so a bare "?" atom can never start a line
-        # even when the caller skipped tokenize_atoms.
-        provided = [a for a in atoms_or_text if a]
-        atoms = _glue_trailing(_absorb_leading(provided))
-    if not atoms:
-        return []
+        if not atoms_or_text.strip():
+            return []
+        if "\n" in atoms_or_text:
+            out: list[str] = []
+            for para in atoms_or_text.split("\n"):
+                out.extend(_break_paragraph(para, measure, width, eps))
+            return out
+        return _break_paragraph(atoms_or_text, measure, width, eps)
+    # Pre-tokenized input gets the same glue passes (idempotent on
+    # already-glued atoms) so a bare "?" atom can never start a line
+    # even when the caller skipped tokenize_atoms.
+    provided = [a for a in atoms_or_text if a]
+    atoms = _glue_trailing(_absorb_leading(provided))
+    return _break_atom_list(atoms, measure, width, eps)
 
+
+def _break_paragraph(para: str, measure, width: float, eps: float) -> list[str]:
+    """Wrap one hard-line paragraph (no ``\\n`` inside)."""
+    atoms = tokenize_atoms(para)
+    if not atoms:
+        return [""]  # blank source line preserved verbatim
+    return _break_atom_list(atoms, measure, width, eps)
+
+
+def _break_atom_list(atoms, measure, width: float, eps: float) -> list[str]:
+    """Shared atom pipeline: oversized split -> DP/greedy -> joined lines."""
     atoms = _split_oversized(atoms, measure, width, eps)
     widths = [measure(a) for a in atoms]
     space_w = max(0.0, measure(" "))

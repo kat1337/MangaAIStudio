@@ -597,3 +597,39 @@ def test_layout_lines_balance_no_orphan_last_line(qapp) -> None:
         assert len(last_words) > 1 or len(first_words) <= 1, (
             f"orphan last line {lines!r}: balanced alternative existed"
         )
+
+
+# ===========================================================================
+# Multi-block geometry + hard-newline regressions (quick-260822-wvf
+# follow-up): explicit \n creates one QTextDocument block per source line.
+# naturalTextRect is BLOCK-LOCAL — without translating by the block's
+# document offset every rect reported y=0 and ALL lines stacked/overlapped
+# (bubbles rendered a single clipped line). And tokenize_atoms used to
+# flatten author newlines into spaces.
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_layout_multiblock_line_rects_do_not_stack(qapp) -> None:
+    """Each hard-line renders at its own y — rects strictly increasing."""
+    for style in (TextStyle(font_size_px=14.0, auto_fit=False), TextStyle()):
+        result = layout("Ah!\nIt's Sukoya-san", style, QRectF(0, 0, 120, 200))
+        ys = [r.y() for r in result.line_rects]
+        assert len(ys) >= 2, f"expected multiple lines, got {ys}"
+        assert ys == sorted(ys) and len(set(ys)) == len(ys), f"stacked: {ys}"
+        # ink spans the full multi-line block (not a collapsed single line)
+        assert result.ink.height() > 20
+
+
+@pytest.mark.unit
+def test_layout_preserves_manual_newlines(qapp) -> None:
+    """Author \\n breaks are never merged away, even in a huge box where
+    everything would fit on one greedy line."""
+    result = layout(
+        "Ah!\nIt's Sukoya-san",
+        TextStyle(font_size_px=14.0, auto_fit=False),
+        QRectF(0, 0, 600, 200),
+    )
+    assert "\n" in result.document.toPlainText()
+    texts = [ln.strip() for ln in _doc_line_texts(result)]
+    assert "Ah!" in texts

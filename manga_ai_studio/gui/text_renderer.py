@@ -357,14 +357,23 @@ def _line_rects(doc: QTextDocument) -> list:
     Iterates ALL blocks — the owned breaker (quick-260822-wvf) renders
     pre-broken lines as explicit ``\\n``, and each ``\\n`` starts a new
     QTextDocument block; reading only ``firstBlock()`` would drop every
-    line after the first.
+    line after the first. Each ``naturalTextRect`` is BLOCK-LOCAL, so it
+    MUST be translated by ``block.position()`` (cumulative y per block) —
+    without it every block's rect reports y=0 and all lines stack/overlap
+    (regression found live: bubbles rendered a single clipped line).
     """
     rects: list = []
     block = doc.firstBlock()
     while block.isValid():
+        # documentLayout().blockBoundingRect is DOCUMENT-positioned — its
+        # topLeft carries the cumulative block offset (PySide6's
+        # QTextBlock.position() comes back as a plain int here).
+        block_origin = doc.documentLayout().blockBoundingRect(block).topLeft()
         block_layout = block.layout()
         for i in range(block_layout.lineCount()):
-            rects.append(block_layout.lineAt(i).naturalTextRect())
+            rects.append(
+                block_layout.lineAt(i).naturalTextRect().translated(block_origin)
+            )
         block = block.next()
     return rects
 

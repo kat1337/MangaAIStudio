@@ -258,3 +258,38 @@ def test_break_lines_mixed_normal_and_oversized_glyphs() -> None:
     lines = break_lines(atoms, measure=measure, width=100.0, eps=1.0)
     assert all(isinstance(ln, str) for ln in lines)
     assert "".join(lines).replace(" ", "").replace("X", "") == "hithereok"
+
+
+# ---------------------------------------------------------------------------
+# Hard-newline preservation (quick-260822-wvf follow-up): explicit \n in the
+# translation field is AUTHOR INTENT — paragraphs wrap independently and are
+# never merged; blank lines survive verbatim.
+# ---------------------------------------------------------------------------
+
+
+def test_break_lines_preserves_manual_newlines() -> None:
+    lines = break_lines(
+        "Ah!\nIt's Sukoya-san",
+        measure=lambda s: len(s) * 10.0,
+        width=1000.0,  # everything would fit merged — must NOT merge
+    )
+    assert lines == ["Ah!", "It's Sukoya-san"]
+
+
+def test_break_lines_wraps_each_paragraph_independently() -> None:
+    lines = break_lines(
+        "one two\nthree four five",
+        measure=lambda s: len(s) * 10.0,
+        width=70.0,  # fits 7 chars per line
+    )
+    assert lines[0] == "one two"  # paragraph 1 untouched by para 2's length
+    assert all(ln for ln in lines)
+
+
+def test_break_lines_preserves_blank_lines() -> None:
+    lines = break_lines(
+        "top\n\nbottom",
+        measure=lambda s: len(s) * 10.0,
+        width=1000.0,
+    )
+    assert lines == ["top", "", "bottom"]
