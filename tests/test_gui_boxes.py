@@ -5085,6 +5085,9 @@ def test_grace_defers_while_translation_focused(qtbot, tmp_path, monkeypatch) ->
 
     _commit_move(window, item, 20, 0)
     assert window._stationary_timer.isActive()
+    # The user edits the SELECTED box: select so the panel fields enable.
+    item.setSelected(True)
+    QApplication.processEvents()
     panel = window.inspector_panel
     panel.translation_edit.setFocus()
     QApplication.processEvents()
@@ -5155,6 +5158,9 @@ def test_deferred_grace_runs_exactly_once_after_focus_out(
     refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
 
     _commit_move(window, item, 20, 0)
+    # Select so the panel fields enable, then focus the translation field.
+    item.setSelected(True)
+    QApplication.processEvents()
     panel = window.inspector_panel
     panel.translation_edit.setFocus()
     QApplication.processEvents()

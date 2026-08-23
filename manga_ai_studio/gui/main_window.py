@@ -3726,6 +3726,15 @@ class MainWindow(QMainWindow):
         """The ~5 s stationary grace expired: one auto detection-fit + OCR
         per geometry-stale box (quick-260822-gnq).
 
+        quick-260822-vk7: the grace ALSO waits out edit sessions — while an
+        Inspector ``_CommitTextEdit`` field or the canvas inline editor is
+        active, the timer RE-ARMS (deferred, never dropped) instead of
+        dispatching. The refit leg runs derive_page_mask_state over the whole
+        page synchronously on the GUI thread, so letting it fire mid-typing
+        was the reported resize-then-type freeze; deferral removes all heavy
+        work from the typing path. Once focus leaves the editor, the pending
+        work runs exactly once.
+
         T-QG-02 mitigation: gated on ``_op_running`` — if another op is
         running when the timer fires, this is a silent skip (the boxes stay
         marked stale; the user can still click the affordance later). Each
@@ -3733,6 +3742,14 @@ class MainWindow(QMainWindow):
         :meth:`_redetect_single_box` (T-QG-03 — hand-edited text is never
         silently overwritten).
         """
+        if self.inspector_panel.is_text_edit_active() or (
+            self.canvas._inline_editor.is_active()
+        ):
+            logger.debug("stationary re-detect deferred: edit session active")
+            # Interval re-read from the module constant at start time (the
+            # established monkeypatch seam).
+            self._stationary_timer.start(STATIONARY_GRACE_MS)
+            return
         if self._op_running:
             return
         for item in [
