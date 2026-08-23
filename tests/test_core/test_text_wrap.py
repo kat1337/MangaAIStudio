@@ -469,6 +469,7 @@ def test_fallback_pyphen_missing_char_splits_latin() -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setitem(sys.modules, "pyphen", None)  # forces ImportError
+    monkeypatch.setattr(text_wrap, "_HYPHEN_DICTS", {})  # drop cached dicts
     try:
         lines, split_latin = text_wrap.break_lines_ex(
             "Herta!", _measure_ex, 55.0, eps=1.0, lang="en_US"
