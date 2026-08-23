@@ -2121,6 +2121,83 @@ def test_inspector_load_box_blocks_signals_during_populate(qtbot) -> None:
     assert fired == [], f"load_box must not emit change signals during populate; got {fired}"
 
 
+# ---- quick-260822-vk7: text-edit-session probe + Inspector reload guard
+
+
+@pytest.mark.gui
+def test_is_text_edit_active_false_without_focus(qtbot) -> None:
+    """is_text_edit_active() is False on a fresh populated panel (no field focused)."""
+    panel = _make_inspector(qtbot)
+    panel.load_box(_pagebox_with_text(recognized="hello", translation="hola"))
+    assert panel.is_text_edit_active() is False
+
+
+@pytest.mark.gui
+def test_is_text_edit_active_true_when_field_focused(qtbot) -> None:
+    """Focusing either _CommitTextEdit field flips the probe True (D-04
+    symmetry: recognized and translation are equally exposed)."""
+    panel = _make_inspector(qtbot)
+    panel.show()
+    qtbot.waitExposed(panel)
+    panel.load_box(_pagebox_with_text(recognized="hello", translation="hola"))
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    assert panel.is_text_edit_active() is True
+    panel.recognized_edit.setFocus()
+    QApplication.processEvents()
+    assert panel.is_text_edit_active() is True
+
+
+@pytest.mark.gui
+def test_selection_follower_reload_skipped_while_translation_focused(
+    qtbot, tmp_path
+) -> None:
+    """quick-260822-vk7 Task 1: with translation_edit focused, a reload via
+    _on_canvas_selection_changed is SKIPPED (load_box never lands mid-edit);
+    once focus leaves the field the guard releases and the follower resyncs."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    item.setSelected(True)
+    QApplication.processEvents()
+    panel = window.inspector_panel
+
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    assert panel.is_text_edit_active() is True
+    panel.translation_edit.insertPlainText("typed mid-edit")
+
+    # The reload attempt while focused -> suppressed, typed text untouched.
+    window._on_canvas_selection_changed()
+    assert panel.translation_edit.toPlainText().endswith("typed mid-edit")
+
+    # Focus-out releases the guard: the next reload repopulates from the box.
+    panel.translation_edit.clearFocus()
+    QApplication.processEvents()
+    window._on_canvas_selection_changed()
+    assert "typed mid-edit" not in panel.translation_edit.toPlainText()
+
+
+@pytest.mark.gui
+def test_boxes_modified_reload_does_not_clobber_focused_translation(
+    qtbot, tmp_path
+) -> None:
+    """quick-260822-vk7 Task 1 (end-to-end shape): the OCR-finished chain
+    (_on_ocr_finished -> canvas.boxes_modified -> _on_boxes_modified ->
+    _on_canvas_selection_changed -> load_box) must NOT clobber the typed
+    translation while the field holds focus."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    item.setSelected(True)
+    QApplication.processEvents()
+    panel = window.inspector_panel
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    panel.translation_edit.insertPlainText("my translation")
+    # Drive the same emission _on_ocr_finished performs after writing text.
+    window.canvas.boxes_modified.emit(window.canvas.boxes_snapshot())
+    assert panel.translation_edit.toPlainText().endswith("my translation")
+
+
 @pytest.mark.gui
 def test_inspector_recognized_edit_emits_recognized_edited(qtbot) -> None:
     """Editing the Recognized field emits recognized_edited(text) via connect_commit_handlers."""
