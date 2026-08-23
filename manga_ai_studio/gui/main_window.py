@@ -3798,7 +3798,18 @@ class MainWindow(QMainWindow):
         section edits ALL selected); no selection shows the empty-state copy.
         The Inspector never drives canvas selection — it is a property-editor
         follower (UI-SPEC §18).
+
+        quick-260822-vk7: when an edit session lives in one of the panel's
+        commit-deferred ``_CommitTextEdit`` fields, the reload is SKIPPED —
+        a ``load_box`` landing mid-typing (e.g. the OCR-finished chain
+        ``boxes_modified`` -> here) would clobber the user's uncommitted
+        keystrokes. The model-write side of upstream callers is untouched;
+        the panel resyncs on the next event after focus-out releases the
+        guard.
         """
+        if self.inspector_panel.is_text_edit_active():
+            logger.debug("Inspector reload skipped: text edit session active")
+            return
         selected = self._selected_box_items()
         if not selected:
             self.inspector_panel.clear()

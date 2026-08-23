@@ -2150,16 +2150,27 @@ def test_is_text_edit_active_true_when_field_focused(qtbot) -> None:
 
 @pytest.mark.gui
 def test_selection_follower_reload_skipped_while_translation_focused(
-    qtbot, tmp_path
+    qtbot, tmp_path, monkeypatch
 ) -> None:
     """quick-260822-vk7 Task 1: with translation_edit focused, a reload via
     _on_canvas_selection_changed is SKIPPED (load_box never lands mid-edit);
-    once focus leaves the field the guard releases and the follower resyncs."""
+    once focus leaves the field the guard releases and the follower resyncs
+    (load_box runs again)."""
     window = _window_with_page(qtbot, tmp_path)
     item = _add_user_box_window(window, Box(10, 20, 80, 80))
     item.setSelected(True)
     QApplication.processEvents()
     panel = window.inspector_panel
+
+    # Recorder around the REAL load_box.
+    load_calls: list = []
+    real_load = panel.load_box
+    monkeypatch.setattr(
+        panel,
+        "load_box",
+        lambda pb, **kw: (load_calls.append(pb), real_load(pb, **kw)),
+    )
+    load_calls.clear()  # drop the initial selection-follow populate
 
     panel.translation_edit.setFocus()
     QApplication.processEvents()
@@ -2168,13 +2179,17 @@ def test_selection_follower_reload_skipped_while_translation_focused(
 
     # The reload attempt while focused -> suppressed, typed text untouched.
     window._on_canvas_selection_changed()
+    assert load_calls == [], "load_box must NOT land mid-edit"
     assert panel.translation_edit.toPlainText().endswith("typed mid-edit")
 
-    # Focus-out releases the guard: the next reload repopulates from the box.
+    # Focus-out releases the guard: the commit chain itself reloads the panel
+    # (_inspector_commit_post -> load_box + the boxes_modified follower) and
+    # any further reload also lands — the guard is gone either way.
     panel.translation_edit.clearFocus()
     QApplication.processEvents()
+    assert len(load_calls) >= 1, "the guard must release after focus-out"
     window._on_canvas_selection_changed()
-    assert "typed mid-edit" not in panel.translation_edit.toPlainText()
+    assert len(load_calls) >= 2, "subsequent reloads land normally again"
 
 
 @pytest.mark.gui

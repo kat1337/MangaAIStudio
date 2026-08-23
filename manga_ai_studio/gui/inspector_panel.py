@@ -587,6 +587,18 @@ class InspectorPanel(QWidget):
         self.clear()
 
     # ------------------------------------------------------------- population
+    def is_text_edit_active(self) -> bool:
+        """True iff an in-progress commit-deferred edit session lives in one
+        of the two ``_CommitTextEdit`` fields; external reloads must not land
+        while this is True (quick-260822-vk7).
+
+        The recognized + translation fields commit on focus-out only, so a
+        ``load_box`` that lands mid-typing visibly wipes uncommitted
+        keystrokes. The MainWindow consults this probe before every
+        selection-follower reload (and before arming stationary-grace work).
+        """
+        return self.translation_edit.hasFocus() or self.recognized_edit.hasFocus()
+
     def load_box(self, pagebox, rendered_size_px: float | None = None) -> None:
         """Populate the fields from the given ``pagebox`` (the selection follower).
 
