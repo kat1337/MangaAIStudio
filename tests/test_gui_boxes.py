@@ -5177,6 +5177,72 @@ def test_deferred_grace_runs_exactly_once_after_focus_out(
 
 
 @pytest.mark.gui
+def test_resize_then_type_repro_guard(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260822-vk7 Task 3: the EXACT reported repro order — create/
+    select a box, emit a committed RESIZE (arms the grace), type into the
+    translation field mid-grace, let the timer fire AND the OCR-finished
+    land. Typed keystrokes survive verbatim, the grace defers (re-arms),
+    and after editing finishes the pending work runs once and the pagebox
+    carries BOTH the OCR text and the typed translation."""
+    import manga_ai_studio.gui.main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    window = _window_with_page(qtbot, tmp_path)
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    item.setSelected(True)
+    QApplication.processEvents()
+    panel = window.inspector_panel
+
+    # A COMMITTED RESIZE (changed tuple) marks stale + arms the grace timer.
+    before = window.canvas.boxes_snapshot()
+    r = item.rect()
+    item.setRect(QRectF(r.x(), r.y(), r.width() + 10, r.height()))
+    item._sync_handles()
+    window.canvas.boxes_modified.emit(before)
+    assert item.geometry_stale is True
+    assert window._stationary_timer.isActive()
+
+    # The user immediately types into the translation field (commit-deferred).
+    panel.translation_edit.setFocus()
+    QApplication.processEvents()
+    assert panel.is_text_edit_active() is True
+    panel.translation_edit.insertPlainText("typed translation")
+
+    # The grace fires MID-TYPING: deferred (no freeze path), re-armed.
+    qtbot.wait(150)
+    assert refit_calls == [] and ocr_calls == [], (
+        "no heavy work may run while the edit session is active"
+    )
+    assert window._stationary_timer.isActive(), "grace must re-arm, not drop"
+
+    # The OCR-finished result lands mid-typing: the Inspector reload is
+    # suppressed -> the field keeps the typed text verbatim.
+    window._on_ocr_finished(
+        {"box_id": id(item.pagebox), "text": "recognized"}
+    )
+    QApplication.processEvents()
+    assert panel.translation_edit.toPlainText().endswith("typed translation")
+
+    # Editing finishes (focus-out commits) -> the pending grace runs ONCE.
+    panel.translation_edit.clearFocus()
+    QApplication.processEvents()
+    qtbot.waitUntil(
+        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
+    )
+
+    # The re-detect's OCR result lands (unfocused now): the panel refreshes,
+    # the typed translation SURVIVES, and the payload carries BOTH texts.
+    window._on_ocr_finished(
+        {"box_id": id(item.pagebox), "text": "recognized"}
+    )
+    QApplication.processEvents()
+    assert "typed translation" in panel.translation_edit.toPlainText()
+    assert item.pagebox.payload.text == "recognized"
+    assert item.pagebox.payload.translation.endswith("typed translation")
+
+
+@pytest.mark.gui
 def test_redetect_affordance_click_refits_with_current_geometry(
     qtbot, tmp_path, monkeypatch
 ) -> None:
