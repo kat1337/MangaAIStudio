@@ -82,7 +82,7 @@ from PySide6.QtGui import (
 )
 
 from manga_ai_studio.core.text_style import TextStyle
-from manga_ai_studio.core.text_wrap import break_lines
+from manga_ai_studio.core.text_wrap import break_lines_ex
 
 # ---------------------------------------------------------------------------
 # Auto-fit constants (plan 04-09 machinery preserved at scene px — D-15)
@@ -380,18 +380,23 @@ def _line_rects(doc: QTextDocument) -> list:
 
 def _break_lines_for(
     text: str, style: TextStyle, size_px: float, inner_w: float
-) -> list[str]:
-    """The owned line breaks for ``text`` at ``size_px`` (quick-260822-wvf).
+) -> tuple[list[str], bool]:
+    """The owned line breaks for ``text`` at ``size_px`` (quick-260822-wvf,
+    extended quick-260823-hge).
 
     Measures with ``_style_font``'s QFontMetrics horizontalAdvance — the
     SAME rounded pixel size ``_build_document`` renders with (RESEARCH
     pitfall 1; ``_style_font`` int-rounds setPixelSize) — then delegates to
-    the Qt-free core breaker (contraction/punctuation atoms + Knuth-Plass-
-    lite balancing).
+    the Qt-free core breaker (UAX #14 atoms + hyphenation + balancing).
+
+    Returns ``(lines, split_latin)``: ``split_latin`` is True when the
+    break had to split a LATIN word (hyphenated or char-split). The
+    auto-fit loop treats such a candidate as NOT fitting — a layout that
+    had to break a Latin word is a failed fit, not a result.
     """
     font = _style_font(style, size_px)
     fm = QFontMetricsF(font)
-    return break_lines(text, fm.horizontalAdvance, inner_w)
+    return break_lines_ex(text, fm.horizontalAdvance, inner_w)
 
 
 # ---------------------------------------------------------------------------
@@ -613,8 +618,11 @@ def layout(
         size = min(_FONT_SIZE_MAX, max(_FONT_SIZE_MIN, float(style.font_size_px)))
         # Owned line breaks (quick-260822-wvf): pre-broken \n lines in a
         # NoWrap document — no contraction fragments, glued punctuation, or
-        # one-word orphans. The overflow check stays honest (vertical only).
-        lines = _break_lines_for(text, style, size, inner_w)
+        # one-word orphans. The overflow check stays honest (vertical only):
+        # AUTHOR INTENT wins at the chosen size — the split_latin flag is
+        # deliberately ignored here (quick-260823-hge), but the lines still
+        # carry proper pyphen hyphenation when a word had to break.
+        lines, _split_latin = _break_lines_for(text, style, size, inner_w)
         doc = _build_document(
             "\n".join(lines),
             style,
@@ -645,7 +653,7 @@ def layout(
                 break
             # Owned line breaks re-computed per candidate size (the same
             # rounded pixel size the candidate document renders with).
-            lines = _break_lines_for(text, style, target, inner_w)
+            lines, split_latin = _break_lines_for(text, style, target, inner_w)
             candidate = _build_document(
                 "\n".join(lines),
                 style,
@@ -653,7 +661,15 @@ def layout(
                 inner_w,
                 wrap=QTextOption.WrapMode.NoWrap,
             )
-            if candidate.size().height() <= inner_h + _EPS:
+            # Fit predicate (quick-260823-hge ordering fix): a candidate is
+            # only a fit when its height fits AND its break did not have to
+            # split a Latin word — a split layout at an oversized font is a
+            # FAILED FIT, not a result. The loop keeps shrinking instead of
+            # growing/shrinking around a poisoned layout; the floor check at
+            # the loop top stays the escape hatch (the final candidate is
+            # accepted with honest overflow).
+            fits = candidate.size().height() <= inner_h + _EPS and not split_latin
+            if fits:
                 # Fits: keep the last-fitting candidate, then grow (bounded
                 # by the cap — the fit check and the cap share the inner box).
                 doc, size = candidate, target

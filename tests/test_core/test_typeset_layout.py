@@ -202,9 +202,16 @@ def test_auto_fit_floor_terminates_for_huge_text(qapp) -> None:
 @pytest.mark.unit
 def test_auto_fit_fits_long_text_within_loop_budget(qapp) -> None:
     """A long translation in a wide box fits at a size at-or-above the floor
-    (the loop terminates by FIT, the ink stays inside the inner rect)."""
+    (the loop terminates by FIT, the ink stays inside the inner rect).
+
+    NOTE (quick-260823-hge re-derivation, RESEARCH pitfall 7): the text is
+    space-separated words — a single 600-char unbreakable Latin RUN can no
+    longer be accepted as a mid-loop fit (the ordering fix rejects
+    Latin-split candidates down to the 5 px floor); the unavoidable-split
+    floor escape is pinned by test_auto_fit_floor_escapes_with_honest_overflow.
+    """
     rect = QRectF(0, 0, 400, 200)
-    result = layout("x" * 600, TextStyle(), rect, vertical=False)
+    result = layout(" ".join(["word"] * 150), TextStyle(), rect, vertical=False)
     assert result.used_font_size_px >= 5.0 - 1e-6
     assert result.overflow is False, "the text must fit in the wide box"
     _, inner_h = _inner(400, 200)
@@ -650,7 +657,7 @@ def test_auto_fit_rejects_latin_split_shrinks_instead(qapp) -> None:
     loop treats the split candidate as not-fitting and lands on a STRICTLY
     SMALLER font where 'Herta!' sits whole (or hyphenated at worst) — never
     a dash-less mid-word split above the floor."""
-    rect = QRectF(0, 0, 45, 160)  # inner_w = 41 — 'Herta!' overflows at 14 px
+    rect = QRectF(0, 0, 36, 160)  # inner_w = 32 — 'Herta!' overflows at 14 px
     result = layout("Herta!", TextStyle(), rect, vertical=False)
     # The shrink loop engaged: accepted size strictly below the 14 px base.
     assert 5.0 <= result.used_font_size_px < 14.0, (
