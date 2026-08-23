@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-22 — Completed quick task 260822-gnq: Fix box-move auto re-detect annoyance + brush ghost on scroll + pan tool brush cursor
+Last activity: 2026-08-23 — Completed quick task 260822-vk7: Fix translation field bug (resize box then typing translation freezes app and resets status)
 
 ## Performance Metrics
 
@@ -377,6 +377,7 @@ None yet.
 | 260822-1yu | Fix masker/filler pipeline: C runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action (F) | 2026-08-22 | 99cec83 | [260822-1yu-fix-masker-filler-pipeline-c-key-should-](./quick/260822-1yu-fix-masker-filler-pipeline-c-key-should-/)
 | 260822-347 | Change default text overlay style to black text without an outline | 2026-08-22 | a39df29 | [260822-347-change-default-text-overlay-style-from-w](./quick/260822-347-change-default-text-overlay-style-from-w/)
 | 260822-gnq | Fix box-move auto re-detect annoyance + brush ghost on scroll + pan tool brush cursor | 2026-08-22 | ed00312 | [260822-gnq-fix-box-move-auto-re-detect-annoyance-br](./quick/260822-gnq-fix-box-move-auto-re-detect-annoyance-br/)
+| 260822-vk7 | Fix translation field bug: resizing a box then typing a translation freezes the app momentarily and resets the translation status | 2026-08-23 | 77e09bf | [260822-vk7-fix-translation-field-bug-resizing-a-box](./quick/260822-vk7-fix-translation-field-bug-resizing-a-box/)
 
 ## Deferred Items
 
