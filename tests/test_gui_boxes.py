@@ -693,6 +693,74 @@ def test_corner_handle_hit_target_covers_offset_zone(qtbot) -> None:
 
 
 # ===========================================================================
+# quick-260824-t64 Task 2 — constant screen-size corner grab zones
+# ===========================================================================
+# The canvas hit-test queries items(scene_pos, ..., QTransform()) with an
+# IDENTITY transform, so the old fixed 18-unit hit rect was 18 SCENE px — only
+# ~4.5 screen px at 25% zoom ("handles hard to grab when zoomed out"). The fix
+# divides the hit rect by the live zoom so the zone stays ~18 VIEWPORT px at
+# any zoom, uniform across all four corners (probe found NO code-level BL
+# asymmetry — the badge/affordance sit TL/TR-OUTSIDE by design).
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("zoom", [0.25, 1.0, 4.0])
+@pytest.mark.parametrize("corner", ["TL", "TR", "BL", "BR"])
+def test_corner_handle_hit_zone_constant_in_viewport_px(qtbot, corner, zoom) -> None:
+    """Every corner's effective viewport-px hit-zone width is ~_HANDLE_HIT_SIZE
+    at any zoom — including explicit bottom-left cases (the reported pain)."""
+    from manga_ai_studio.gui.box_item import _HANDLE_HIT_SIZE
+
+    scene, item = _scene_with_box(PageBox(box=Box(100, 100, 300, 300), origin=DETECTED))
+    scene.clearSelection()
+    item.setSelected(True)
+    # Propagation seam: apply_overlay_zoom forwards to every handle.
+    item.apply_overlay_zoom(zoom)
+
+    handle = item.handles[corner]
+    assert handle._hit_zoom == zoom
+
+    # The zoom-divided rect: width * zoom ≈ 18 viewport px (+-1 rounding).
+    hit_rect = handle.boundingRect()
+    assert hit_rect.width() * zoom == pytest.approx(_HANDLE_HIT_SIZE, abs=1.0)
+    assert hit_rect.height() * zoom == pytest.approx(_HANDLE_HIT_SIZE, abs=1.0)
+
+    # shape() and boundingRect() MUST stay identical (03-06 lesson: boundingRect
+    # gates the coarse BSP pass).
+    assert handle.shape().boundingRect() == hit_rect
+
+    # The VISIBLE painted handle stays 8x8 (UI-SPEC §12b).
+    assert int(handle.rect().width()) == 8 and int(handle.rect().height()) == 8
+
+    # BL sanity probe at low zoom: a point inside the widened zone around the
+    # BL corner hits the handle via the real scene.itemAt identity path. The
+    # probe anchors on the handle's TRUE corner (mapToScene(4,4)) — not
+    # sceneBoundingRect(), whose pen-width inflation would push the probe
+    # outside the zone.
+    if corner == "BL":
+        corner_pt = handle.mapToScene(QPointF(4, 4))
+        half = (_HANDLE_HIT_SIZE / zoom) / 2.0
+        probe = corner_pt + QPointF(half - 1, half - 1)
+        hit = scene.itemAt(probe, QTransform())
+        assert isinstance(hit, CornerHandle)
+
+
+@pytest.mark.gui
+def test_corner_handle_set_hit_zoom_guards_and_bsp_refresh(qtbot) -> None:
+    """set_hit_zoom guards non-positive to 1.0 and no-ops on an unchanged value."""
+    _scene, item = _scene_with_box(PageBox(box=Box(100, 100, 300, 300), origin=DETECTED))
+    handle = item.handles["TL"]
+    handle.set_hit_zoom(0.25)
+    assert handle._hit_zoom == 0.25
+    handle.set_hit_zoom(-3)  # non-positive -> guarded to 1.0
+    assert handle._hit_zoom == 1.0
+    handle.set_hit_zoom(0)  # ditto
+    assert handle._hit_zoom == 1.0
+    handle.set_hit_zoom(2.0)
+    assert handle._hit_zoom == 2.0
+
+
+# ===========================================================================
 # Plan 03 post-UAT-reverify: BoxItem.ItemIsMovable regression (UAT re-test 1+4)
 # ===========================================================================
 #

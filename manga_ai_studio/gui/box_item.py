@@ -251,29 +251,41 @@ def origin_hue(origin: str) -> str:
 
 
 # Half of the enlarged hit size (corner of the handle = local (4,4); the hit
-# rect is centred on that point, so the local top-left is 4 - half).
+# rect is centred on that point, so the local top-left is 4 - half). Kept for
+# API compatibility — the live math lives in _handle_hit_rect(zoom) since
+# quick-260824-t64 Task 2 (the zoom-divided hit rect).
 _HANDLE_HIT_HALF = _HANDLE_HIT_SIZE / 2.0
 
 
-def _handle_hit_rect() -> QRectF:
+def _handle_hit_rect(zoom: float = 1.0) -> QRectF:
     """The enlarged invisible hit rect for a :class:`CornerHandle` (local coords).
 
     Centred on the corner point at local ``(4, 4)`` (the handle is constructed
     as ``QGraphicsRectItem(0,0,8,8)``; local ``(4,4)`` maps to the exact scene
     corner after :meth:`CornerHandle.reposition` sets ``pos = scene corner - 4``).
+
+    quick-260824-t64 Task 2: ``zoom`` divides the hit size so the zone stays
+    constant in VIEWPORT px. The canvas hit-test queries
+    ``items(scene_pos, ..., QTransform())`` with an IDENTITY transform, so an
+    un-divided 18-unit rect was 18 SCENE px — only ~4.5 screen px at 25% zoom.
+    A ``max(4.0, ...)`` floor keeps a sane minimum scene-px extent at extreme
+    zoom-in; ``zoom=1.0`` (the default) reduces exactly to today's 18-unit rect.
     """
+    if not isinstance(zoom, (int, float)) or zoom <= 0:
+        zoom = 1.0
+    half = max(4.0, _HANDLE_HIT_SIZE / zoom) / 2.0
     return QRectF(
-        _HANDLE_OFFSET - _HANDLE_HIT_HALF,
-        _HANDLE_OFFSET - _HANDLE_HIT_HALF,
-        _HANDLE_HIT_SIZE,
-        _HANDLE_HIT_SIZE,
+        _HANDLE_OFFSET - half,
+        _HANDLE_OFFSET - half,
+        half * 2.0,
+        half * 2.0,
     )
 
 
-def _handle_hit_path() -> QPainterPath:
+def _handle_hit_path(zoom: float = 1.0) -> QPainterPath:
     """A :class:`QPainterPath` wrapping :func:`_handle_hit_rect` (for ``shape()``)."""
     path = QPainterPath()
-    path.addRect(_handle_hit_rect())
+    path.addRect(_handle_hit_rect(zoom))
     return path
 
 
@@ -314,6 +326,28 @@ class CornerHandle(QGraphicsRectItem):
         # Hidden until the parent is selected (D-08). BoxItem._sync_handles
         # toggles this on selection change.
         self.setVisible(False)
+        # quick-260824-t64 Task 2: the zoom the hit rect is divided by. The
+        # canvas hit-test uses an IDENTITY transform, so the hit rect is in
+        # SCENE units; dividing by the live zoom keeps the grab zone constant
+        # in VIEWPORT px (~18 screen px at any zoom). Construction-time 1.0
+        # matches the pre-first-signal state (zoom-1.0 behavior preserved).
+        self._hit_zoom = 1.0
+
+    def set_hit_zoom(self, zoom: float) -> None:
+        """Set the zoom the invisible hit rect compensates for (quick-260824-t64).
+
+        Guards non-positive to 1.0 (the division-safety precedent of
+        ``BoxItem.apply_overlay_zoom``). ``prepareGeometryChange()`` MUST run
+        because ``shape()`` / ``boundingRect()`` outputs depend on the stored
+        zoom — without it the scene's stale BSP index keeps the OLD rect
+        hittable after a zoom change.
+        """
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
+        if zoom == self._hit_zoom:
+            return
+        self.prepareGeometryChange()
+        self._hit_zoom = float(zoom)
 
     def reposition(self, parent_rect: QRectF) -> None:
         """Centre this handle on its matching corner of ``parent_rect``.
@@ -365,9 +399,12 @@ class CornerHandle(QGraphicsRectItem):
         targets and is localised entirely to the handle — the canvas hit-test
         dispatch (``canvas.py:859-864``) is already correct in scene coords and
         is NOT changed; it merely consults the larger ``shape()`` via
-        ``scene.itemAt``.
+        ``scene.itemAt``. Since quick-260824-t64 Task 2 the rect is divided by
+        the live zoom (``_hit_zoom``, propagated by
+        ``BoxItem.apply_overlay_zoom``) so its effective viewport-px size stays
+        constant (~18 screen px at any zoom).
         """
-        return _handle_hit_path()
+        return _handle_hit_path(self._hit_zoom)
 
     def boundingRect(self) -> QRectF:  # noqa: D401 (Qt API casing)
         """Return the enlarged hit rect (matches :meth:`shape`).
@@ -379,9 +416,10 @@ class CornerHandle(QGraphicsRectItem):
         Deviation 1). This does NOT change the painted handle: the inherited
         :meth:`paint` draws ``rect()`` (the 8x8 from ``__init__``), not
         ``boundingRect``; the larger rect only widens the scene's repaint +
-        hit-test region.
+        hit-test region. Both methods use the SAME zoom-divided rect so the
+        coarse and fine passes stay identical at every zoom level.
         """
-        return _handle_hit_rect()
+        return _handle_hit_rect(self._hit_zoom)
 
 
 
@@ -953,6 +991,13 @@ class BoxItem(QGraphicsRectItem):
         if zoom <= 0:
             zoom = 1.0
         self._overlay_zoom = zoom
+        # quick-260824-t64 Task 2: propagate to the corner handles so their
+        # hit rects stay ~18 VIEWPORT px at any zoom. The canvas zoom_changed
+        # slot calls this on every wheel/reset/fit-to-window/page-load, so
+        # handles always carry the live zoom while visible (unselected handles
+        # are invisible and thus unhittable — lazily corrected at next sync).
+        for handle in self.handles.values():
+            handle.set_hit_zoom(zoom)
 
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
