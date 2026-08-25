@@ -2469,7 +2469,11 @@ class MainWindow(QMainWindow):
         project dir yet. The disk write is core's
         :func:`project_io.save_project` (the only disk boundary);
         an OSError surfaces the save-failure copy (T-05-12) and the in-memory
-        session is untouched. On success: dirty cleared, project dir/name
+        session is untouched. quick-260824-pqn: an UNEXPECTED exception in
+        the pre-write phase (page flush / folder dialog / ``build_page_entries``
+        serialization) surfaces the same copy + stray-folder cleanup instead
+        of dying silently inside the Qt slot (T-QKN-02/T-QKN-03). On success:
+        dirty cleared, project dir/name
         recorded, Recent Projects updated, title refreshed (no ``*``), and
         the "Saved project …" transient shows. WR-01: when the dialog
         accepted a folder this save pre-created, an abort before/at the
@@ -2487,58 +2491,79 @@ class MainWindow(QMainWindow):
         if not force_as and not self._session_dirty():
             self._show_transient_status("No changes to save.")
             return True
-        self._snapshot_current_page()
 
+        # quick-260824-pqn (T-QKN-02/T-QKN-03): the ENTIRE pre-write phase —
+        # current-page flush, folder dialog, name derivation, and the
+        # page_files build loop (which runs ``build_page_entries`` ->
+        # ``pagebox_to_json`` -> ``json.dumps``) — is wrapped so an UNEXPECTED
+        # exception surfaces the save-failure dialog + stray-folder cleanup
+        # instead of dying silently inside this Qt slot (the symptom class:
+        # dialog-accepted folder stays empty, no error UI).
         created_default = False
         project_dir = self._project_dir
-        if project_dir is None or force_as:
-            project_dir, created_default = self._choose_project_dir()
-            if project_dir is None:
-                return False  # dialog cancelled — nothing written, session untouched
-
-        # Project name: keep an open project's name; derive for new sessions
-        # (chapter = source-folder name; single-image session = image stem).
-        if self._project_name is not None:
-            name = self._project_name
-        elif len(self.image_files) == 1:
-            name = self.image_files[0].path.stem
-        else:
-            name = self.image_files[0].path.parent.name
-
+        name = self._project_name or "project"
         page_files: list[tuple[str, dict[str, bytes]]] = []
-        for idx, imf in enumerate(self.image_files):
-            image_rgb = self._page_image_source(idx)
-            if image_rgb is None:
-                logger.warning(
-                    f"Save Project: page '{imf.path.name}' has no image source"
-                    " — skipped"
+        try:
+            self._snapshot_current_page()
+
+            if project_dir is None or force_as:
+                project_dir, created_default = self._choose_project_dir()
+                if project_dir is None:
+                    return False  # dialog cancelled — nothing written, session untouched
+
+            # Project name: keep an open project's name; derive for new sessions
+            # (chapter = source-folder name; single-image session = image stem).
+            if self._project_name is not None:
+                name = self._project_name
+            elif len(self.image_files) == 1:
+                name = self.image_files[0].path.stem
+            else:
+                name = self.image_files[0].path.parent.name
+
+            for idx, imf in enumerate(self.image_files):
+                image_rgb = self._page_image_source(idx)
+                if image_rgb is None:
+                    logger.warning(
+                        f"Save Project: page '{imf.path.name}' has no image source"
+                        " — skipped"
+                    )
+                    continue
+                mask_bin = None
+                if imf.mask is not None and not imf.mask.isNull():
+                    mask_bin = mask_to_numpy_binary(imf.mask)
+                original_sha = ""
+                if imf.path.is_file():
+                    try:
+                        original_sha = project_io.sha256_file(imf.path)
+                    except OSError:
+                        original_sha = ""
+                page_files.append(
+                    (
+                        imf.path.stem,
+                        project_io.build_page_entries(
+                            {
+                                "boxes": imf.boxes if imf.boxes is not None else [],
+                                "image_rgb": image_rgb,
+                                "mask_bin": mask_bin,
+                                "geometry_altered": imf.geometry_altered,
+                                "original_path": imf.path,
+                                "original_sha256": original_sha,
+                                **self._page_plane_keys(imf, image_rgb.shape[:2]),
+                            }
+                        ),
+                    )
                 )
-                continue
-            mask_bin = None
-            if imf.mask is not None and not imf.mask.isNull():
-                mask_bin = mask_to_numpy_binary(imf.mask)
-            original_sha = ""
-            if imf.path.is_file():
-                try:
-                    original_sha = project_io.sha256_file(imf.path)
-                except OSError:
-                    original_sha = ""
-            page_files.append(
-                (
-                    imf.path.stem,
-                    project_io.build_page_entries(
-                        {
-                            "boxes": imf.boxes if imf.boxes is not None else [],
-                            "image_rgb": image_rgb,
-                            "mask_bin": mask_bin,
-                            "geometry_altered": imf.geometry_altered,
-                            "original_path": imf.path,
-                            "original_sha256": original_sha,
-                            **self._page_plane_keys(imf, image_rgb.shape[:2]),
-                        }
-                    ),
-                )
+        except Exception as exc:
+            logger.error(f"Save Project failed: {exc}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{name}'.",
+                "An unexpected error occurred while preparing the save."
+                " Check the log for details.",
             )
+            if created_default:
+                self._discard_stray_project_dir(project_dir)
+            return False
 
         # WR-03: duplicate stems (a folder with both ``page.png`` and
         # ``page.jpg``) would silently write both pages to the same

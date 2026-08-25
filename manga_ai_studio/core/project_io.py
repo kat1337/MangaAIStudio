@@ -219,8 +219,30 @@ def pagebox_to_json(pb) -> dict:
     Phase 08.1 (plan 08.1-01): adds ``fill`` to the override vocabulary and
     ``fill_color`` (optional [r,g,b] triple 0..255) — legacy files without
     those keys load with defaults (None).
+
+    quick-260824-pqn: every payload field serializes as JSON-SAFE plain data.
+    The vendored detector appends raw numpy int32 polygons to
+    ``TextBlock.lines`` (textblock.py:468/474), so the old verbatim
+    ``payload.lines`` passthrough raised
+    ``TypeError: Object of type ndarray is not JSON serializable`` inside
+    ``build_page_entries`` — silently killing Save Project in its Qt slot.
+    Coordinates coerce via ``int()`` (T-QKN-01 — garbage numerics become
+    plain ints, never leak into manifest JSON); text fields via null-safe
+    ``str()``; ``font_size`` falls back to -1 on a non-numeric (the loader's
+    own default). ``json_to_pagebox`` already accepts both plain-list and
+    ndarray-shaped input — the load side is untouched.
     """
     payload = pb.payload
+
+    def _json_str(value) -> str | None:
+        return None if value is None else str(value)
+
+    def _json_font_size() -> int:
+        try:
+            return int(payload.font_size)
+        except (TypeError, ValueError):
+            return -1
+
     return {
         "box": list(pb.box.as_tuple),  # [x1, y1, x2, y2] — Box is @frozen
         "origin": pb.origin,  # D-03: "detected" | "user"
@@ -234,13 +256,18 @@ def pagebox_to_json(pb) -> dict:
         "mask": _pagebox_mask_to_json(pb.mask),  # base64 PNG | null
         "fill_color": list(pb.fill_color) if getattr(pb, "fill_color", None) is not None else None,  # 08.1 optional triple
         "payload": None if payload is None else {
-            "xyxy": list(payload.xyxy),
-            "lines": payload.lines,  # list of 4-point quads
-            "vertical": payload.vertical,
-            "language": payload.language,
-            "font_size": payload.font_size,
-            "text": payload.text,  # str (Phase 4) — never TextBlock.to_dict()
-            "translation": payload.translation,
+            "xyxy": [int(v) for v in payload.xyxy],
+            # quick-260824-pqn: nested int() coercion handles BOTH ndarray
+            # quads (the detector's raw appends) and plain-list quads.
+            "lines": [
+                [[int(v) for v in pt] for pt in quad]
+                for quad in (payload.lines or [])
+            ],
+            "vertical": bool(payload.vertical),
+            "language": _json_str(payload.language),
+            "font_size": _json_font_size(),  # int, non-numeric falls back to -1
+            "text": _json_str(payload.text),  # str — never TextBlock.to_dict()
+            "translation": _json_str(payload.translation),
         },
     }
 
