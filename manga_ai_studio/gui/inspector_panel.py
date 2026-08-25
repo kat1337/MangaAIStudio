@@ -65,7 +65,7 @@ Security:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, QRegularExpression, QSortFilterProxyModel, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, QRegularExpression, QSortFilterProxyModel, Signal
 from PySide6.QtGui import (
     QColor,
     QFocusEvent,
@@ -582,6 +582,19 @@ class InspectorPanel(QWidget):
         # paths are the widget signals wired in connect_commit_handlers).
         self._cb_style_color = None
         self._cb_style_effect = None
+        self._cb_style_size = None
+        # quick-260824-t64 Task 3: live Size commits. editingFinished only
+        # fires on focus-loss/Enter — NOT per click of the up/down arrows or a
+        # scroll-wheel step, which is why font-size changes only rendered
+        # after clicking away. A short single-shot debounce coalesces rapid
+        # valueChanged steps into one commit through the SAME seam as
+        # editingFinished (_emit_style_size_if_changed: WR-01 + Mixed-sentinel
+        # guards stay load-bearing; programmatic loads are silent via
+        # blockSignals so they never start this timer).
+        self._size_debounce = QTimer(self)
+        self._size_debounce.setInterval(150)
+        self._size_debounce.setSingleShot(True)
+        self._size_debounce.timeout.connect(self._on_size_debounce_timeout)
 
         # Start in the empty state (no box selected).
         self.clear()
@@ -1229,6 +1242,14 @@ class InspectorPanel(QWidget):
             self.size_spin.editingFinished.connect(
                 lambda: self._emit_style_size_if_changed(on_style_size)
             )
+            # quick-260824-t64 Task 3: ALSO commit live on valueChanged (the
+            # up/down arrows + scroll wheel never fire editingFinished). The
+            # debounce restarts per step; the timeout routes through the same
+            # WR-01-gated emitter as editingFinished.
+            self._cb_style_size = on_style_size
+            self.size_spin.valueChanged.connect(
+                lambda _value: self._size_debounce.start()
+            )
         if on_style_auto_fit is not None:
             self.auto_fit_check.stateChanged.connect(
                 lambda _s: self._commit_auto_fit(on_style_auto_fit)
@@ -1378,6 +1399,17 @@ class InspectorPanel(QWidget):
             return
         if name != self._loaded_style_font_style:
             on_style_font_style(name)
+
+    def _on_size_debounce_timeout(self) -> None:
+        """quick-260824-t64 Task 3: live Size commit after the debounce window.
+
+        Routes through the SAME emitter as editingFinished so the WR-01
+        loaded-value guard + Mixed-sentinel guard stay in force. The None
+        guard mirrors ``_cb_style_color``: the timer exists from __init__ but
+        the callback is only stored by connect_commit_handlers.
+        """
+        if self._cb_style_size is not None:
+            self._emit_style_size_if_changed(self._cb_style_size)
 
     def _emit_style_size_if_changed(self, on_style_size) -> None:
         number = self.size_spin.value()

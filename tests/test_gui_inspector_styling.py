@@ -276,6 +276,78 @@ def test_style_commit_signal_fires(qtbot) -> None:
     ]
 
 
+# ===========================================================================
+# quick-260824-t64 Task 3 — live Size commits via the valueChanged debounce
+# ===========================================================================
+# editingFinished only fires on focus-loss/Enter — NOT per click of the
+# up/down arrows or a scroll-wheel step, which is why font-size changes only
+# rendered after clicking away. The fix routes valueChanged through a ~150ms
+# single-shot debounce into the SAME WR-01-gated emitter.
+
+
+@pytest.mark.gui
+def test_size_spin_live_commit_via_debounce(qtbot) -> None:
+    """A direct setValue() (the arrow-click path — no editingFinished, no
+    focus tricks) commits through the style-size seam once the debounce fires."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style(auto_fit=False, font_size_px=14.0))
+    assert panel.size_spin.value() == 14
+
+    # The arrow-click equivalent: setValue without editingFinished.
+    panel.size_spin.setValue(16)
+    # Debounce armed, nothing committed YET.
+    assert fired["size"] == []
+
+    # Fire the debounce window manually (deterministic — no qWait).
+    panel._size_debounce.timeout.emit()
+    assert fired["size"] == [16]
+    assert fired["size"].count(16) == 1
+
+
+@pytest.mark.gui
+def test_size_debounce_wr01_loaded_value_guard(qtbot) -> None:
+    """Spinning back to the LOADED value before the debounce lands emits
+    NOTHING (the WR-01 loaded-memory guard holds on the live path too)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style(auto_fit=False, font_size_px=14.0))
+
+    panel.size_spin.setValue(15)
+    panel.size_spin.setValue(14)  # back to loaded -> no real change
+    panel._size_debounce.timeout.emit()
+    assert fired["size"] == []
+
+
+@pytest.mark.gui
+def test_size_debounce_mixed_sentinel_suppressed(qtbot) -> None:
+    """A Mixed selection's 0 sentinel stays display-only on the live path —
+    mixed + 0 emits nothing (Pitfall 7)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    pb1 = _pagebox_with_style(font_size_px=14.0, auto_fit=False)
+    pb2 = _pagebox_with_style(font_size_px=20.0, auto_fit=False)
+    panel.load_multi_selection([pb1, pb2])
+    assert panel._style_size_mixed is True
+    assert panel.size_spin.value() == 0
+
+    panel.size_spin.setValue(0)
+    panel._size_debounce.timeout.emit()
+    assert fired["size"] == []
+
+
 @pytest.mark.gui
 def test_font_free_text_never_commits(qtbot) -> None:
     """WR-01 (07-REVIEW-GAPS): the QFontComboBox is editable, so free-typed
