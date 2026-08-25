@@ -119,14 +119,6 @@ _FONT_STYLE_FLAGS = {
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
-# quick-260822-gnq: the stationary-grace window. A box whose geometry changed
-# (moved/resized/created) waits this long WITHOUT further interaction, then
-# gets exactly ONE automatic detection-fit + OCR dispatch. Any new box drag
-# cancels the pending dispatch (canvas.box_interaction_started -> timer.stop);
-# the next commit arms it again. Read at start() time from this module
-# constant so tests can monkeypatch it short.
-STATIONARY_GRACE_MS = 5000
-
 
 class MainWindow(QMainWindow):
     """Top-level application window.
@@ -156,17 +148,11 @@ class MainWindow(QMainWindow):
         # OCR worker. Connected right after construction (the canvas's
         # class-scope signal exists before any event can fire).
         self.canvas.ocr_requested.connect(self._on_canvas_ocr_requested)
-        # quick-260822-gnq: the stationary-grace machinery. ONE MainWindow-
-        # owned singleshot timer; interval is supplied at start() time from
-        # the STATIONARY_GRACE_MS module constant (monkeypatchable in tests).
-        self._stationary_timer = QTimer(self)
-        self._stationary_timer.setSingleShot(True)
-        self._stationary_timer.timeout.connect(self._on_stationary_grace_timeout)
-        # A drag START inside the grace window cancels the pending dispatch;
-        # the next commit re-arms via _mark_geometry_changed.
-        self.canvas.box_interaction_started.connect(self._stationary_timer.stop)
-        # The per-box "re-run detection" corner affordance (one signal
-        # subscription for all boxes — never per-item connections).
+        # quick-260824-pqn: manual re-detection ONLY — the corner-affordance
+        # signal (one subscription for all boxes, never per-item
+        # connections); the handler is gated on geometry_stale. The old
+        # stationary-grace auto-dispatch timer is REMOVED — no automatic
+        # trigger path remains.
         self.canvas.box_redetect_requested.connect(self._on_box_redetect_requested)
         # G-07-3: new user-drawn boxes are born with the saved default
         # family. The provider returns None when no family is saved — a
@@ -3628,19 +3614,20 @@ class MainWindow(QMainWindow):
         # boxes_modified once per committed drag, RESEARCH §8 debouncing).
         # Instead of the expensive synchronous full-page re-fit on EVERY
         # commit, the geometry-changed boxes are merely MARKED stale (amber
-        # corner affordance) and the stationary-grace timer is armed: one
-        # automatic detection-fit + OCR once the box sits still ~5 s, or an
-        # immediate re-run when the user clicks the affordance. A move now
-        # costs only a setRect + undo push + Inspector reload.
+        # corner affordance); re-running detection+OCR is manual-only via the
+        # affordance click (quick-260824-pqn removed the stationary-grace
+        # auto-dispatch). A move now costs only a setRect + undo push +
+        # Inspector reload.
         self._mark_geometry_changed(before_snapshot)
 
     def _refit_changed_boxes(self, before_snapshot) -> None:
         """Re-fit the geometry-changed boxes and recompose the auto plane.
 
-        quick-260822-gnq: this is now the EXPLICIT/STATIONARY recompute
-        engine — invoked by the corner re-run affordance handler and the
-        stationary-grace timeout (NOT on every commit anymore; the commit
-        path calls ``_mark_geometry_changed`` instead). Compare each
+        quick-260822-gnq: this is now the EXPLICIT recompute engine —
+        invoked by the corner re-run affordance handler (quick-260824-pqn:
+        the stationary-grace timeout is gone; this is manual-only, NOT on
+        every commit anymore — the commit path calls
+        ``_mark_geometry_changed`` instead). Compare each
         before-snapshot PageBox's ``box.as_tuple``
         to the CURRENT canvas geometry (``boxes_snapshot()`` materializes the
         live rects via ``BoxItem.current_box`` — a moved box's ``pagebox.box``
@@ -3712,21 +3699,22 @@ class MainWindow(QMainWindow):
         self.canvas.set_auto_binary(derivation.auto_binary)
         self.refresh_box_inpaint_states()
 
-    # ---------------------------------- quick-260822-gnq stationary re-detect
+    # ------------------------------------------------- quick-260824-pqn stale marking
     def _mark_geometry_changed(self, before_snapshot) -> None:
-        """Mark geometry-changed boxes stale + arm the stationary grace timer.
+        """Mark geometry-changed boxes stale (moved/resized/created).
 
-        quick-260822-gnq: replaces the old refit-on-commit call in
-        ``_on_boxes_modified``. Mirrors ``_refit_changed_boxes``'s change-
-        detection prologue (history/suppression/page guards; a current tuple
-        absent from the before-snapshot's tuples = moved, resized OR newly
-        created) but NEVER touches masks / std_dev / the auto binary here —
-        a move must cost only a setRect + undo push + Inspector reload.
+        quick-260822-gnq, revised by quick-260824-pqn: replaces the old
+        refit-on-commit call in ``_on_boxes_modified``. Mirrors
+        ``_refit_changed_boxes``'s change-detection prologue
+        (history/suppression/page guards; a current tuple absent from the
+        before-snapshot's tuples = moved, resized OR newly created) but
+        NEVER touches masks / std_dev / the auto binary here — a move must
+        cost only a setRect + undo push + Inspector reload.
 
         Each changed BoxItem gets ``geometry_stale = True`` (the amber corner
-        re-run affordance appears) and ONE shared singleshot timer is
-        armed/restarted: when it fires with no further interaction, every
-        stale box gets exactly one detection-fit + OCR dispatch.
+        re-run affordance appears). NOTHING is armed — the stationary-grace
+        timer is removed (quick-260824-pqn); re-running detection+OCR is
+        manual-only via the affordance click.
         """
         if self.history is None or self._suppress_boxes_push:
             return
@@ -3735,62 +3723,28 @@ class MainWindow(QMainWindow):
             return
         current = self.canvas.boxes_snapshot()  # CURRENT geometry, detached
         before_tuples = {pb.box.as_tuple for pb in (before_snapshot or [])}
-        changed = False
         # Snapshot order == _box_items order (boxes_snapshot iterates the
         # same list), so index-wise zip pairs live items with their tuples.
         for live_item, pb in zip(self.canvas._box_items, current):
             if pb.box.as_tuple not in before_tuples:
                 live_item.geometry_stale = True
-                changed = True
-        if changed:
-            # Interval supplied per-start from the module constant so tests
-            # can monkeypatch STATIONARY_GRACE_MS short.
-            self._stationary_timer.start(STATIONARY_GRACE_MS)
-
-    def _on_stationary_grace_timeout(self) -> None:
-        """The ~5 s stationary grace expired: one auto detection-fit + OCR
-        per geometry-stale box (quick-260822-gnq).
-
-        quick-260822-vk7: the grace ALSO waits out edit sessions — while an
-        Inspector ``_CommitTextEdit`` field or the canvas inline editor is
-        active, the timer RE-ARMS (deferred, never dropped) instead of
-        dispatching. The refit leg runs derive_page_mask_state over the whole
-        page synchronously on the GUI thread, so letting it fire mid-typing
-        was the reported resize-then-type freeze; deferral removes all heavy
-        work from the typing path. Once focus leaves the editor, the pending
-        work runs exactly once.
-
-        T-QG-02 mitigation: gated on ``_op_running`` — if another op is
-        running when the timer fires, this is a silent skip (the boxes stay
-        marked stale; the user can still click the affordance later). Each
-        box's OCR leg is additionally gated by the D-04 edited-text rule in
-        :meth:`_redetect_single_box` (T-QG-03 — hand-edited text is never
-        silently overwritten).
-        """
-        if self.inspector_panel.is_text_edit_active() or (
-            self.canvas._inline_editor.is_active()
-        ):
-            logger.debug("stationary re-detect deferred: edit session active")
-            # Interval re-read from the module constant at start time (the
-            # established monkeypatch seam).
-            self._stationary_timer.start(STATIONARY_GRACE_MS)
-            return
-        if self._op_running:
-            return
-        for item in [
-            it for it in self.canvas._box_items if it.geometry_stale
-        ]:
-            self._redetect_single_box(item)
 
     def _on_box_redetect_requested(self, box_item) -> None:
         """Corner-affordance click: re-fit + re-OCR THIS box at its CURRENT
-        geometry (quick-260822-gnq).
+        geometry.
 
-        Subscribed to ``canvas.box_redetect_requested`` (one subscription for
-        all boxes). T-QG-02: gated on ``_op_running`` like every other model-op
+        MANUAL-ONLY and STALE-GATED (quick-260824-pqn): fires only when the
+        bubble EXISTS and was moved/resized since its last fit
+        (``geometry_stale``) — a click on a fresh/non-moved bubble is a
+        no-op. There is NO automatic trigger path (the stationary-grace
+        timer was removed); typing never triggers detection work. Subscribed
+        to ``canvas.box_redetect_requested`` (one subscription for all
+        boxes). T-QG-02: gated on ``_op_running`` like every other model-op
         entry point.
         """
         if self._op_running or box_item not in self.canvas._box_items:
+            return
+        if not getattr(box_item, "geometry_stale", False):
             return
         self._redetect_single_box(box_item)
 

@@ -741,9 +741,11 @@ class BoxItem(QGraphicsRectItem):
         quick-260822-gnq: a committed move/resize/create marks the box stale
         INSTEAD of triggering an immediate re-fit (the old refit-on-commit
         annoyance). The marker drives the amber corner affordance; it is
-        cleared when the user clicks the affordance (or the stationary grace
-        timer fires), which run the explicit re-fit + OCR pass. Ephemeral
-        view state — never persisted.
+        cleared when the user clicks the affordance, which runs the explicit
+        re-fit + OCR pass. quick-260824-pqn: the affordance appears while the
+        box is geometry-stale (moved/resized); click to re-run detection+OCR
+        — there is no automatic trigger path anymore. Ephemeral view state —
+        never persisted.
         """
         return self._geometry_stale
 

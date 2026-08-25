@@ -193,24 +193,20 @@ class EditorCanvas(QGraphicsView):
     # returns before this signal — UI-SPEC §14).
     #
     # quick-260822-gnq SEMANTIC CHANGE: ``_commit_create`` no longer emits
-    # this signal. The instant-dispatch is superseded by the stationary
-    # grace period (a fresh box gets exactly ONE automatic detection-fit +
-    # OCR once it sits still ~5 s — armed via boxes_modified ->
-    # _mark_geometry_changed). The signal + plumbing stay declared so
+    # this signal — creating a box only marks it geometry-stale via
+    # boxes_modified -> _mark_geometry_changed, and the user re-runs
+    # detection+OCR manually via the corner affordance (quick-260824-pqn:
+    # the stationary-grace auto-dispatch is removed; typing/editing never
+    # triggers detection work). The signal + plumbing stay declared so
     # nothing else breaks.
     ocr_requested = Signal(object)
-    # quick-260822-gnq: emitted when a box interaction STARTS (_begin_resize /
-    # _select_and_begin_move / _begin_create_box — the sites that already
-    # capture _boxes_interaction_start_snapshot). MainWindow connects it to
-    # the stationary-grace timer's stop() so a drag inside the ~5 s window
-    # cancels the pending auto detection+OCR dispatch; the next commit arms
-    # the timer again naturally.
-    box_interaction_started = Signal()
     # quick-260822-gnq: emitted when a geometry-stale box's corner re-run
     # affordance is clicked, carrying the parent BoxItem. The RedetectHandle
     # child invokes an activate callback installed per item; this canvas-level
     # signal is what MainWindow actually subscribes to (never per-item
-    # objects).
+    # objects). quick-260824-pqn: this is the SOLE re-detect trigger
+    # (manual-only; the handler gates on geometry_stale) — the old automatic
+    # stationary-grace path is removed.
     box_redetect_requested = Signal(object)
     # Plan 05-07 (UI-SPEC surface 24a): emitted when the Crop tool applies an
     # armed crop rect (Enter). Carries the rect in SCENE coordinates as a
@@ -2463,9 +2459,6 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-move snapshot (emitted on move-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
-        # quick-260822-gnq: a drag START cancels any pending stationary-grace
-        # auto detection+OCR (MainWindow stops its timer on this signal).
-        self.box_interaction_started.emit()
         self._sync_handles_visibility()
         # The viewport, not a graphics item, owns this drag.  This keeps the
         # canvas receiving move/release events even when the pointer leaves the
@@ -2483,9 +2476,6 @@ class EditorCanvas(QGraphicsView):
         self._box_drag_anchor = scene_pos
         # CR-01 fix: capture the PRE-resize snapshot (emitted on resize-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
-        # quick-260822-gnq: a drag START cancels any pending stationary-grace
-        # auto detection+OCR (MainWindow stops its timer on this signal).
-        self.box_interaction_started.emit()
         self.viewport().grabMouse()
 
     def _begin_create_box(self, scene_pos: QPointF) -> None:
@@ -2494,9 +2484,6 @@ class EditorCanvas(QGraphicsView):
         self._create_anchor = scene_pos
         # CR-01 fix: capture the PRE-create snapshot (emitted on create-commit).
         self._boxes_interaction_start_snapshot = self.boxes_snapshot()
-        # quick-260822-gnq: a drag START cancels any pending stationary-grace
-        # auto detection+OCR (MainWindow stops its timer on this signal).
-        self.box_interaction_started.emit()
         self.viewport().grabMouse()
         # Swap the preview_item pen to the amber create-preview colour for the
         # duration of the drag (UI-SPEC §12e). Restored on release.
@@ -2588,12 +2575,12 @@ class EditorCanvas(QGraphicsView):
         box is added to the layer, selected, and ``boxes_modified`` is emitted.
         The preview_item pen is restored to cyan + the path is cleared (§12e).
 
-        quick-260822-gnq: NO immediate ``ocr_requested`` emission anymore.
-        The D-01 instant-dispatch is superseded by the stationary grace
-        period — the new box IS a changed tuple in the commit flow, so
-        MainWindow._mark_geometry_changed marks it stale + arms the ~5 s
-        timer, giving exactly ONE automatic detection-fit + OCR once the box
-        sits still (cancellable by starting another drag).
+        quick-260822-gnq, revised by quick-260824-pqn: NO automatic
+        ``ocr_requested`` emission and NO auto re-detect anymore. The new box
+        IS a changed tuple in the commit flow, so
+        MainWindow._mark_geometry_changed marks it geometry-stale (amber
+        corner affordance); the user clicks the affordance to run detection
+        + OCR manually.
         """
         curr = self._scene_pos(event)
         self._creating_box = False
@@ -2637,10 +2624,11 @@ class EditorCanvas(QGraphicsView):
         self._primary_box = item
         self._sync_handles_visibility()
         self._refresh_empty_box_hint()
-        # quick-260822-gnq: the D-01 auto-OCR instant dispatch is REMOVED —
-        # the boxes_modified emission below arms the stationary grace timer
-        # via MainWindow._mark_geometry_changed (the new box is a changed
-        # tuple). See _commit_create's docstring + the ocr_requested signal's
+        # quick-260822-gnq, revised by quick-260824-pqn: the D-01 auto-OCR
+        # instant dispatch is REMOVED — the boxes_modified emission below
+        # feeds MainWindow._mark_geometry_changed, which marks the new box
+        # geometry-stale (the amber affordance is the sole manual trigger).
+        # See _commit_create's docstring + the ocr_requested signal's
         # semantic-change note.
         # CR-01 fix: emit the PRE-create snapshot (captured at _begin_create_box),
         # i.e. the layer WITHOUT the new box — what undo restores to.

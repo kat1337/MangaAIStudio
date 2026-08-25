@@ -595,7 +595,7 @@ class InspectorPanel(QWidget):
         The recognized + translation fields commit on focus-out only, so a
         ``load_box`` that lands mid-typing visibly wipes uncommitted
         keystrokes. The MainWindow consults this probe before every
-        selection-follower reload (and before arming stationary-grace work).
+        selection-follower reload.
         """
         return self.translation_edit.hasFocus() or self.recognized_edit.hasFocus()
 
