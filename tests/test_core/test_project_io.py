@@ -117,6 +117,76 @@ def test_pagebox_json_round_trip() -> None:
 
 
 @pytest.mark.unit
+def test_detected_payload_numpy_lines_round_trip() -> None:
+    """quick-260824-pqn: a REAL detected payload — a TextBlock whose ``lines``
+    are raw numpy int32 polygons exactly as ``group_output`` appends them
+    (vendored textblock.py:468/474) — survives ``pagebox_to_json`` +
+    ``json.dumps`` and round-trips with plain-int line coordinates.
+
+    Before the fix this raised ``TypeError: Object of type ndarray is not
+    JSON serializable`` inside ``build_page_entries``, which silently killed
+    Save Project inside the Qt slot (empty folder, no error UI).
+    """
+    payload = TextBlock(
+        [10, 10, 100, 100],
+        [np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.int32)],
+    )
+    payload.text = "hello"
+    payload.translation = "world"
+    payload.font_size = 14
+    pb = PageBox(box=Box(10, 10, 100, 100), origin="detected", payload=payload)
+
+    d = pagebox_to_json(pb)
+    serialized = json.dumps(d, ensure_ascii=False)  # must NOT raise TypeError
+    out = json_to_pagebox(json.loads(serialized))
+    assert out.payload is not None
+    assert out.payload.lines == [[[1, 2], [3, 4], [5, 6], [7, 8]]]
+    assert all(isinstance(v, int) for quad in out.payload.lines for pt in quad for v in pt)
+    assert out.payload.text == "hello"
+    assert out.payload.translation == "world"
+    assert out.payload.font_size == 14
+
+
+@pytest.mark.unit
+def test_detected_payload_edge_cases_json_safe() -> None:
+    """quick-260824-pqn edge cases: empty ``lines`` serialize as [];
+    non-int numerics (np.float64 coordinates) coerce to plain ints per the
+    existing load-side contract; a payload-less PageBox serializes
+    ``payload: null`` unchanged."""
+    # Empty lines.
+    tb_empty = TextBlock([0, 0, 10, 10], [])
+    pb_empty = PageBox(box=Box(0, 0, 10, 10), origin="detected", payload=tb_empty)
+    d_empty = pagebox_to_json(pb_empty)
+    assert d_empty["payload"]["lines"] == []
+    json.dumps(d_empty, ensure_ascii=False)
+
+    # np.float64 coordinates coerce to int.
+    tb_float = TextBlock(
+        [np.float64(1), np.float64(2), np.float64(50), np.float64(60)],
+        [
+            np.array(
+                [[1.5, 2.5], [3.5, 4.5], [5.5, 6.5], [7.5, 8.5]],
+                dtype=np.float64,
+            )
+        ],
+    )
+    pb_float = PageBox(box=Box(1, 2, 50, 60), origin="detected", payload=tb_float)
+    d_float = pagebox_to_json(pb_float)
+    json.dumps(d_float, ensure_ascii=False)
+    assert all(isinstance(v, int) for v in d_float["payload"]["xyxy"])
+    assert all(
+        isinstance(v, int)
+        for quad in d_float["payload"]["lines"]
+        for pt in quad
+        for v in pt
+    )
+
+    # Payload None unchanged.
+    pb_none = PageBox(box=Box(0, 0, 10, 10), origin=USER, payload=None)
+    assert pagebox_to_json(pb_none)["payload"] is None
+
+
+@pytest.mark.unit
 def test_style_field_round_trip() -> None:
     """A non-default style survives pagebox_to_json -> json_to_pagebox (D-07).
 

@@ -915,3 +915,80 @@ def test_save_as_abort_removes_stray_default(qtbot, tmp_path, monkeypatch) -> No
     assert saved is False  # the save aborted on the duplicate stems
     assert criticals  # the save-failure dialog was shown
     assert not default.exists()  # WR-01: the stray empty folder was removed
+
+
+# ------------------------------------------------- quick-260824-pqn tests
+
+@pytest.mark.gui
+def test_save_with_detected_numpy_payload_writes_files(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick-260824-pqn end-to-end: saving a session whose page carries a
+    DETECTED-style payload (a TextBlock whose lines are raw numpy int32
+    polygons, exactly what the vendored detector produces) writes
+    manifest.json + .mas into the chosen folder — before the fix this raised
+    TypeError inside ``build_page_entries`` and PySide6 swallowed it in the
+    Qt slot (silent empty folder)."""
+    from manga_ai_studio.core.box_model import PageBox
+    from panelcleaner.comic_text_detector.utils.textblock import TextBlock
+    from panelcleaner.structures import Box
+
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+
+    tb = TextBlock(
+        [5, 5, 40, 20],
+        [np.array([[5, 5], [40, 5], [40, 20], [5, 20]], dtype=np.int32)],
+    )
+    tb.text = ""
+    tb.translation = ""
+    tb.font_size = -1
+    pb = PageBox(box=Box(5, 5, 40, 20), origin="detected", payload=tb)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([pb], [])
+    finally:
+        window._suppress_boxes_push = False
+    _dirty(window)
+
+    project_dir = tmp_path / "detected.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    assert (project_dir / "manifest.json").is_file()
+    assert sorted(p.name for p in project_dir.glob("*.mas")) == [
+        "page_01.mas",
+        "page_02.mas",
+    ]
+    manifest = load_project(project_dir / "manifest.json")
+    assert [p["name"] for p in manifest["pages"]] == ["page_01", "page_02"]
+    assert not window._session_dirty()
+
+
+@pytest.mark.gui
+def test_save_pre_write_exception_shows_dialog_and_cleans_stray(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """T-QKN-02/T-QKN-03: an UNEXPECTED exception during the save pre-write
+    phase surfaces the T-05-12 failure dialog and removes the stray
+    self-created default folder — it must never die silently inside the Qt
+    slot leaving an empty folder behind."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+
+    def _boom(*a, **k):
+        raise RuntimeError("simulated pre-write crash")
+
+    monkeypatch.setattr(
+        "manga_ai_studio.core.project_io.build_page_entries", _boom
+    )
+    default = chapter / "chapter.mas-project"
+    _stub_dir_dialog(monkeypatch, default)  # pick the pre-created default
+    criticals = _capture_critical(monkeypatch)
+
+    saved = window._save_project(force_as=True)
+    QApplication.processEvents()
+
+    assert saved is False
+    assert criticals
+    assert criticals[0][0].startswith("Couldn't save")
+    assert not default.exists()  # WR-01: stray empty folder cleaned up
