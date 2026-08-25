@@ -55,7 +55,7 @@ import copy as _copy
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QFont, QKeyEvent
 from PySide6.QtWidgets import QGraphicsProxyWidget, QTextEdit
 
 if TYPE_CHECKING:
@@ -64,12 +64,19 @@ if TYPE_CHECKING:
 
 # UI-SPEC §15 editor chrome: background #2d2d33 (Secondary), text #e8e8ea
 # (Text primary), 14px Liberation Sans (Body role), 3px #0b0b0e frame (the
-# matte — separates the editor from artwork behind it).
+# matte — separates the editor from artwork behind it). The font SIZE is NOT
+# in the stylesheet (quick-260824-t64 Task 1): it is set programmatically per
+# session via a zoom-compensated QFont.setPixelSize — the stylesheet fragment
+# would hard-pin 14 scene px, which renders ~3.5 screen px at 25% zoom.
 _EDITOR_BG = "#2d2d33"
 _EDITOR_TEXT = "#e8e8ea"
 _EDITOR_FRAME = "#0b0b0e"
 _EDITOR_FONT_FAMILY = "Liberation Sans"
 _EDITOR_FONT_SIZE = 14
+# quick-260824-t64 Task 1: the zoom-compensated pixel size is capped at this
+# many SCENE px at extreme zoom-out (14/0.1 = 140 would be absurd); the floor
+# is _EDITOR_FONT_SIZE itself so zoom >= 100% behaves exactly as before.
+_EDITOR_FONT_SCENE_PX_MAX = 64
 # §15: the editor's outer rect is inset 2px from the box border so the
 # origin-coloured border + selection tint stay visible.
 _EDITOR_INSET = 2.0
@@ -132,8 +139,7 @@ class InlineEditor:
         self._text_edit.setObjectName("inline_editor")
         self._text_edit.setStyleSheet(
             f"QTextEdit {{ background-color: {_EDITOR_BG}; color: {_EDITOR_TEXT}; "
-            f"border: 3px solid {_EDITOR_FRAME}; font-family: '{_EDITOR_FONT_FAMILY}'; "
-            f"font-size: {_EDITOR_FONT_SIZE}px; }}"
+            f"border: 3px solid {_EDITOR_FRAME}; font-family: '{_EDITOR_FONT_FAMILY}'; }}"
         )
         self._proxy.setWidget(self._text_edit)
         self._proxy.setZValue(1100)  # UI-SPEC §Z-order: above cursor z=1000
@@ -184,6 +190,22 @@ class InlineEditor:
         h = max(rect.height() - 2 * _EDITOR_INSET, 1.0)
         self._text_edit.setMinimumSize(int(w), int(h))
         self._proxy.resize(w, h)
+        # quick-260824-t64 Task 1: zoom-compensated editor font. The proxy is
+        # NOT ItemIgnoresTransformations (it must track the box rect in scene
+        # coords), so a stylesheet-fixed 14px renders 14*zoom screen px —
+        # ~3.5 px at 25% zoom. Compensate inversely: scene px = base / zoom,
+        # floored at the base (zoom >= 100% is byte-identical to before) and
+        # capped at 64 scene px at extreme zoom-out. One font source of truth:
+        # the programmatic QFont (the stylesheet no longer pins a size).
+        zoom = getattr(self._canvas, "zoom_factor", 1.0)
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
+        pixel = max(
+            _EDITOR_FONT_SIZE, min(float(_EDITOR_FONT_SCENE_PX_MAX), round(_EDITOR_FONT_SIZE / zoom))
+        )
+        font = QFont(self._text_edit.font())
+        font.setPixelSize(int(pixel))
+        self._text_edit.setFont(font)
         self._proxy.show()
         self._text_edit.setFocus()
         # D-07: disable move/resize while editing.

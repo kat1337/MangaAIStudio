@@ -2847,6 +2847,39 @@ def test_inline_editor_proxy_reused_across_sessions(qtbot) -> None:
     assert editor._proxy is proxy
 
 
+# ===========================================================================
+# quick-260824-t64 Task 1 — zoom-compensated inline editor font
+# ===========================================================================
+# The QGraphicsProxyWidget does NOT ignore transformations, so a fixed 14px
+# font scales WITH the view transform: at 25% zoom the editor text renders at
+# ~3.5 screen px (unreadable on big pages). The fix compensates inversely in
+# enter(): scene px = base / zoom, floored at the base and capped at 64.
+# pixelSize is the ONLY exact assertion (Phase 6 A4 discipline — never pointSize).
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    ("zoom", "expected"),
+    [
+        pytest.param(0.25, 56, id="zoom-out-0.25"),  # round(14/0.25) = 56
+        pytest.param(1.0, 14, id="zoom-1.0-unchanged"),  # floor: exactly today's size
+        pytest.param(0.1, 64, id="extreme-zoom-out-capped"),  # round(140) -> cap 64
+    ],
+)
+def test_inline_editor_font_zoom_compensated(qtbot, zoom, expected) -> None:
+    """The editor's font pixel size compensates for canvas zoom: base/zoom,
+    floored at the 14px base (zoom >= 100% unchanged), capped at 64 scene px."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    item = _editor_box(canvas, text="hello")
+    # Set the live zoom the way the canvas does (zoom() sets the attribute +
+    # transform; the editor only reads the zoom_factor attribute).
+    canvas.zoom_factor = zoom
+    editor = InlineEditor(canvas)
+    editor.enter(item)
+    info = QFontInfo(editor._text_edit.font())
+    assert info.pixelSize() == expected
+
+
 @pytest.mark.gui
 def test_boxitem_enter_exit_edit_mode_wrappers(qtbot) -> None:
     """BoxItem exposes enter_edit_mode/exit_edit_mode/set_edit_mode — the hooks
