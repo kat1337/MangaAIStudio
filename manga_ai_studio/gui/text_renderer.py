@@ -75,6 +75,7 @@ from PySide6.QtGui import (
     QImage,
     QPainter,
     QPen,
+    QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -224,6 +225,10 @@ class LayoutResult:
             ran in vertical mode: ``[{char, x, y, rotate, w, h}, ...]`` in
             INNER-LOCAL coordinates (paint() draws them after translating
             to ``origin``). Empty for the horizontal path.
+        box_center: The box rect's center in SCENE coordinates — the pivot
+            ``paint()`` rotates about when ``style.rotation_deg != 0``
+            (quick-260824-viq). Set on EVERY construction site so canvas and
+            bake rotate identically (D-01).
     """
 
     text: str
@@ -236,6 +241,7 @@ class LayoutResult:
     origin: QPointF = field(default_factory=QPointF)
     inner_size: QSizeF = field(default_factory=QSizeF)
     vertical_placements: list = field(default_factory=list)  # list[dict]
+    box_center: QPointF = field(default_factory=QPointF)
 
 
 # ---------------------------------------------------------------------------
@@ -272,11 +278,21 @@ def current_focus_text(pb) -> str:
 
 
 def _style_font(style: TextStyle, size_px: float) -> QFont:
-    """The style's font at ``size_px`` scene px (pixel-accurate for WYSIWYG)."""
+    """The style's font at ``size_px`` scene px (pixel-accurate for WYSIWYG).
+
+    quick-260824-viq: when ``char_spacing_px`` > 0 the font carries
+    ``QFont.AbsoluteSpacing`` letter spacing so MEASUREMENT
+    (``_break_lines_for``'s ``QFontMetricsF.horizontalAdvance``) and RENDER
+    (the document's char format) share ONE construction — no divergence
+    window between where lines break and where glyphs draw.
+    """
     font = QFont(style.font_family)
     font.setBold(style.bold)
     font.setItalic(style.italic)
     font.setPixelSize(max(1, int(round(size_px))))
+    char_spacing = float(getattr(style, "char_spacing_px", 0.0) or 0.0)
+    if char_spacing > 0.0:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, char_spacing)
     return font
 
 
@@ -344,6 +360,21 @@ def _build_document(
     cursor = QTextCursor(doc)
     cursor.select(QTextCursor.SelectionType.Document)
     cursor.mergeCharFormat(fmt)
+
+    # quick-260824-viq (d): line spacing = a top margin on every block AFTER
+    # the first. The margin rides the document layout, so doc height includes
+    # the gaps and the overflow check + auto-fit loop account for them with
+    # zero extra logic. The existing block format is COPIED and merged (only
+    # the top margin changes) — never replaced wholesale.
+    line_spacing = float(getattr(style, "line_spacing_px", 0.0) or 0.0)
+    if line_spacing > 0.0:
+        block = doc.firstBlock().next()  # skip the first block
+        while block.isValid():
+            bf = QTextBlockFormat(block.blockFormat())
+            bf.setTopMargin(line_spacing)
+            block_cursor = QTextCursor(block)
+            block_cursor.setBlockFormat(bf)
+            block = block.next()
 
     # Force the document layout before any block-layout reads (see module
     # docstring — lineAt on an un-laid-out block access-violates here).
@@ -429,7 +460,20 @@ def _vertical_placements(
       right inner edge); ``align_v`` shifts the run along the column axis.
     - Every char is centered within its column.
     """
+    # quick-260824-viq (e): the SFX gaps. char_spacing_px widens the gap
+    # BETWEEN adjacent columns; line_spacing_px widens the per-char advance
+    # ALONG a column (and feeds the wrap predicate so columns break
+    # honestly). Both default to 0.0 -> byte-identical legacy geometry.
+    char_gap = float(getattr(style, "char_spacing_px", 0.0) or 0.0)
+    line_gap = float(getattr(style, "line_spacing_px", 0.0) or 0.0)
+
+    # Measure with the style font MINUS its letter-spacing term: the vertical
+    # path adds its own EXPLICIT gaps (char_gap above); leaving
+    # QFont.AbsoluteSpacing on would inflate every measured advance and
+    # double-count the spacing inside each glyph box.
     font = _style_font(style, size_px)
+    if char_gap > 0.0:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.0)
     fm = QFontMetricsF(font)
     chars = list(text)  # code points — never bytes (flagged assumption)
     if not chars:
@@ -450,13 +494,18 @@ def _vertical_placements(
             cur = []
             col_y = 0.0
         cur.append({"char": ch, "w": w, "h": h, "rotate": rot, "extent": extent})
-        col_y += h
+        col_y += h + line_gap  # the advance includes the inter-char gap
     if cur:
         columns.append(cur)
 
     col_widths = [max(c["extent"] for c in col) for col in columns]
-    block_w = float(sum(col_widths))
-    block_h = float(max(sum(c["h"] for c in col) for col in columns))
+    block_w = float(sum(col_widths) + char_gap * max(0, len(columns) - 1))
+    block_h = float(
+        max(
+            sum(c["h"] for c in col) + line_gap * max(0, len(col) - 1)
+            for col in columns
+        )
+    )
 
     if style.align_h == "left":
         dx_block = 0.0
@@ -474,7 +523,9 @@ def _vertical_placements(
 
     placements: list[dict] = []
     x = dx_block + block_w  # the block's RIGHT edge — columns flow leftward
-    for col, cw in zip(columns, col_widths):
+    for col_idx, (col, cw) in enumerate(zip(columns, col_widths)):
+        if col_idx > 0:
+            x -= char_gap  # the gap between adjacent columns
         x -= cw
         y = dy_block
         for c in col:
@@ -488,7 +539,7 @@ def _vertical_placements(
                     "h": c["h"],
                 }
             )
-            y += c["h"]
+            y += c["h"] + line_gap
     return placements, len(columns), block_w, block_h
 
 
@@ -608,6 +659,7 @@ def layout(
                 box_rect.x() + _OVERLAY_INSET, box_rect.y() + _OVERLAY_INSET
             ),
             inner_size=inner_size,
+            box_center=box_rect.center(),
         )
 
     if vertical:
@@ -714,6 +766,7 @@ def layout(
             box_rect.y() + _OVERLAY_INSET + dy,
         ),
         inner_size=inner_size,
+        box_center=box_rect.center(),
     )
 
 
@@ -763,12 +816,35 @@ def _layout_vertical_result(
         ),
         inner_size=inner_size,
         vertical_placements=placements,
+        box_center=box_rect.center(),
     )
 
 
 # ---------------------------------------------------------------------------
 # paint() — the shared draw path (canvas overlay AND bake)
 # ---------------------------------------------------------------------------
+
+
+def _normalize_rotation(deg) -> float:
+    """Normalize an angle into ``(-180, 180]`` degrees (quick-260824-viq).
+
+    Non-finite / non-numeric input yields 0.0 (defensive — a corrupt style
+    must never poison the painter transform). ``fmod`` maps onto
+    ``(-360, 360)``; the two boundary folds land everything in the half-open
+    range so -180 and 180 render identically (one canonical spelling).
+    """
+    try:
+        d = float(deg)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(d) or math.isinf(d):
+        return 0.0
+    d = math.fmod(d, 360.0)
+    if d <= -180.0:
+        d += 360.0
+    elif d > 180.0:
+        d -= 360.0
+    return d
 
 
 def paint(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
@@ -785,9 +861,20 @@ def paint(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
     overflow renders unclipped on both the canvas and the bake). Effects
     are skipped when disabled (the default); an oversized effect surface
     degrades to no-glow with a loguru warning (T-07-07), never an OOM.
+
+    quick-260824-viq (b): when the style carries a rotation, the WHOLE draw
+    (effects + glyphs) rotates about ``result.box_center`` as ONE transform
+    applied BEFORE the origin translate — one pivot, identical on canvas and
+    bake (D-01). Degrees are CLOCKWISE (Qt's positive-rotate convention,
+    documented on the style field).
     """
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    angle = _normalize_rotation(getattr(style, "rotation_deg", 0.0))
+    if abs(angle) > _EPS:
+        painter.translate(result.box_center)
+        painter.rotate(angle)
+        painter.translate(-result.box_center)
     painter.translate(result.origin)
     _draw_effects(painter, result, style)
     _paint_fill_pass(painter, result, style)

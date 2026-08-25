@@ -298,6 +298,86 @@ def test_default_style_explicit_family_overrides_only_family() -> None:
     from manga_ai_studio.core.text_style import default_style
 
     s = default_style("Yu Gothic UI")
-    expected = TextStyle(font_family="Yu Gothic UI")
     assert s.font_family == "Yu Gothic UI"
-    assert s.to_dict() == expected.to_dict()
+    assert s.to_dict() == TextStyle(font_family="Yu Gothic UI").to_dict()
+
+
+# ---------------------------------------------------------------------------
+# quick-260824-viq Task 1 — rotation_deg / char_spacing_px / line_spacing_px
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_new_fields_default_to_zero_and_to_dict_carries_them() -> None:
+    """The three new fields default to 0.0; to_dict carries them as plain floats."""
+    from manga_ai_studio.core.text_style import (
+        CHAR_SPACING_MAX,
+        LINE_SPACING_MAX,
+        ROTATION_MAX,
+    )
+
+    s = TextStyle()
+    assert s.rotation_deg == 0.0
+    assert s.char_spacing_px == 0.0
+    assert s.line_spacing_px == 0.0
+    # The V5 bound constants exist and match the plan contract.
+    assert ROTATION_MAX == 180.0
+    assert CHAR_SPACING_MAX == 64.0
+    assert LINE_SPACING_MAX == 256.0
+
+    styled = TextStyle(rotation_deg=37.5, char_spacing_px=8.0, line_spacing_px=20.0)
+    d = styled.to_dict()
+    assert d["rotation_deg"] == 37.5
+    assert d["char_spacing_px"] == 8.0
+    assert d["line_spacing_px"] == 20.0
+
+
+@pytest.mark.unit
+def test_new_fields_round_trip_through_from_dict() -> None:
+    """from_dict(to_dict(s)) preserves all three new fields (D-07 spelling)."""
+    s = TextStyle(rotation_deg=-37.5, char_spacing_px=12.5, line_spacing_px=33.0)
+    restored = TextStyle.from_dict(s.to_dict())
+    assert restored.rotation_deg == -37.5
+    assert restored.char_spacing_px == 12.5
+    assert restored.line_spacing_px == 33.0
+    assert restored == s
+
+
+@pytest.mark.unit
+def test_legacy_dicts_yield_zero_defaults_for_new_fields() -> None:
+    """A legacy dict without the new keys (and None input) yields 0.0 defaults
+    (Pitfall 8 backward compat — old files carry no rotation/spacing)."""
+    for src in (None, {}, {"font_family": "Arial"}):
+        s = TextStyle.from_dict(src)
+        assert s.rotation_deg == 0.0
+        assert s.char_spacing_px == 0.0
+        assert s.line_spacing_px == 0.0
+
+
+@pytest.mark.unit
+def test_v5_clamps_rotation_deg() -> None:
+    """rotation_deg clamps into [-180, 180]; non-numeric falls back to 0.0,
+    never raises (V5 — T-VIQ-01)."""
+    assert TextStyle.from_dict({"rotation_deg": 999}).rotation_deg == 180.0
+    assert TextStyle.from_dict({"rotation_deg": -999}).rotation_deg == -180.0
+    assert TextStyle.from_dict({"rotation_deg": 45}).rotation_deg == 45.0
+    assert TextStyle.from_dict({"rotation_deg": "x"}).rotation_deg == 0.0
+    assert TextStyle.from_dict({"rotation_deg": True}).rotation_deg == 0.0  # bool rejected
+    assert TextStyle.from_dict({"rotation_deg": None}).rotation_deg == 0.0
+
+
+@pytest.mark.unit
+def test_v5_clamp_char_and_line_spacing_px() -> None:
+    """char_spacing_px clamps into 0..64; line_spacing_px into 0..256;
+    non-numeric falls back to the default, never raises (V5 — T-VIQ-01)."""
+    assert TextStyle.from_dict({"char_spacing_px": 100}).char_spacing_px == 64.0
+    assert TextStyle.from_dict({"char_spacing_px": -5}).char_spacing_px == 0.0
+    assert TextStyle.from_dict({"char_spacing_px": 8.5}).char_spacing_px == 8.5
+    assert TextStyle.from_dict({"char_spacing_px": "wide"}).char_spacing_px == 0.0
+    assert TextStyle.from_dict({"char_spacing_px": False}).char_spacing_px == 0.0
+
+    assert TextStyle.from_dict({"line_spacing_px": 999}).line_spacing_px == 256.0
+    assert TextStyle.from_dict({"line_spacing_px": -1}).line_spacing_px == 0.0
+    assert TextStyle.from_dict({"line_spacing_px": 20.25}).line_spacing_px == 20.25
+    assert TextStyle.from_dict({"line_spacing_px": "tall"}).line_spacing_px == 0.0
+    assert TextStyle.from_dict({"line_spacing_px": None}).line_spacing_px == 0.0

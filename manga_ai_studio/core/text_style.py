@@ -51,6 +51,14 @@ _FONT_SIZE_MAX = 1024.0
 _EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
 _OPACITY_MAX = 1.0
 
+# quick-260824-viq bounds: free-angle text rotation is clamped to a full
+# half-turn in either direction; character spacing and line/column spacing
+# are non-negative gaps with generous ceilings (a larger value is garbage,
+# not intent).
+ROTATION_MAX = 180.0
+CHAR_SPACING_MAX = 64.0
+LINE_SPACING_MAX = 256.0
+
 _ALIGN_H_VALUES = ("left", "center", "right")
 _ALIGN_V_VALUES = ("top", "middle", "bottom")
 
@@ -143,6 +151,16 @@ class TextStyle:
         outline / glow / shadow: The D-14 effect dicts (see module defaults
             for the exact keys). NEVER mutated in place — every style change
             assigns a fresh instance (``dataclasses.replace``).
+        rotation_deg: Free-angle text rotation in degrees CLOCKWISE
+            (quick-260824-viq; Qt's ``QPainter.rotate`` convention). 0.0 =
+            the axis-aligned legacy look. Serialized and V5-clamped into
+            [-180, 180] on load.
+        char_spacing_px: Extra horizontal gap between characters (px).
+            Applied through ``QFont.setLetterSpacing`` so measurement and
+            render share one font construction. Clamped 0..64.
+        line_spacing_px: Extra vertical gap between lines (horizontal mode)
+            / between stacked characters in a column (vertical tategaki
+            mode), in px. Clamped 0..256.
     """
 
     font_family: str = DEFAULT_FONT_FAMILY
@@ -154,6 +172,9 @@ class TextStyle:
     align_h: str = "center"
     align_v: str = "middle"
     vertical: bool = False
+    rotation_deg: float = 0.0
+    char_spacing_px: float = 0.0
+    line_spacing_px: float = 0.0
     outline: dict = field(default_factory=lambda: dict(DEFAULT_OUTLINE))
     glow: dict = field(default_factory=lambda: dict(DEFAULT_GLOW))
     shadow: dict = field(default_factory=lambda: dict(DEFAULT_SHADOW))
@@ -175,6 +196,9 @@ class TextStyle:
             "align_h": self.align_h,
             "align_v": self.align_v,
             "vertical": self.vertical,
+            "rotation_deg": self.rotation_deg,
+            "char_spacing_px": self.char_spacing_px,
+            "line_spacing_px": self.line_spacing_px,
             "outline": dict(self.outline),
             "glow": dict(self.glow),
             "shadow": dict(self.shadow),
@@ -227,6 +251,15 @@ class TextStyle:
             align_h=align_h,
             align_v=align_v,
             vertical=_coerce_bool(d.get("vertical"), False),
+            rotation_deg=_clamp_float(
+                d.get("rotation_deg"), -ROTATION_MAX, ROTATION_MAX, 0.0
+            ),
+            char_spacing_px=_clamp_float(
+                d.get("char_spacing_px"), 0.0, CHAR_SPACING_MAX, 0.0
+            ),
+            line_spacing_px=_clamp_float(
+                d.get("line_spacing_px"), 0.0, LINE_SPACING_MAX, 0.0
+            ),
             outline=_coerce_effect(d.get("outline"), DEFAULT_OUTLINE),
             glow=_coerce_effect(d.get("glow"), DEFAULT_GLOW),
             shadow=_coerce_effect(d.get("shadow"), DEFAULT_SHADOW),
