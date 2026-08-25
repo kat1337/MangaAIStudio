@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-23 — Completed quick task 260822-wvf: Smarter auto-size text wrapping (owned line breaker; includes OOM fix bf8091f)
+Last activity: 2026-08-24 — Completed quick task 260824-pqn: Save Project JSON-safe payload fix + loud failures; stationary-grace removed, re-detect manual-only stale-gated
 
 ## Performance Metrics
 
@@ -379,6 +379,8 @@ None yet.
 | 260822-gnq | Fix box-move auto re-detect annoyance + brush ghost on scroll + pan tool brush cursor | 2026-08-22 | ed00312 | [260822-gnq-fix-box-move-auto-re-detect-annoyance-br](./quick/260822-gnq-fix-box-move-auto-re-detect-annoyance-br/)
 | 260822-vk7 | Fix translation field bug: resizing a box then typing a translation freezes the app momentarily and resets the translation status | 2026-08-23 | 77e09bf | [260822-vk7-fix-translation-field-bug-resizing-a-box](./quick/260822-vk7-fix-translation-field-bug-resizing-a-box/)
 | 260822-wvf | Improve auto-size text wrapping: smarter line breaking (no can/'t, don'/t, Are/you/free/? orphans) via Knuth-Plass-lite DP | 2026-08-23 | 4db1851 | [260822-wvf-improve-auto-size-text-wrapping-smarter-](./quick/260822-wvf-improve-auto-size-text-wrapping-smarter-/)
+| 260823-hge | Standards-grade line breaker: uniseg UAX #14 atoms + pyphen hyphenation; auto-fit rejects Latin-split candidates (fixes Hert/a! mid-word splits) | 2026-08-23 | a28b5cd | [260823-hge-fix-owned-line-breaker-quality-latin-wor](./quick/260823-hge-fix-owned-line-breaker-quality-latin-wor/)
+| 260824-pqn | Fix Save Project writing nothing (ndarray-payload JSON crash) + loud save failures; remove grace timer — manual stale-gated re-detect only | 2026-08-24 | 51e3f62 | [260824-pqn-fix-bubble-re-detection-remove-grace-per](./quick/260824-pqn-fix-bubble-re-detection-remove-grace-per/)
 
 ## Deferred Items
 
