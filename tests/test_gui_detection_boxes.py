@@ -730,9 +730,9 @@ def test_move_commit_defers_refit_to_redetect(qtbot, tmp_path) -> None:
     """quick-260822-gnq (supersedes the 08.1 D-12 recompute-on-release
     contract): moving a DETECTED box and releasing does NOT re-fit anymore —
     the box is marked geometry-stale with its std_dev PRESERVED, and the
-    explicit re-detect path (corner affordance / stationary grace) re-runs
-    the fit at the CURRENT geometry (uniform -> will_fill solid, noisy ->
-    will_inpaint solid; D-01 inverted gate)."""
+    manual re-detect path (corner affordance click, quick-260824-pqn stale
+    gate) re-runs the fit at the CURRENT geometry (uniform -> will_fill
+    solid, noisy -> will_inpaint solid; D-01 inverted gate)."""
     from manga_ai_studio.core.mask_editor import ToolMode
 
     from PySide6.QtCore import QCoreApplication
@@ -784,8 +784,8 @@ def test_move_commit_defers_refit_to_redetect(qtbot, tmp_path) -> None:
     assert moved.current_box().as_tuple == (85, 5, 115, 35), "the box moved"
     assert window.history.can_undo_boxes(), "the move committed a BOXES push"
     # quick-260822-gnq: the move is CHEAP — no refit, detection info survives
-    # the move untouched, and the box is marked stale for the re-run
-    # affordance / stationary grace.
+    # the move untouched, and the box is marked stale for the manual re-run
+    # affordance (quick-260824-pqn stale gate; no automatic path).
     std_before_move = moved.pagebox.std_dev
     assert moved.geometry_stale is True, "moved box must be marked stale"
     assert moved.pagebox.std_dev == std_before_move, (

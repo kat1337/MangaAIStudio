@@ -3431,13 +3431,12 @@ def test_run_ocr_selected_real_model_end_to_end(qtbot, tmp_path) -> None:
 
 
 @pytest.mark.gui
-def test_alt_drag_draw_release_defers_ocr_to_grace(qtbot) -> None:
-    """D-01 (quick-260822-gnq revision): Alt+drag draw-release NO LONGER emits
-    ocr_requested — the instant dispatch is superseded by the stationary
-    grace period (MainWindow._mark_geometry_changed arms it via the
-    boxes_modified commit, which still fires). The ocr_requested signal stays
-    declared; a draw-and-release must emit boxes_modified and zero OCR
-    requests."""
+def test_alt_drag_draw_release_emits_no_ocr_requested(qtbot) -> None:
+    """D-01 (quick-260822-gnq, revised quick-260824-pqn): Alt+drag
+    draw-release NEVER emits ocr_requested — a new box is only marked
+    geometry-stale via the boxes_modified commit; running OCR is manual-only
+    (the corner affordance). The ocr_requested signal stays declared; a
+    draw-and-release must emit boxes_modified and zero OCR requests."""
     canvas = _canvas_with_image_and_boxes(qtbot)
     requested: list = []
     canvas.ocr_requested.connect(lambda item: requested.append(item))
@@ -3447,8 +3446,8 @@ def test_alt_drag_draw_release_defers_ocr_to_grace(qtbot) -> None:
     canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
     canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
     assert canvas.box_count() == 1
-    assert requested == []  # no instant dispatch anymore
-    assert len(modified) == 1  # the commit still flows (arms the grace timer)
+    assert requested == []  # no instant dispatch — manual re-detect only
+    assert len(modified) == 1  # the commit still flows (marks the box stale)
 
 
 @pytest.mark.gui
@@ -3542,42 +3541,6 @@ def test_ctrl_r_shortcut_triggers_ocr_all(qtbot, tmp_path, monkeypatch) -> None:
     assert window._op_running is True  # the action dispatched the worker
     qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
     assert window.canvas._box_items[0].pagebox.payload.text == "新"
-
-
-@pytest.mark.gui
-def test_on_canvas_create_dispatches_single_box_worker_after_grace(
-    qtbot, tmp_path, monkeypatch
-) -> None:
-    """D-01 auto-OCR end-to-end (quick-260822-gnq revision): a real Alt+drag
-    on the window's canvas creates a box; after the (shortened) stationary
-    grace expires, MainWindow dispatches exactly one OCR worker and the box
-    arrives with recognized text (off the GUI thread, T-4-11)."""
-    window = _window_with_page(qtbot, tmp_path)
-    fake = _FakeOCRModel("自動")
-    monkeypatch.setattr(
-        "manga_ai_studio.gui.main_window.backend_factory",
-        lambda kind, backend: fake,
-    )
-    monkeypatch.setattr("panelcleaner.model_downloader.is_ocr_downloaded", lambda: True)
-    monkeypatch.setattr(
-        "manga_ai_studio.gui.main_window.STATIONARY_GRACE_MS", 50
-    )
-    canvas = window.canvas
-    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
-    canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
-    canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
-    assert canvas.box_count() == 1
-    item = canvas._box_items[0]
-    assert item.isSelected() is True
-    # Nothing dispatches at release; the grace timer is armed instead.
-    assert window._op_running is False
-    # The fake worker completes near-instantly, so _op_running may flip
-    # True->False between polls — wait on the OBSERVABLE result instead.
-    qtbot.waitUntil(lambda: item.pagebox.payload is not None, timeout=5000)
-    assert item.pagebox.payload.text == "自動"
-    assert item.pagebox.edited is False
-    # Exactly ONE auto pass: the stale marker cleared + no repeat firing.
-    assert item.geometry_stale is False
 
 
 @pytest.mark.gui
@@ -4937,9 +4900,10 @@ def test_graveyard_release_against_invalidated_wrapper_safe(
 
 
 # ===========================================================================
-# quick-260822-gnq — regression guards for the three cleaning-canvas bugs:
+# quick-260822-gnq — regression guards for the cleaning-canvas bugs:
 # (1) move/touch no longer nukes + re-runs detection (per-box re-run
-#     affordance + 5 s stationary grace replace refit-on-commit);
+#     affordance + geometry-stale marking; quick-260824-pqn removed the
+#     stationary-grace auto-dispatch — re-detect is manual-only);
 # (2) scrolling leaves no phantom brush strokes;
 # (3) Move/Pan shows no brush-dot cursor.
 # All tests are hermetic: the dispatch/refit engines are stubbed at the
@@ -4999,247 +4963,61 @@ def test_move_commit_does_not_refit(qtbot, tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.gui
-def test_stationary_grace_dispatches_once(qtbot, tmp_path, monkeypatch) -> None:
-    """Guard 1b: after the shortened stationary grace expires, exactly ONE
-    detection-fit + ONE OCR dispatch runs per stale box — and no repeat
-    firing afterwards."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+def test_commit_move_marks_stale_starts_nothing(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260824-pqn replacement for the grace-dispatch battery: a
+    committed box move marks the item geometry-stale and dispatches NOTHING
+    — no timer exists to fire, so even after processing events the refit/OCR
+    recorders stay empty."""
     window = _window_with_page(qtbot, tmp_path)
     item = _add_user_box_window(window, Box(10, 20, 80, 80))
     refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
 
     _commit_move(window, item, 20, 0)
-    qtbot.waitUntil(
-        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
-    )
-    assert item.geometry_stale is False
-    # A further full grace window must NOT re-fire (single-shot timer).
+    assert item.geometry_stale is True
+    # Advance the event loop well past any legacy grace window: with the
+    # timer machinery removed there is nothing left to dispatch.
     qtbot.wait(150)
+    QApplication.processEvents()
+    assert refit_calls == [] and ocr_calls == []
+
+
+@pytest.mark.gui
+def test_redetect_click_noop_when_not_stale(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260824-pqn: the corner re-detect affordance fires only when the
+    bubble exists AND is geometry-stale — a click on a fresh/non-moved box
+    is a no-op (no refit, no OCR)."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    assert item.geometry_stale is False
+    window.canvas.box_redetect_requested.emit(item)
+    QApplication.processEvents()
+    assert refit_calls == [] and ocr_calls == []
+    assert item.geometry_stale is False
+
+
+@pytest.mark.gui
+def test_redetect_click_runs_when_stale(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260824-pqn: on a geometry-stale bubble the affordance click runs
+    exactly ONE OCR dispatch (plus the refit leg) and clears the stale
+    marker."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _add_user_box_window(window, Box(10, 20, 80, 80))
+    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
+
+    _commit_move(window, item, 20, 0)
+    assert item.geometry_stale is True
+    window.canvas.box_redetect_requested.emit(item)
+    QApplication.processEvents()
     assert len(refit_calls) == 1
     assert len(ocr_calls) == 1
+    assert item.geometry_stale is False
 
 
-@pytest.mark.gui
-def test_drag_cancels_pending_grace(qtbot, tmp_path, monkeypatch) -> None:
-    """Guard 1c: starting another box drag inside the grace window cancels
-    the pending auto detection+OCR — both recorders stay empty past the
-    original deadline."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    _commit_move(window, item, 20, 0)
-    assert window._stationary_timer.isActive()
-    # A drag START cancels the pending dispatch.
-    window.canvas.box_interaction_started.emit()
-    assert not window._stationary_timer.isActive()
-    qtbot.wait(150)  # advance well past the original deadline
-    assert refit_calls == [] and ocr_calls == []
-
-
-@pytest.mark.gui
-def test_create_defers_detection_to_grace(qtbot, tmp_path, monkeypatch) -> None:
-    """Guard 1d: a freshly drawn box dispatches NOTHING at release; exactly
-    one OCR + one refit run after the shortened grace."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    canvas = window.canvas
-    canvas.mousePressEvent(_press_at(canvas, 30, 30, alt=True))
-    canvas.mouseMoveEvent(_move_at(canvas, 90, 90))
-    canvas.mouseReleaseEvent(_release_at(canvas, 90, 90))
-    assert canvas.box_count() == 1
-    # Nothing at release (no instant dispatch); the timer is armed instead.
-    assert refit_calls == [] and ocr_calls == []
-    assert window._stationary_timer.isActive()
-    # Exactly one of each after the grace.
-    qtbot.waitUntil(
-        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
-    )
-    qtbot.wait(150)
-    assert len(refit_calls) == 1 and len(ocr_calls) == 1
-
-
-# ---- quick-260822-vk7: stationary-grace defers while an edit session is active
-
-
-@pytest.mark.gui
-def test_grace_defers_while_translation_focused(qtbot, tmp_path, monkeypatch) -> None:
-    """quick-260822-vk7 Task 2: with the translation field focused when the
-    grace timer fires, NO refit/OCR dispatch happens — the timer RE-ARMS
-    instead and the stale marker survives."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    _commit_move(window, item, 20, 0)
-    assert window._stationary_timer.isActive()
-    # The user edits the SELECTED box: select so the panel fields enable.
-    item.setSelected(True)
-    QApplication.processEvents()
-    panel = window.inspector_panel
-    panel.translation_edit.setFocus()
-    QApplication.processEvents()
-    assert panel.is_text_edit_active() is True
-
-    # Advance well past the original deadline: deferred, not dispatched.
-    qtbot.wait(150)
-    assert refit_calls == [] and ocr_calls == []
-    assert window._stationary_timer.isActive(), "timer must be re-armed"
-    assert item.geometry_stale is True, "stale marker untouched by the deferral"
-
-
-@pytest.mark.gui
-def test_grace_defers_while_inline_editor_active(qtbot, tmp_path, monkeypatch) -> None:
-    """quick-260822-vk7 Task 2: an active canvas INLINE editor also defers
-    the grace work (timer re-arms instead of dispatching)."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    _commit_move(window, item, 20, 0)
-    monkeypatch.setattr(
-        window.canvas._inline_editor, "is_active", lambda: True
-    )
-
-    qtbot.wait(150)
-    assert refit_calls == [] and ocr_calls == []
-    assert window._stationary_timer.isActive(), "timer must be re-armed"
-
-
-@pytest.mark.gui
-def test_grace_without_edit_session_dispatches_normally(
-    qtbot, tmp_path, monkeypatch
-) -> None:
-    """quick-260822-vk7 Task 2 control: with NO edit session the existing
-    single-dispatch contract holds unchanged."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    _commit_move(window, item, 20, 0)
-    assert window.inspector_panel.is_text_edit_active() is False
-    qtbot.waitUntil(
-        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
-    )
-    qtbot.wait(150)
-    assert len(refit_calls) == 1 and len(ocr_calls) == 1
-
-
-@pytest.mark.gui
-def test_deferred_grace_runs_exactly_once_after_focus_out(
-    qtbot, tmp_path, monkeypatch
-) -> None:
-    """quick-260822-vk7 Task 2: a DEFERRED grace is not dropped — once the
-    edit session ends (focus-out), the re-armed timer fires exactly ONE
-    detection-fit + OCR dispatch."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-
-    _commit_move(window, item, 20, 0)
-    # Select so the panel fields enable, then focus the translation field.
-    item.setSelected(True)
-    QApplication.processEvents()
-    panel = window.inspector_panel
-    panel.translation_edit.setFocus()
-    QApplication.processEvents()
-    qtbot.wait(150)  # original + first re-armed firing both defer
-    assert refit_calls == [] and ocr_calls == []
-
-    panel.translation_edit.clearFocus()
-    QApplication.processEvents()
-    qtbot.waitUntil(
-        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
-    )
-    qtbot.wait(150)
-    assert len(refit_calls) == 1 and len(ocr_calls) == 1
-
-
-@pytest.mark.gui
-def test_resize_then_type_repro_guard(qtbot, tmp_path, monkeypatch) -> None:
-    """quick-260822-vk7 Task 3: the EXACT reported repro order — create/
-    select a box, emit a committed RESIZE (arms the grace), type into the
-    translation field mid-grace, let the timer fire AND the OCR-finished
-    land. Typed keystrokes survive verbatim, the grace defers (re-arms),
-    and after editing finishes the pending work runs once and the pagebox
-    carries BOTH the OCR text and the typed translation."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
-    window = _window_with_page(qtbot, tmp_path)
-    refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
-    item = _add_user_box_window(window, Box(10, 20, 80, 80))
-    item.setSelected(True)
-    QApplication.processEvents()
-    panel = window.inspector_panel
-
-    # A COMMITTED RESIZE (changed tuple) marks stale + arms the grace timer.
-    before = window.canvas.boxes_snapshot()
-    r = item.rect()
-    item.setRect(QRectF(r.x(), r.y(), r.width() + 10, r.height()))
-    item._sync_handles()
-    window.canvas.boxes_modified.emit(before)
-    assert item.geometry_stale is True
-    assert window._stationary_timer.isActive()
-
-    # The user immediately types into the translation field (commit-deferred).
-    panel.translation_edit.setFocus()
-    QApplication.processEvents()
-    assert panel.is_text_edit_active() is True
-    panel.translation_edit.insertPlainText("typed translation")
-
-    # The grace fires MID-TYPING: deferred (no freeze path), re-armed.
-    qtbot.wait(150)
-    assert refit_calls == [] and ocr_calls == [], (
-        "no heavy work may run while the edit session is active"
-    )
-    assert window._stationary_timer.isActive(), "grace must re-arm, not drop"
-
-    # The OCR-finished result lands mid-typing: the Inspector reload is
-    # suppressed -> the field keeps the typed text verbatim.
-    window._on_ocr_finished(
-        {"box_id": id(item.pagebox), "text": "recognized"}
-    )
-    QApplication.processEvents()
-    assert panel.translation_edit.toPlainText().endswith("typed translation")
-
-    # Editing finishes (focus-out commits) -> the pending grace runs ONCE.
-    panel.translation_edit.clearFocus()
-    QApplication.processEvents()
-    qtbot.waitUntil(
-        lambda: len(refit_calls) == 1 and len(ocr_calls) == 1, timeout=5000
-    )
-
-    # The re-detect's OCR result lands (unfocused now): the panel refreshes,
-    # the typed translation SURVIVES, and the payload carries BOTH texts.
-    window._on_ocr_finished(
-        {"box_id": id(item.pagebox), "text": "recognized"}
-    )
-    QApplication.processEvents()
-    assert "typed translation" in panel.translation_edit.toPlainText()
-    assert item.pagebox.payload.text == "recognized"
-    assert item.pagebox.payload.translation.endswith("typed translation")
+# ---- quick-260822-vk7 deferral tests REMOVED (quick-260824-pqn): with the
+# stationary-grace timer gone there is nothing to defer — typing/editing
+# never triggers detection work by construction.
 
 
 @pytest.mark.gui
@@ -5292,22 +5070,23 @@ def test_redetect_affordance_click_refits_with_current_geometry(
 
 
 @pytest.mark.gui
-def test_edited_box_not_auto_reocred(qtbot, tmp_path, monkeypatch) -> None:
+def test_edited_box_not_reocred_on_redetect(qtbot, tmp_path, monkeypatch) -> None:
     """Guard 1f (T-QG-03): a moved box carrying hand-edited recognized text
     gets its fit refreshed but its OCR leg SKIPPED — silent overwrite is
-    reserved for raw/never-recognized text."""
-    import manga_ai_studio.gui.main_window as mw_mod
-
-    monkeypatch.setattr(mw_mod, "STATIONARY_GRACE_MS", 50)
+    reserved for raw/never-recognized text. quick-260824-pqn: the trigger is
+    the manual affordance click (the grace auto-dispatch no longer exists)."""
     window = _window_with_page(qtbot, tmp_path)
     item = _add_user_box_window(window, Box(10, 20, 80, 80))
     item.pagebox.set_recognized_text_edited("手書き")
     refit_calls, ocr_calls = _stub_engines(window, monkeypatch)
 
-    _commit_move(window, item, 15, 0)
-    qtbot.waitUntil(lambda: len(refit_calls) == 1, timeout=5000)
-    qtbot.wait(150)
+    _commit_move(window, item, 15, 0)  # marks the box stale
+    assert item.geometry_stale is True
+    window.canvas.box_redetect_requested.emit(item)
+    QApplication.processEvents()
+    assert len(refit_calls) == 1, "the fit refresh still runs"
     assert ocr_calls == [], "edited text must never be silently re-OCRed"
+    assert item.geometry_stale is False
 
 
 @pytest.mark.gui
