@@ -70,6 +70,7 @@ from manga_ai_studio.core.text_style import TextStyle
 from manga_ai_studio.gui.text_renderer import (
     LayoutResult,
     _OVERLAY_INSET,
+    _normalize_rotation,
     current_focus_text,
     effect_padding,
     layout as renderer_layout,
@@ -180,6 +181,16 @@ _REDETECT_Z = 160
 # resize handle's hit area (the badge's TL-outside precedent).
 _REDETECT_OFFSET = 2.0
 
+# quick-260824-viq: the free-angle text-rotation grab handle. Built exactly
+# like a RedetectHandle — an ItemIgnoresTransformations child with a fixed
+# 10x10 viewport-px circle at z=155 (above the CornerHandles' z=150, below
+# the RedetectHandle's z=160) — but placed ABOVE the TOP-LEFT corner: its
+# CENTER sits 18 px above parent_rect.top(), clearly separated from the TL
+# CornerHandle's ~9px-radius zoom-divided hit zone (quick-260824-t64).
+_ROTATE_SIZE = 10
+_ROTATE_Z = 155
+_ROTATE_ABOVE_TL = 18.0
+
 
 class RedetectHandle(QGraphicsEllipseItem):
     """The circular "re-run detection" affordance of a geometry-stale box.
@@ -238,6 +249,66 @@ class RedetectHandle(QGraphicsEllipseItem):
         self.setPos(
             parent_rect.right() + _REDETECT_OFFSET,
             parent_rect.top() - _REDETECT_SIZE - _REDETECT_OFFSET,
+        )
+
+
+class RotationHandle(QGraphicsEllipseItem):
+    """The circular free-angle text-rotation grab handle (quick-260824-viq).
+
+    Shown ONLY while the parent :class:`BoxItem` is selected AND primary
+    (the same rule as the corner handles — the multi-select affordance).
+    The handle owns its left-press: ``mousePressEvent`` accepts the event
+    and invokes ``activate_callback(parent_item, scene_pos)`` — installed by
+    the canvas to arm its rotate-drag state machine — so MainWindow never
+    subscribes to per-item objects.
+
+    Like :class:`RedetectHandle` this is a VISUAL-ONLY overlay from the
+    canvas hit-test's perspective: ``EditorCanvas._box_item_at`` matches only
+    ``CornerHandle`` / ``BoxItem``, so this child never arms a move/resize;
+    its press reaches it through the view's fall-through path.
+    """
+
+    def __init__(self, parent: "BoxItem") -> None:
+        super().__init__(0.0, 0.0, float(_ROTATE_SIZE), float(_ROTATE_SIZE), parent)
+        # Constant screen size at any zoom (the CornerHandle pattern).
+        self.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
+        self.setZValue(_ROTATE_Z)
+        # Origin-hue fill + 1px matte outline for separation from artwork.
+        self.setBrush(QBrush(QColor(origin_hue(parent.pagebox.origin))))
+        self.setPen(QPen(_HANDLE_OUTLINE, 1))
+        self.setToolTip("Rotate text")
+        # SizeAll reads as "drag to transform" without implying resize.
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        # Hidden until the parent box is selected (+primary).
+        self.setVisible(False)
+        # Callable[(BoxItem, QPointF), None] installed by the canvas (the
+        # weak-coupling seam — the item never references EditorCanvas).
+        self.activate_callback = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API casing)
+        """Accept a left-click and fire the activate callback (arm rotation)."""
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.activate_callback is not None
+        ):
+            event.accept()
+            self.activate_callback(self.parentItem(), event.scenePos())
+            return
+        super().mousePressEvent(event)
+
+    def reposition(self, parent_rect: QRectF) -> None:
+        """Place the handle's CENTER 18 px ABOVE the parent rect's top-left.
+
+        Ignores-transformations child: ``pos()`` is in scene coords. The
+        above-the-corner placement keeps it clear of the TL CornerHandle's
+        ~9px-radius hit zone and of the TL-outside bubble badge.
+        """
+        half = _ROTATE_SIZE / 2.0
+        self.setPos(
+            parent_rect.left() - half,
+            parent_rect.top() - _ROTATE_ABOVE_TL - half,
         )
 
 
@@ -454,6 +525,10 @@ class TypesetOverlayItem(QGraphicsItem):
         # setPos-only reposition rides the dy through every move/resize/zoom
         # without a re-layout (RC-1).
         self._ink_offset = QPointF(0.0, 0.0)
+        # quick-260824-viq: the box-top-left-relative overlay position for a
+        # ROTATED render (``None`` = the unrotated ``_ink_offset`` path — the
+        # legacy code path must stay byte-identical at rotation 0).
+        self._render_offset: QPointF | None = None
 
     # ------------------------------------------------------------ geometry
     def boundingRect(self) -> QRectF:  # noqa: D401 (Qt API casing)
@@ -510,11 +585,20 @@ class TypesetOverlayItem(QGraphicsItem):
             self._pixmap = None
             self.layout_result = None
             self._ink_offset = QPointF(0.0, 0.0)
+            self._render_offset = None
             self.update()
             return
         result = renderer_layout(text, style, box_rect, vertical=vertical)
         self.layout_result = result
         pad = effect_padding(style)
+        # quick-260824-viq (d): a rotated style renders through the dedicated
+        # rotated-surface path (the UNROTATED path below must stay
+        # byte-identical at rotation 0 — no refactor of its math).
+        angle = _normalize_rotation(getattr(style, "rotation_deg", 0.0))
+        if abs(angle) > 1e-6:
+            self._render_rotated(result, style, box_rect, angle, pad)
+            return
+        self._render_offset = None
         ink = result.ink
         w = max(1, math.ceil(ink.width() + 2.0 * pad))
         h = max(1, math.ceil(ink.height() + 2.0 * pad))
@@ -548,13 +632,99 @@ class TypesetOverlayItem(QGraphicsItem):
         self._ink_offset = QPointF(ink.left() - pad, ink.top() - pad + dy)
         self.update()
 
+    def _render_rotated(
+        self,
+        result: LayoutResult,
+        style: TextStyle,
+        box_rect: QRectF,
+        angle_deg: float,
+        pad: float,
+    ) -> None:
+        """Render a ROTATED layout into the cached pixmap (quick-260824-viq).
+
+        The renderer's ``paint`` applies the rotation about
+        ``result.box_center`` itself (Task 1), so the surface must cover the
+        ROTATED padded-ink bounds and the item position must place it back at
+        the exact spot the bake paints — D-01 canvas ≡ bake.
+
+        Geometry derivation (the unrotated path is the angle->0 special
+        case): with the cancel translate ``t0`` from the unrotated path, the
+        pixmap-local position of doc point ``p`` after ``renderer_paint`` is
+        ``t0 + C + R(p + origin - C)`` where ``C`` is the box center and
+        ``R`` the rotation (``translate(C); rotate; translate(-C);
+        translate(origin)`` composes with the rotation INSIDE — ``origin``
+        rotates together with ``p``). The surface bounding box comes from
+        mapping the padded-ink corners through that expression; the item
+        position that reproduces the bake's absolute placement is
+        ``P = min_g - t0`` (stored box-relative in :attr:`_render_offset`
+        for the setPos-only :meth:`refresh_position`, RC-1).
+        """
+        ink = result.ink
+        pr = QRectF(
+            ink.left() - pad,
+            ink.top() - pad,
+            ink.width() + 2.0 * pad,
+            ink.height() + 2.0 * pad,
+        )
+        t0x = -result.origin.x() - ink.left() + pad
+        t0y = -result.origin.y() - ink.top() + pad
+        c = result.box_center
+        rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+
+        def _g(px: float, py: float) -> tuple[float, float]:
+            """Pixmap-local position of doc point ``(px, py)`` pre-shift."""
+            vx = px + result.origin.x() - c.x()
+            vy = py + result.origin.y() - c.y()
+            return (
+                t0x + c.x() + vx * cos_a - vy * sin_a,
+                t0y + c.y() + vx * sin_a + vy * cos_a,
+            )
+
+        # Surface bounds: map the padded-ink corners through _g.
+        xs: list[float] = []
+        ys: list[float] = []
+        for corner in (
+            pr.topLeft(),
+            pr.topRight(),
+            pr.bottomRight(),
+            pr.bottomLeft(),
+        ):
+            gx, gy = _g(corner.x(), corner.y())
+            xs.append(gx)
+            ys.append(gy)
+        left, top = min(xs), min(ys)
+        w = max(1, math.ceil(max(xs) - left))
+        h = max(1, math.ceil(max(ys) - top))
+        qimg = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+        qimg.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Shift the composed local coords (_g = t0 + paint-output) into the
+        # surface: translate by t0 - (left, top). At angle 0 this reduces
+        # EXACTLY to the legacy cancel translate (t0x, t0y).
+        painter.translate(t0x - left, t0y - top)
+        renderer_paint(painter, result, style)  # rotates about box_center
+        painter.end()
+        self._pixmap = QPixmap.fromImage(qimg)
+        # Item position P = min_g - t0, stored relative to the box top-left.
+        px = left - t0x - box_rect.x()
+        py = top - t0y - box_rect.y()
+        self._render_offset = QPointF(px, py)
+        self.update()
+
     def refresh_position(self, box_rect: QRectF, inset: float) -> None:
         """Reposition the overlay inside ``box_rect`` — setPos ONLY (RC-1).
 
         Uses the geometry cached by the last :meth:`set_content`; never
         re-layouts. Called from ``BoxItem._reposition_text_overlay`` on
-        every move/resize/zoom/selection change (per-mousemove).
+        every move/resize/zoom/selection change (per-mousemove). A rotated
+        render uses the cached :attr:`_render_offset`; rotation 0 keeps the
+        legacy byte-identical formula.
         """
+        if self._render_offset is not None:
+            self.setPos(box_rect.x() + self._render_offset.x(), box_rect.y() + self._render_offset.y())
+            return
         self.setPos(
             box_rect.x() + inset + self._ink_offset.x(),
             box_rect.y() + inset + self._ink_offset.y(),
@@ -665,6 +835,15 @@ class BoxItem(QGraphicsRectItem):
         # ``activate_callback`` wiring (box_redetect_requested) at creation.
         self._geometry_stale = False
         self._redetect = RedetectHandle(self)
+        # quick-260824-viq: the free-angle text-rotation handle (z=155).
+        # Integrated into the SAME visibility machinery as the corner
+        # handles (selected AND primary) via _sync_handles /
+        # _sync_handles_for_state; the canvas installs its activate
+        # callback (the rotate-drag arming seam) per item.
+        self._rotation_handle = RotationHandle(self)
+        # quick-260824-viq: the rotation handle's default acceptance (captured
+        # for the set_edit_mode restore, mirroring the corner handles).
+        self._rotation_rest_buttons = self._rotation_handle.acceptedMouseButtons()
         # Plan 07-02 (D-09): WEAKREF to the owning canvas, installed by
         # ``set_primary_owner``. ``_sync_handles_for_state`` asks it whether
         # THIS item is the selection PRIMARY (the last-clicked box): corner
@@ -834,6 +1013,10 @@ class BoxItem(QGraphicsRectItem):
         for handle in self.handles.values():
             handle.setVisible(show)
             handle.reposition(rect)
+        # quick-260824-viq: the rotation handle rides the SAME visibility
+        # rule as the corner handles (selected AND primary).
+        self._rotation_handle.setVisible(show)
+        self._rotation_handle.reposition(rect)
         # quick-260822-gnq: keep the stale-marker affordance on the live rect.
         self._reposition_redetect()
         self.refresh_badge()
@@ -912,6 +1095,10 @@ class BoxItem(QGraphicsRectItem):
         for handle in self.handles.values():
             handle.setVisible(show)
             handle.reposition(rect)
+        # quick-260824-viq: the rotation handle rides the SAME visibility
+        # rule as the corner handles (selected AND primary).
+        self._rotation_handle.setVisible(show)
+        self._rotation_handle.reposition(rect)
         # quick-260822-gnq: keep the stale-marker affordance on the live rect.
         self._reposition_redetect()
         self._reposition_text_overlay()
@@ -1077,6 +1264,30 @@ class BoxItem(QGraphicsRectItem):
         else:
             self._text_overlay.setVisible(False)
 
+    # ------------------------------------------- rotation preview (viq)
+    def preview_rotation(self, angle_deg: float) -> None:
+        """LIVE-drag-only lightweight rotation of the text overlay (viq).
+
+        Applies a pure QGraphicsItem rotation to the overlay child about the
+        BOX CENTER (expressed in overlay-local coordinates via the transform
+        origin point). NO re-layout, NO re-render — the per-mousemove
+        discipline (RC-1); the caller follows a committed angle with
+        :meth:`refresh_text_overlay` to bake it into the cached pixmap.
+        """
+        overlay = self._text_overlay
+        center = self.rect().center()
+        pos = overlay.pos()
+        overlay.setTransformOriginPoint(
+            center.x() - pos.x(), center.y() - pos.y()
+        )
+        overlay.setRotation(angle_deg)
+        overlay.update()
+
+    def clear_preview_rotation(self) -> None:
+        """Reset the live-drag preview rotation (the commit path re-renders)."""
+        self._text_overlay.setRotation(0.0)
+        self._text_overlay.setTransformOriginPoint(0.0, 0.0)
+
     # ------------------------------------------- inline-editor edit-mode hooks
     def enter_edit_mode(self) -> None:
         """Enter edit mode: disable move/resize interaction (UI-SPEC §15, D-07).
@@ -1108,6 +1319,15 @@ class BoxItem(QGraphicsRectItem):
                 handle.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             else:
                 handle.setAcceptedMouseButtons(self._handle_rest_buttons)
+        # quick-260824-viq: the rotation handle joins the edit-mode
+        # acceptance stripping (a direct handle press must not arm a rotate
+        # drag while the inline editor is open).
+        if active:
+            self._rotation_handle.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        else:
+            self._rotation_handle.setAcceptedMouseButtons(
+                self._rotation_rest_buttons
+            )
 
     def _current_focus_text(self) -> str:
         """Return the D-10 current-focus text: translation when present, else recognized.

@@ -27,7 +27,9 @@ Security:
 
 from __future__ import annotations
 
+import math
 import os
+from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 from weakref import ref as _weakref
 
@@ -76,8 +78,10 @@ from manga_ai_studio.core.mask_planes import (
     pack_binary,
     unpack_binary,
 )
-from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, origin_hue
+from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, RotationHandle, origin_hue
 from manga_ai_studio.gui.inline_editor import InlineEditor
+from manga_ai_studio.gui.text_renderer import _normalize_rotation
 
 
 # Maximum zoom factor (image_viewer.py:233 clamps at 100).
@@ -307,6 +311,15 @@ class EditorCanvas(QGraphicsView):
         self._pending_boxes_op_name: str | None = None
         self._creating_box = False
         self._create_anchor = QPointF()
+        # quick-260824-viq: the rotate-drag state (mirrors the resize trio).
+        # _rotating_box is the armed BoxItem; _rotate_start_angle_deg the
+        # style rotation at grab; _rotate_grab_angle_rad the atan2 of
+        # (grab point - box center); _rotate_live_angle the latest
+        # normalized live angle stashed for commit.
+        self._rotating_box: BoxItem | None = None
+        self._rotate_start_angle_deg = 0.0
+        self._rotate_grab_angle_rad = 0.0
+        self._rotate_live_angle = 0.0
         # CR-01 fix: the PRE-mutation snapshot captured at the START of a
         # box interaction (move/resize/create), emitted on commit as the
         # boxes_modified payload so the history push records the BEFORE state
@@ -1483,6 +1496,12 @@ class EditorCanvas(QGraphicsView):
             self._advance_resize(curr)
             event.accept()
             return
+        # --- quick-260824-viq: rotate-drag advance (live preview transform
+        # only — no re-layout per mousemove).
+        if self._rotating_box is not None:
+            self._advance_rotation(curr)
+            event.accept()
+            return
         if self._creating_box:
             self._advance_create(curr)
             event.accept()
@@ -1528,6 +1547,12 @@ class EditorCanvas(QGraphicsView):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            # --- quick-260824-viq: rotate commit (one-shot boxes_modified).
+            if self._rotating_box is not None:
+                self._commit_rotation()
+                self.viewport().releaseMouse()
+                event.accept()
+                return
             # --- Phase 3 box resize commit (clamp final rect to >= 8x8, D-06).
             if self._resizing_box is not None:
                 self._commit_resize()
@@ -2098,6 +2123,7 @@ class EditorCanvas(QGraphicsView):
             # quick-260822-gnq: wire the stale-marker affordance click to the
             # canvas-level signal (MainWindow subscribes ONCE to the signal).
             self._install_redetect_hook(item)
+            self._install_rotation_hook(item)
             self._scene.addItem(item)
             # Parent-less items inherit their own visibility; sync to the layer
             # state so a toggle BEFORE any boxes were added still hides them.
@@ -2198,6 +2224,24 @@ class EditorCanvas(QGraphicsView):
                 self.box_redetect_requested.emit(it)
 
         item.set_redetect_callback(_emit_redetect)
+
+    def _install_rotation_hook(self, item: BoxItem) -> None:
+        """Wire a BoxItem's rotation handle press to :meth:`_begin_rotation`.
+
+        quick-260824-viq: each RotationHandle child invokes an item-installed
+        callback carrying the parent BoxItem + the press scene pos; this
+        closure keeps the canvas as the sole state-machine owner (the
+        redetect-hook seam). The same weakref lifetime discipline applies —
+        no strong item reference from a long-lived closure.
+        """
+        item_ref = _weakref(item)
+
+        def _begin(item_it, scene_pos) -> None:
+            it = item_ref()
+            if it is not None:
+                self._begin_rotation(it, scene_pos)
+
+        item._rotation_handle.activate_callback = _begin
 
     def boxes_snapshot(self) -> list[PageBox]:
         """Materialize a fresh list of PageBoxes from the live BoxItem rects.
@@ -2562,6 +2606,88 @@ class EditorCanvas(QGraphicsView):
         if item.rect() != self._resize_start_rect:
             self.boxes_modified.emit(before)
 
+    # ------------------------------------------------- rotate drag (viq)
+    def _begin_rotation(self, item: BoxItem, scene_pos: QPointF) -> None:
+        """Arm a rotate drag from the RotationHandle press (quick-260824-viq).
+
+        Selects the box when needed (the handle is only visible on the
+        selected+primary box, but a direct programmatic arm may arrive
+        unselected), captures the PRE-rotation boxes snapshot (CR-01),
+        records the current style rotation (a style-None box starts at 0.0)
+        and the grab angle's atan2 about the LIVE box center, then grabs the
+        viewport so move/release keep arriving off-item. The edit-mode guard
+        keeps rotation inert while the inline editor is open.
+        """
+        if self._inline_editor.is_active():
+            return
+        if not item.isSelected():
+            self._deselect_box()
+            item.setSelected(True)
+        self._note_selection_order(item)
+        self._primary_box = item
+        self._sync_handles_visibility()
+        # CR-01: capture the PRE-mutation snapshot (emitted on commit).
+        self._boxes_interaction_start_snapshot = self.boxes_snapshot()
+        style = item.pagebox.style if item.pagebox.style is not None else TextStyle()
+        self._rotate_start_angle_deg = float(
+            getattr(style, "rotation_deg", 0.0) or 0.0
+        )
+        self._rotate_live_angle = self._rotate_start_angle_deg
+        center = item.rect().center()
+        self._rotate_grab_angle_rad = math.atan2(
+            scene_pos.y() - center.y(), scene_pos.x() - center.x()
+        )
+        self._rotating_box = item
+        self.viewport().grabMouse()
+
+    def _advance_rotation(self, curr: QPointF) -> None:
+        """Live-drag advance: preview-only transform of the overlay (RC-1).
+
+        Delta = atan2(cursor - live box center) - grab angle, in degrees;
+        the live angle normalizes into (-180, 180] and drives
+        ``BoxItem.preview_rotation`` — NO re-layout, NO re-render per
+        mousemove.
+        """
+        item = self._rotating_box
+        if item is None:
+            return
+        # Derived from item.rect().center() LIVE each move (defensive — a
+        # move cannot be armed simultaneously).
+        center = item.rect().center()
+        delta_deg = math.degrees(
+            math.atan2(curr.y() - center.y(), curr.x() - center.x())
+            - self._rotate_grab_angle_rad
+        )
+        live = _normalize_rotation(self._rotate_start_angle_deg + delta_deg)
+        self._rotate_live_angle = live
+        item.preview_rotation(live)
+
+    def _commit_rotation(self) -> None:
+        """Finalize a rotate drag (quick-260824-viq).
+
+        Clears the live preview transform; when the angle moved beyond the
+        0.05-deg deadband, assigns a FRESH TextStyle via ``dataclasses.replace``
+        (Pitfall 1), re-renders the overlay once with the committed angle,
+        records the "rotate" op name, and emits ``boxes_modified`` ONCE with
+        the PRE-rotation snapshot (CR-01 — one Ctrl+Z reverses it). A
+        no-drag click never emits (the WR-04 delta-check precedent).
+        """
+        item = self._rotating_box
+        before = self._boxes_interaction_start_snapshot
+        start = self._rotate_start_angle_deg
+        live = self._rotate_live_angle
+        self._rotating_box = None
+        if item is None:
+            return
+        item.clear_preview_rotation()
+        if abs(live - start) <= 0.05:
+            return
+        style = item.pagebox.style if item.pagebox.style is not None else TextStyle()
+        item.pagebox.style = _dataclass_replace(style, rotation_deg=live)
+        item.refresh_text_overlay()
+        self.set_pending_boxes_op_name("rotate")
+        self.boxes_modified.emit(before)
+
     def _advance_create(self, curr: QPointF) -> None:
         """Advance the amber-dashed create preview rect during the drag (§12e)."""
         path = QPainterPath()
@@ -2609,6 +2735,7 @@ class EditorCanvas(QGraphicsView):
         # quick-260822-gnq: wire the stale-marker affordance click to the
         # canvas-level signal.
         self._install_redetect_hook(item)
+        self._install_rotation_hook(item)
         self._scene.addItem(item)
         item.setVisible(self._box_overlay_visible)
         item.setEnabled(self._box_overlay_visible)
