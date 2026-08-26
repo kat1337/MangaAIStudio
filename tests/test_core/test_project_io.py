@@ -430,15 +430,18 @@ def test_invalid_std_dev_rejected() -> None:
 
 
 @pytest.mark.unit
-def test_per_box_mask_size_mismatch_rejected() -> None:
+def test_per_box_mask_size_mismatch_loads_sanitized() -> None:
     """A per-box mask whose decoded PNG size does not match the box's (w, h)
-    raises ProjectFormatError (T-08-06 size cross-check — the decoded image
-    is bounded to the declared box dims)."""
+    is a STALE mask (box resized after fit) — it decodes fine but no longer
+    fits the geometry, so the loader sanitizes it to ``mask=None`` and nulls
+    the fit-derived ``std_dev``/``fill_color`` together (quick-260825-u9q —
+    the old T-08-06 hard reject made such projects unloadable). Decode-level
+    garbage still raises (see test_per_box_mask_garbage_rejected)."""
     tiny = Image.new("1", (4, 4), 0)
     buf = BytesIO()
     tiny.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    base = {  # box is 100x40, but the mask decodes to 4x4
+    base = {  # box is 100x40, but the mask decodes to 4x4 — stale
         "box": [0, 0, 100, 40],
         "origin": USER,
         "edited": False,
@@ -446,8 +449,63 @@ def test_per_box_mask_size_mismatch_rejected() -> None:
         "manual_override": False,
         "payload": None,
     }
-    with pytest.raises(ProjectFormatError):
-        json_to_pagebox({**base, "mask": b64})
+    out = json_to_pagebox(
+        {
+            **base,
+            "mask": b64,
+            "std_dev": 12.3,
+            "fill_color": [1, 2, 3],
+        }
+    )
+    assert out.mask is None
+    assert out.std_dev is None
+    assert out.fill_color is None
+
+    # The MATCHING-size case keeps returning a real mode-"1" image.
+    fitted = Image.new("1", (100, 40), 0)
+    buf2 = BytesIO()
+    fitted.save(buf2, format="PNG")
+    b64_fitted = base64.b64encode(buf2.getvalue()).decode("ascii")
+    out2 = json_to_pagebox({**base, "mask": b64_fitted})
+    assert out2.mask is not None
+    assert out2.mask.mode == "1"
+    assert out2.mask.size == (100, 40)
+
+
+@pytest.mark.unit
+def test_stale_mask_after_resize_user_scenario_loads() -> None:
+    """The exact user scenario (quick-260825-u9q): a box was FITTED
+    (mask sized to its box, std_dev + fill_color measured) and THEN resized
+    before saving. pagebox_to_json serializes both verbatim; the loader must
+    sanitize the stale trio (mask/std_dev/fill_color -> None) instead of
+    raising ProjectFormatError, while preserving inpaint_override (user
+    intent) and style/payload untouched."""
+    pb = PageBox(
+        box=Box(0, 0, 100, 40),
+        origin=USER,
+        payload=TextBlock([0, 0, 100, 40], lines=[], language="unknown"),
+        edited=False,
+        bubble_no=None,
+        manual_override=False,
+        style=TextStyle(),
+        std_dev=12.5,
+        inpaint_override="always",
+        mask=Image.new("1", (100, 40), 0),
+        fill_color=(10, 20, 30),
+    )
+    d = pagebox_to_json(pb)
+    # Simulate the post-fit resize: new geometry, stale mask dims.
+    d["box"] = [0, 0, 80, 60]
+
+    out = json_to_pagebox(d)  # MUST NOT raise ProjectFormatError
+    assert out.box.as_tuple == (0, 0, 80, 60)
+    assert out.mask is None
+    assert out.std_dev is None
+    assert out.fill_color is None
+    # User intent survives; style/payload untouched.
+    assert out.inpaint_override == "always"
+    assert out.style is not None and isinstance(out.style, TextStyle)
+    assert out.payload is not None
 
 
 @pytest.mark.unit
