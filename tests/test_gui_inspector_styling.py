@@ -165,9 +165,10 @@ def test_styling_section_present(qtbot) -> None:
         assert isinstance(panel._effect_swatches[key], QToolButton)
         assert isinstance(panel._effect_spins[key], QSpinBox)
 
-    # Size spin: 0..200 with the "Auto" sentinel at 0 (D-15).
+    # Size spin: 0..1024 with the "Auto" sentinel at 0 (D-15; the cap
+    # matches the TextStyle font_size_px clamp — quick-260825-wfy).
     assert panel.size_spin.minimum() == 0
-    assert panel.size_spin.maximum() == 200
+    assert panel.size_spin.maximum() == 1024
     assert panel.size_spin.specialValueText() == "Auto"
 
     # A styled box populates the controls with its real values.

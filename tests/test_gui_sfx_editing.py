@@ -886,3 +886,34 @@ def test_prepare_geometry_change_called_on_preview_and_clear(
         "both preview_rotation and clear_preview_rotation must call "
         "prepareGeometryChange exactly once"
     )
+
+
+# ===========================================================================
+# quick-260825-wfy Task 2 — Inspector font-size spinbox cap = model max 1024
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_inspector_size_spin_range_matches_model_max(qtbot, tmp_path) -> None:
+    """size_spin accepts 0..1024 (the TextStyle font_size_px clamp); 0 keeps
+    the 'Auto' sentinel special-value text."""
+    window = _window_with_page(qtbot, tmp_path)
+    panel = window.inspector_panel
+    assert panel.size_spin.minimum() == 0
+    assert panel.size_spin.maximum() == 1024
+    assert panel.size_spin.specialValueText() == "Auto"
+
+
+@pytest.mark.gui
+def test_inspector_size_spin_loads_800_without_truncation(qtbot, tmp_path) -> None:
+    """A style with font_size_px=800 round-trips through load_box and shows
+    800 in the spinbox — no clamp truncation at the old 200 cap."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 300, 200)])[0]
+    item.pagebox.style = TextStyle(auto_fit=False, font_size_px=800.0)
+    item.pagebox.set_translation("BIG")
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    assert panel.size_spin.value() == 800

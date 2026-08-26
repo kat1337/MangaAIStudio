@@ -32,7 +32,7 @@ for the currently-selected box:
 - **Style section** (plan 07-05, D-05/D-06/D-10/D-14/D-15 — UI-SPEC surface
   33): the per-box styling controls BELOW the text fields — Font
   (``QFontComboBox``), Style (per-family ``QComboBox``), Size + Auto-fit
-  (0..200 ``QSpinBox`` with the "Auto" sentinel + a tri-state ``QCheckBox``),
+  (0..1024 ``QSpinBox`` with the "Auto" sentinel + a tri-state ``QCheckBox``),
   Color (24x24 swatch ``QToolButton`` → ``QColorDialog``), Align / Align V
   combos, and the Outline / Glow / Shadow effect rows (enable checkbox +
   swatch + spin). Every control carries a class-scope Signal + a WR-01 no-op
@@ -60,7 +60,7 @@ Security:
     - Style values leave the panel only as real values (the "Mixed" sentinel
       never crosses into a ``TextStyle`` — T-07-11 / RESEARCH Pitfall 7); the
       spinbox ranges clamp the effect geometry at the UI (V5 — outline 0..10,
-      glow 0..20, shadow 0..10, size 0..200 with 0 = Auto).
+      glow 0..20, shadow 0..10, size 0..1024 with 0 = Auto).
 """
 
 from __future__ import annotations
@@ -476,12 +476,14 @@ class InspectorPanel(QWidget):
         self.style_combo.setToolTip("Font style (weight + slant).")
         form.addRow("Style", self.style_combo)
 
-        # Size + Auto-fit (D-15): 0..200 with "Auto" at 0 (the bubble_spin
-        # sentinel pattern). The Auto-fit checkbox couples the spin: checked
+        # Size + Auto-fit (D-15): 0..1024 with "Auto" at 0 (the bubble_spin
+        # sentinel pattern; 0..1024 matches the TextStyle font_size_px clamp
+        # in core/text_style.py — quick-260825-wfy). The Auto-fit checkbox
+        # couples the spin: checked
         # -> 0/Auto + disabled; unchecked -> enabled with the current rendered
         # size (rounded) as the starting manual value (UI-SPEC §33).
         self.size_spin = QSpinBox()
-        self.size_spin.setRange(0, 200)
+        self.size_spin.setRange(0, 1024)
         self.size_spin.setSpecialValueText("Auto")
         self.size_spin.setValue(0)
         self.auto_fit_check = QCheckBox("Auto-fit")
