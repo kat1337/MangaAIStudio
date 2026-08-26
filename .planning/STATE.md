@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 status: Awaiting next milestone
-stopped_at: Completed 09-03-PLAN.md — Phase 9 all plans executed, ready for verification
-last_updated: "2026-08-22T06:16:38.723Z"
-last_activity: 2026-08-22
-last_activity_desc: Milestone v1.2 completed and archived
+stopped_at: Completed quick task 260824-viq — SFX editing features (rotation handle, char/line spacing, box copy/paste)
+last_updated: "2026-08-25T19:40:00.000Z"
+last_activity: 2026-08-25
+last_activity_desc: Completed quick task 260824-viq — rotation_deg/char_spacing_px/line_spacing_px style fields + renderer support, RotationHandle canvas drag, Inspector Spacing H/V rows, Ctrl+C/Ctrl+V box duplication; full suite 1138 passed
 progress:
   total_phases: 10
   completed_phases: 10
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-24 — Completed quick task 260824-t64: Box UX fixes — zoom-compensated editor font, constant screen-size corner grab zones, live font-size rendering
+Last activity: 2026-08-25 — Completed quick task 260824-viq: SFX editing features — rotation handle, char/line spacing, box copy/paste
 
 ## Performance Metrics
 
