@@ -3452,6 +3452,10 @@ class MainWindow(QMainWindow):
             on_style_color=self._on_inspector_style_color_committed,
             on_style_align=self._on_inspector_style_align_committed,
             on_style_effect=self._on_inspector_style_effect_committed,
+            # quick-260824-viq: the spacing spins ride the SAME
+            # apply-to-all snapshot machinery (D-10).
+            on_style_char_spacing=self._on_inspector_char_spacing_committed,
+            on_style_line_spacing=self._on_inspector_line_spacing_committed,
             # Plan 08-08 (D-13/D-14): the Inpaint override combo's grouped
             # commit (UI-SPEC §38 — ONE snapshot, recompose, border refresh,
             # status flash).
@@ -4043,6 +4047,23 @@ class MainWindow(QMainWindow):
     def _on_inspector_style_effect_committed(self, key: str, changes: dict) -> None:
         self._inspector_style_commit(
             lambda item: self._replace_effect(item.pagebox, key, changes)
+        )
+
+    # --------------------------------------- quick-260824-viq spacing commits
+    def _on_inspector_char_spacing_committed(self, value: int) -> None:
+        """Spacing H commit: horizontal character separation per box."""
+        self._inspector_style_commit(
+            lambda item: self._replace_style(
+                item.pagebox, char_spacing_px=float(value)
+            )
+        )
+
+    def _on_inspector_line_spacing_committed(self, value: int) -> None:
+        """Spacing V commit: vertical line/column separation per box."""
+        self._inspector_style_commit(
+            lambda item: self._replace_style(
+                item.pagebox, line_spacing_px=float(value)
+            )
         )
 
     # ------------------------------------------------- plan 08-08 inpaint override

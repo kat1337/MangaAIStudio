@@ -497,6 +497,31 @@ class InspectorPanel(QWidget):
         size_h.addWidget(self.auto_fit_check)
         form.addRow("Size", size_row)
 
+        # Spacing H / Spacing V (quick-260824-viq): horizontal character
+        # separation and vertical line/column separation, riding
+        # style.char_spacing_px / style.line_spacing_px through the SHARED
+        # renderer (measurement == render). The ranges match the TextStyle
+        # V5 clamps (0..64 / 0..256) so the UI can never produce a value the
+        # model would clamp differently.
+        self.char_spacing_spin = QSpinBox()
+        self.char_spacing_spin.setRange(0, 64)
+        self.char_spacing_spin.setSuffix(" px")
+        self.char_spacing_spin.setValue(0)
+        self.char_spacing_spin.setToolTip(
+            "Extra horizontal gap between characters."
+        )
+        form.addRow("Spacing H", self.char_spacing_spin)
+
+        self.line_spacing_spin = QSpinBox()
+        self.line_spacing_spin.setRange(0, 256)
+        self.line_spacing_spin.setSuffix(" px")
+        self.line_spacing_spin.setValue(0)
+        self.line_spacing_spin.setToolTip(
+            "Extra vertical gap between lines (or between stacked "
+            "characters in vertical text)."
+        )
+        form.addRow("Spacing V", self.line_spacing_spin)
+
         # Color — the 24x24 swatch -> QColorDialog (Don't-Hand-Roll). The
         # split fill (color None) is the D-10 Mixed presentation.
         self.color_swatch = _ColorSwatchButton()
@@ -561,6 +586,9 @@ class InspectorPanel(QWidget):
         self._loaded_style_italic = False
         self._loaded_style_size = 0
         self._style_size_mixed = False
+        # quick-260824-viq: the spacing spins' WR-01 loaded memories.
+        self._loaded_char_spacing = 0
+        self._loaded_line_spacing = 0
         self._loaded_rendered_size: float | None = None
         self._loaded_style_auto_fit = False
         self._loaded_style_color: str | None = "#e8e8ea"
@@ -800,6 +828,25 @@ class InspectorPanel(QWidget):
             self._loaded_style_size = self.size_spin.value()
         self.size_spin.blockSignals(was)
 
+        # quick-260824-viq: the spacing spins load the PRIMARY box's values
+        # with NO tri-state — a deliberate simplification for this task (a
+        # commit applies to ALL selected boxes through _replace_style like
+        # every other style row). The align/effect mixed-sentinel machinery
+        # above is the upgrade path if per-axis Mixed is ever needed.
+        primary = styles[0]
+        was = self.char_spacing_spin.blockSignals(True)
+        self.char_spacing_spin.setValue(
+            int(round(float(getattr(primary, "char_spacing_px", 0.0) or 0.0)))
+        )
+        self.char_spacing_spin.blockSignals(was)
+        self._loaded_char_spacing = self.char_spacing_spin.value()
+        was = self.line_spacing_spin.blockSignals(True)
+        self.line_spacing_spin.setValue(
+            int(round(float(getattr(primary, "line_spacing_px", 0.0) or 0.0)))
+        )
+        self.line_spacing_spin.blockSignals(was)
+        self._loaded_line_spacing = self.line_spacing_spin.value()
+
         # Color — all-equal -> solid swatch; differing -> the split swatch.
         colors = {s.color for s in styles}
         if len(colors) == 1:
@@ -920,6 +967,22 @@ class InspectorPanel(QWidget):
             self.size_spin.setValue(int(round(float(style.font_size_px))))
         self.size_spin.blockSignals(was)
         self._loaded_style_size = self.size_spin.value()
+
+        # quick-260824-viq: the spacing spins (WR-01 loaded memory follows
+        # the display; clear() resets both through this same path with the
+        # default TextStyle).
+        was = self.char_spacing_spin.blockSignals(True)
+        self.char_spacing_spin.setValue(
+            int(round(float(getattr(style, "char_spacing_px", 0.0) or 0.0)))
+        )
+        self.char_spacing_spin.blockSignals(was)
+        self._loaded_char_spacing = self.char_spacing_spin.value()
+        was = self.line_spacing_spin.blockSignals(True)
+        self.line_spacing_spin.setValue(
+            int(round(float(getattr(style, "line_spacing_px", 0.0) or 0.0)))
+        )
+        self.line_spacing_spin.blockSignals(was)
+        self._loaded_line_spacing = self.line_spacing_spin.value()
 
         self._loaded_style_color = style.color
         self._set_swatch_color(self.color_swatch, style.color)
@@ -1160,6 +1223,8 @@ class InspectorPanel(QWidget):
             self.style_combo,
             self.size_spin,
             self.auto_fit_check,
+            self.char_spacing_spin,
+            self.line_spacing_spin,
             self.color_swatch,
             self.align_combo,
             self.align_v_combo,
@@ -1201,6 +1266,8 @@ class InspectorPanel(QWidget):
         on_style_color=None,
         on_style_align=None,
         on_style_effect=None,
+        on_style_char_spacing=None,
+        on_style_line_spacing=None,
         on_inpaint_override=None,
     ) -> None:
         """Wire each field's commit signal to the MainWindow-supplied callbacks.
@@ -1253,6 +1320,17 @@ class InspectorPanel(QWidget):
         if on_style_auto_fit is not None:
             self.auto_fit_check.stateChanged.connect(
                 lambda _s: self._commit_auto_fit(on_style_auto_fit)
+            )
+        # quick-260824-viq: the spacing spins commit on editingFinished with
+        # the WR-01 emit-if-changed pattern (_emit_style_size_if_changed is
+        # the template — an unchanged focus cycle is a no-op).
+        if on_style_char_spacing is not None:
+            self.char_spacing_spin.editingFinished.connect(
+                lambda: self._emit_char_spacing_if_changed(on_style_char_spacing)
+            )
+        if on_style_line_spacing is not None:
+            self.line_spacing_spin.editingFinished.connect(
+                lambda: self._emit_line_spacing_if_changed(on_style_line_spacing)
             )
         if on_style_color is not None:
             self.color_swatch.clicked.connect(
@@ -1417,6 +1495,18 @@ class InspectorPanel(QWidget):
             return  # a no-op focus cycle on the "Mixed" sentinel (Pitfall 7)
         if number != self._loaded_style_size:
             on_style_size(number)
+
+    def _emit_char_spacing_if_changed(self, commit) -> None:
+        """WR-01 emit-if-changed for Spacing H (quick-260824-viq)."""
+        value = self.char_spacing_spin.value()
+        if value != self._loaded_char_spacing:
+            commit(value)
+
+    def _emit_line_spacing_if_changed(self, commit) -> None:
+        """WR-01 emit-if-changed for Spacing V (quick-260824-viq)."""
+        value = self.line_spacing_spin.value()
+        if value != self._loaded_line_spacing:
+            commit(value)
 
     def _commit_auto_fit(self, on_style_auto_fit) -> None:
         """Auto-fit checkbox commit: real state only (tri-state = sentinel)."""

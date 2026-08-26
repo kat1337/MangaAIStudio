@@ -24,8 +24,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QPointF, QRectF, QSizeF  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSizeF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication, QGraphicsScene  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
@@ -352,3 +352,223 @@ def test_zero_rotation_keeps_legacy_overlay_path(qtbot) -> None:
     overlay = item._text_overlay
     assert overlay._render_offset is None
     assert overlay.pixmap() is not None
+
+
+# ===========================================================================
+# Task 3 — Inspector spacing rows
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_inspector_spacing_commit_routes_through_replace_style(qtbot, tmp_path) -> None:
+    """Setting Spacing H / Spacing V and emitting editingFinished commits
+    through _replace_style: style field lands, overlay re-renders (pixmap
+    changes), ONE boxes_modified emission."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 160, 120)])[0]
+    item.pagebox.set_translation("SPACED OUT PROBE")
+    item.pagebox.style = TextStyle(auto_fit=False, font_size_px=12.0)
+    item.refresh_text_overlay()
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    assert panel.char_spacing_spin.value() == 0
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+
+    pm_before = panel.char_spacing_spin.value()
+    pixmap_before = np.frombuffer(
+        bytes(item._text_overlay.pixmap().toImage().bits()), dtype=np.uint8
+    ).copy()
+
+    panel.char_spacing_spin.setValue(10)
+    panel.char_spacing_spin.editingFinished.emit()
+
+    assert item.pagebox.style.char_spacing_px == 10.0
+    assert len(emitted) == 1
+
+    panel.line_spacing_spin.setValue(24)
+    panel.line_spacing_spin.editingFinished.emit()
+    assert item.pagebox.style.line_spacing_px == 24.0
+    assert len(emitted) == 2
+
+    # The re-render actually changed pixels (spacing moved glyphs).
+    arr_before = np.frombuffer(pixmap_before, dtype=np.uint8)
+    pixmap_after = np.frombuffer(
+        bytes(item._text_overlay.pixmap().toImage().bits()), dtype=np.uint8
+    )
+    _ = pm_before
+    assert not np.array_equal(arr_before, pixmap_after)
+
+
+@pytest.mark.gui
+def test_inspector_spacing_wr01_unchanged_commit_is_noop(qtbot, tmp_path) -> None:
+    """An unchanged focus cycle (editingFinished without a value change)
+    emits nothing — the WR-01 no-op-on-unchanged discipline."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 160, 120)])[0]
+    item.pagebox.set_translation("probe")
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    emitted: list = []
+    window.canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    panel.char_spacing_spin.editingFinished.emit()
+    panel.line_spacing_spin.editingFinished.emit()
+    assert emitted == []
+
+
+@pytest.mark.gui
+def test_inspector_spacing_load_and_clear(qtbot, tmp_path) -> None:
+    """load_box populates the spins from the box style; clear() resets to 0."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 160, 120)])[0]
+    item.pagebox.style = TextStyle(char_spacing_px=8.0, line_spacing_px=40.0)
+    item.setSelected(True)
+    QApplication.processEvents()
+
+    panel = window.inspector_panel
+    assert panel.char_spacing_spin.value() == 8
+    assert panel.line_spacing_spin.value() == 40
+
+    canvas = window.canvas
+    canvas._clear_selection()
+    QApplication.processEvents()
+    assert panel.char_spacing_spin.value() == 0
+    assert panel.line_spacing_spin.value() == 0
+
+
+@pytest.mark.gui
+def test_spacing_survives_mas_round_trip() -> None:
+    """All three new fields survive pagebox_to_json -> json_to_pagebox (the
+    D-07 single spelling — project_io consumes to_dict/from_dict verbatim,
+    so a .mas save/load preserves rotation + both spacings)."""
+    from manga_ai_studio.core.project_io import json_to_pagebox, pagebox_to_json
+
+    style = TextStyle(rotation_deg=-37.5, char_spacing_px=12.5, line_spacing_px=48.0)
+    pb = PageBox(box=Box(10, 20, 200, 300), origin=USER, style=style)
+
+    out = json_to_pagebox(pagebox_to_json(pb))
+    assert out.style is not None
+    assert out.style is not pb.style  # fresh instance (Pitfall 8)
+    assert out.style.rotation_deg == -37.5
+    assert out.style.char_spacing_px == 12.5
+    assert out.style.line_spacing_px == 48.0
+
+
+# ===========================================================================
+# Task 3 — Ctrl+C / Ctrl+V duplication
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_copy_stash_caries_text_style_rotation(qtbot, tmp_path) -> None:
+    """Ctrl+C stashes detached clones carrying text + full style incl.
+    rotation/spacings; an empty selection leaves the clipboard alone."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 160, 120)])[0]
+    item.pagebox.set_translation("COPY ME")
+    item.pagebox.style = TextStyle(
+        auto_fit=False,
+        font_size_px=12.0,
+        rotation_deg=30.0,
+        char_spacing_px=6.0,
+        line_spacing_px=18.0,
+    )
+    item.setSelected(True)
+
+    window.canvas.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C,
+                  Qt.KeyboardModifier.ControlModifier, "c")
+    )
+    clipboard = window.canvas.box_clipboard
+    assert len(clipboard) == 1
+    clone = clipboard[0]
+    assert clone is not item.pagebox  # detached
+    assert clone.payload.translation == "COPY ME"
+    assert clone.style.rotation_deg == 30.0
+    assert clone.style.char_spacing_px == 6.0
+    assert clone.style.line_spacing_px == 18.0
+
+    # Empty selection: silent no-op (clipboard keeps prior contents).
+    window.canvas._clear_selection()
+    window.canvas.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C,
+                  Qt.KeyboardModifier.ControlModifier, "c")
+    )
+    assert window.canvas.box_clipboard is clipboard
+
+
+@pytest.mark.gui
+def test_paste_inserts_detached_user_clone_at_offset_one_undo(qtbot, tmp_path) -> None:
+    """Ctrl+V inserts a USER-origin clone at +16/+16 with bubble number
+    cleared and INDEPENDENT payload (mutating the original's text after the
+    paste leaves the clone untouched); one Ctrl+Z removes the paste."""
+    window = _window_with_page(qtbot, tmp_path)
+    item = _seed_boxes_window(window, [Box(20, 20, 120, 100)])[0]
+    item.pagebox.set_translation("ORIGINAL")
+    item.pagebox.bubble_no = 7
+    item.pagebox.manual_override = True
+    item.pagebox.style = TextStyle(auto_fit=False, font_size_px=12.0, rotation_deg=15.0)
+    item.refresh_text_overlay()
+    item.setSelected(True)
+
+    canvas = window.canvas
+    canvas.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C,
+                  Qt.KeyboardModifier.ControlModifier, "c")
+    )
+    emitted: list = []
+    canvas.boxes_modified.connect(lambda snap: emitted.append(list(snap)))
+    n_before = canvas.box_count()
+
+    canvas.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_V,
+                  Qt.KeyboardModifier.ControlModifier, "v")
+    )
+
+    assert canvas.box_count() == n_before + 1
+    assert len(emitted) == 1
+    # The payload of the single emission is the PRE-paste layer.
+    assert len(emitted[0]) == n_before
+
+    pasted = canvas._box_items[-1].pagebox
+    x1, y1, x2, y2 = pasted.box.as_tuple
+    ox1, oy1, ox2, oy2 = item.pagebox.box.as_tuple
+    assert (x1, y1) == (ox1 + 16, oy1 + 16)
+    assert (x2, y2) == (ox2 + 16, oy2 + 16)
+    assert pasted.origin == USER
+    assert pasted.bubble_no is None
+    assert pasted.manual_override is False
+    assert pasted.edited is True
+    # Text + full style rode the copy (that IS the feature).
+    assert pasted.payload.translation == "ORIGINAL"
+    assert pasted.style.rotation_deg == 15.0
+    # Pitfall-8 independence: mutating the ORIGINAL's text after the paste
+    # leaves the clone untouched.
+    item.pagebox.set_translation("CHANGED")
+    assert pasted.payload.translation == "ORIGINAL"
+    # The paste is selected as the new primary.
+    assert canvas._primary_box is canvas._box_items[-1]
+
+    # One Ctrl+Z removes the paste.
+    window.on_undo()
+    assert window.canvas.box_count() == n_before
+
+
+@pytest.mark.gui
+def test_paste_empty_clipboard_silent_noop(qtbot, tmp_path) -> None:
+    """Ctrl+V with an empty clipboard emits nothing and adds no boxes."""
+    window = _window_with_page(qtbot, tmp_path)
+    _seed_boxes_window(window, [Box(20, 20, 80, 80)])
+    canvas = window.canvas
+    emitted: list = []
+    canvas.boxes_modified.connect(lambda snap: emitted.append(snap))
+    canvas.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_V,
+                  Qt.KeyboardModifier.ControlModifier, "v")
+    )
+    assert emitted == []
+    assert canvas.box_count() == 1

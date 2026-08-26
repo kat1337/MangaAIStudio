@@ -320,6 +320,11 @@ class EditorCanvas(QGraphicsView):
         self._rotate_start_angle_deg = 0.0
         self._rotate_grab_angle_rad = 0.0
         self._rotate_live_angle = 0.0
+        # quick-260824-viq: the in-process box clipboard (Ctrl+C/Ctrl+V).
+        # A plain Python attribute — NOT the OS clipboard (T-VIQ-02: no
+        # cross-app leakage surface); holds detached PageBox clones that are
+        # copied AGAIN on every paste (Pitfall 8 applied twice).
+        self.box_clipboard: list[PageBox] = []
         # CR-01 fix: the PRE-mutation snapshot captured at the START of a
         # box interaction (move/resize/create), emitted on commit as the
         # boxes_modified payload so the history push records the BEFORE state
@@ -1925,6 +1930,26 @@ class EditorCanvas(QGraphicsView):
                 event.accept()
                 return
 
+        # --- quick-260824-viq: Ctrl+C copies, Ctrl+V pastes (canvas-scoped).
+        # Guarded to do nothing while the inline editor is active — the
+        # editor owns Ctrl+C/Ctrl+V for its own text while open.
+        if (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and event.key() == Qt.Key.Key_C
+        ):
+            if not self._inline_editor.is_active():
+                self._copy_selected_boxes()
+                event.accept()
+                return
+        if (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and event.key() == Qt.Key.Key_V
+        ):
+            if not self._inline_editor.is_active():
+                self._paste_boxes()
+                event.accept()
+                return
+
         # --- Crop armed-rect keys (plan 05-07, UI-SPEC surface 24a): with a
         # crop rect armed AND the Crop tool active, Enter applies the crop
         # (emits crop_committed, clears the armed state, tool stays active);
@@ -2116,27 +2141,37 @@ class EditorCanvas(QGraphicsView):
         self._group_move = {}
 
         for pb in list(user_pageboxes) + list(detected_pageboxes):
-            item = BoxItem(pb)
-            # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline —
-            # a strong canvas capture stalls GC + breaks Qt teardown ordering).
-            item.set_primary_owner(_weakref(self))
-            # quick-260822-gnq: wire the stale-marker affordance click to the
-            # canvas-level signal (MainWindow subscribes ONCE to the signal).
-            self._install_redetect_hook(item)
-            self._install_rotation_hook(item)
-            self._scene.addItem(item)
-            # Parent-less items inherit their own visibility; sync to the layer
-            # state so a toggle BEFORE any boxes were added still hides them.
-            item.setVisible(self._box_overlay_visible)
-            item.setEnabled(self._box_overlay_visible)
-            # Phase 4 text-overlay layer (D-12): sync the per-box text-overlay
-            # child to the canvas's text-layer flag so a box added AFTER the
-            # text toggle was flipped respects the layer state.
-            item.set_text_overlay_visible(self._text_overlay_visible)
-            self._box_items.append(item)
+            self._register_box_item(BoxItem(pb))
 
         self._refresh_empty_box_hint()
         self.boxes_modified.emit(before)
+
+    def _register_box_item(self, item: BoxItem) -> None:
+        """The ONE BoxItem-construction path shared by every creation site.
+
+        quick-260824-viq extraction (previously inlined in set_boxes and
+        _commit_create; the paste path joins them — no forked construction
+        logic): primary-owner weakref (D-09 cycle discipline), redetect +
+        rotation handle hooks, scene insertion, layer/text-overlay flag
+        sync, and live-layer membership.
+        """
+        # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline —
+        # a strong canvas capture stalls GC + breaks Qt teardown ordering).
+        item.set_primary_owner(_weakref(self))
+        # quick-260822-gnq: wire the stale-marker affordance click to the
+        # canvas-level signal (MainWindow subscribes ONCE to the signal).
+        self._install_redetect_hook(item)
+        self._install_rotation_hook(item)
+        self._scene.addItem(item)
+        # Parent-less items inherit their own visibility; sync to the layer
+        # state so a toggle BEFORE any boxes were added still hides them.
+        item.setVisible(self._box_overlay_visible)
+        item.setEnabled(self._box_overlay_visible)
+        # Phase 4 text-overlay layer (D-12): sync the per-box text-overlay
+        # child to the canvas's text-layer flag so a box added AFTER the
+        # text toggle was flipped respects the layer state.
+        item.set_text_overlay_visible(self._text_overlay_visible)
+        self._box_items.append(item)
 
     def set_box_overlay_visible(self, visible: bool) -> None:
         """Toggle the box layer visibility (View -> Toggle Box Overlay, Shift+M).
@@ -2688,6 +2723,77 @@ class EditorCanvas(QGraphicsView):
         self.set_pending_boxes_op_name("rotate")
         self.boxes_modified.emit(before)
 
+    # ------------------------------------------------- copy/paste (viq)
+    def _copy_selected_boxes(self) -> None:
+        """Ctrl+C: stash detached clones of the selected boxes (quick-260824-viq).
+
+        Each clone is a ``PageBox.copy()`` — payload, style (incl. rotation
+        and both spacings), and mask detached (Pitfall 8). An empty selection
+        is a silent no-op (the clipboard keeps its prior contents). The
+        clipboard is in-process Python state, never the OS clipboard
+        (T-VIQ-02).
+        """
+        selected = [it for it in self._box_items if it.isSelected()]
+        if not selected:
+            return
+        self.box_clipboard = [it.pagebox.copy() for it in selected]
+
+    def _paste_boxes(self) -> None:
+        """Ctrl+V: insert detached USER-origin clones at a +16/+16 offset.
+
+        Each paste clones the CLIPBOARD entries AGAIN (Pitfall 8 applied
+        twice — repeated pastes never alias), translates the frozen Box by a
+        constant 16px offset clamped inside the scene rect, resets to fresh-
+        box semantics (origin USER, bubble number cleared, no mask/std-dev/
+        override data, edited=True) while KEEPING text + full style — that
+        is the feature. Insertion rides :meth:`_register_box_item` (the ONE
+        construction path); ONE ``boxes_modified`` emission with the
+        PRE-insert snapshot makes one Ctrl+Z remove the whole paste (CR-01).
+        An empty clipboard is a silent no-op.
+        """
+        if not self.box_clipboard:
+            return
+        page = self.sceneRect()
+        page_w = page.width()
+        page_h = page.height()
+        before = self.boxes_snapshot()  # CR-01: BEFORE inserting
+        pasted_items: list[BoxItem] = []
+        for src_pb in self.box_clipboard:
+            pb = src_pb.copy()  # Pitfall 8 applied twice
+            x1, y1, x2, y2 = src_pb.box.as_tuple
+            w = x2 - x1
+            h = y2 - y1
+            nx1 = x1 + 16
+            ny1 = y1 + 16
+            if not page.isNull():
+                # Clamp the pasted rect inside the page.
+                nx1 = int(min(max(nx1, 0), max(0, page_w - w)))
+                ny1 = int(min(max(ny1, 0), max(0, page_h - h)))
+            pb.box = Box(nx1, ny1, nx1 + w, ny1 + h)
+            # Fresh-box semantics; text + full style ride the copy.
+            pb.origin = USER
+            pb.bubble_no = None
+            pb.manual_override = False
+            pb.mask = None
+            pb.std_dev = None
+            pb.fill_color = None
+            pb.inpaint_override = None
+            pb.edited = True
+            item = BoxItem(pb)
+            self._register_box_item(item)
+            pasted_items.append(item)
+
+        n = len(pasted_items)
+        self._clear_selection()
+        for it in pasted_items:
+            it.setSelected(True)
+        self._selection_order = list(pasted_items)
+        self._primary_box = pasted_items[-1]
+        self._sync_handles_visibility()
+        self._refresh_empty_box_hint()
+        self.set_pending_boxes_op_name(f"Pasted {n} box(es)")
+        self.boxes_modified.emit(before)
+
     def _advance_create(self, curr: QPointF) -> None:
         """Advance the amber-dashed create preview rect during the drag (§12e)."""
         path = QPainterPath()
@@ -2730,20 +2836,7 @@ class EditorCanvas(QGraphicsView):
             ),
         )
         item = BoxItem(pb)
-        # Plan 07-02 (D-09): the primary-owner WEAKREF (cycle discipline).
-        item.set_primary_owner(_weakref(self))
-        # quick-260822-gnq: wire the stale-marker affordance click to the
-        # canvas-level signal.
-        self._install_redetect_hook(item)
-        self._install_rotation_hook(item)
-        self._scene.addItem(item)
-        item.setVisible(self._box_overlay_visible)
-        item.setEnabled(self._box_overlay_visible)
-        # Phase 4 text-overlay layer (D-12): a freshly-created user box has no
-        # text yet, but sync the flag for consistency (a later OCR write would
-        # show text under the current text-layer state).
-        item.set_text_overlay_visible(self._text_overlay_visible)
-        self._box_items.append(item)
+        self._register_box_item(item)
         self._deselect_box()
         item.setSelected(True)
         # Plan 07-02: the fresh box is the sole selection — make it the primary.
