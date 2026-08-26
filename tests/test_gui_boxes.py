@@ -1402,6 +1402,13 @@ def test_overlay_align_v_preserves_dy(qtbot) -> None:
     origin carries NO dy, so the term is exactly 0 (no behavior change).
     RED before the fix: the bottom/middle cases equal the top-case value (the
     dy is dropped by set_content's origin-cancel).
+
+    quick-260826-09m: ``_ink_offset`` now derives from the MEASURED painted
+    bounding box, so it differs from the legacy analytic formula by a
+    per-layout glyph-delta constant. That delta depends only on the laid-out
+    glyphs (NOT on align_v — the scratch mapping cancels ``origin``), so the
+    dy contract is asserted RELATIVE to the same-mode dy==0 reference:
+    ``offset(case) - offset(reference) == dy(case)`` exactly.
     """
     from manga_ai_studio.core.text_style import TextStyle
     from manga_ai_studio.gui.text_renderer import (
@@ -1417,6 +1424,9 @@ def test_overlay_align_v_preserves_dy(qtbot) -> None:
         ("top", False, True),
         ("bottom", True, True),  # vertical origin carries no dy
     ]
+    # Same-mode dy==0 reference offsets (the measured glyph-delta baseline).
+    ref_offset: dict[bool, float] = {}
+    rendered: list[tuple[str, bool, bool, float, float]] = []
     for align_v, vertical, expect_dy_zero in cases:
         style = TextStyle(
             font_size_px=14.0,
@@ -1437,16 +1447,26 @@ def test_overlay_align_v_preserves_dy(qtbot) -> None:
         result = renderer_layout("Hello", style, item.rect(), vertical=vertical)
         pad = effect_padding(style)
         dy = result.origin.y() - item.rect().y() - _OVERLAY_INSET
-        expected = result.ink.top() - pad + dy
 
         assert dy == pytest.approx(0.0, abs=1e-6) if expect_dy_zero else dy > 0.0, (
             f"precondition: align_v={align_v!r} vertical={vertical} must yield "
             f"dy={dy} ({'zero — the blind-spot case' if expect_dy_zero else 'non-zero — the G-07-5 case'})"
         )
-        assert overlay._ink_offset.y() == pytest.approx(expected, abs=1e-6), (
-            f"align_v={align_v!r} vertical={vertical}: _ink_offset.y() must "
-            f"carry the layout dy ({expected}); got "
-            f"{overlay._ink_offset.y()} — set_content's origin-cancel dropped "
+        rendered.append(
+            (align_v, vertical, expect_dy_zero, dy, overlay._ink_offset.y())
+        )
+        if expect_dy_zero:
+            ref_offset[vertical] = overlay._ink_offset.y()
+    for align_v, vertical, expect_dy_zero, dy, offset_y in rendered:
+        if expect_dy_zero:
+            continue
+        ref = ref_offset[False]
+        assert (
+            offset_y - ref == pytest.approx(dy, abs=1e-6)
+        ), (
+            f"align_v={align_v!r}: _ink_offset.y() must carry the layout "
+            f"dy ({dy}) above the dy==0 reference ({ref}); got "
+            f"{offset_y} — set_content's origin-cancel dropped "
             "the align_v dy (G-07-5)"
         )
 

@@ -46,6 +46,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from PySide6 import Shiboken
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (
@@ -72,6 +74,7 @@ from manga_ai_studio.gui.text_renderer import (
     LayoutResult,
     _OVERLAY_INSET,
     _normalize_rotation,
+    _qimage_argb_to_numpy,
     current_focus_text,
     effect_padding,
     layout as renderer_layout,
@@ -495,6 +498,38 @@ class CornerHandle(QGraphicsRectItem):
 
 
 
+def _measure_margin(font_px: float | None) -> int:
+    """The scratch-surface safety margin S (quick-260826-09m).
+
+    ``S = max(64, ceil(effective font px))`` — comfortably larger than any
+    font-metric overshoot of the QTextDocument-derived ink rect (measured:
+    ~10px above ``ink.top()`` for Mango AND Arial at 100px; tall display
+    fonts visibly so). Combined with the caller's ``pad`` (the full effect
+    padding), the scratch always has room for the TRUE painted extent.
+    ``font_px`` is the LayoutResult's auto-fit-resolved
+    ``used_font_size_px`` — already capped at 1024 upstream
+    (quick-260825-wfy), bounding worst-case scratch size (T-Q09M-01).
+    """
+    if font_px is None or font_px <= 0.0:
+        return 64
+    return max(64, math.ceil(float(font_px)))
+
+
+def _measured_bbox(qimg: QImage) -> tuple[int, int, int, int] | None:
+    """The TRUE painted bounding box ``(bx, by, bw, bh)`` of an ARGB image.
+
+    Measures the ALPHA channel (>0) through the renderer's shared numpy
+    bridge (:func:`_qimage_argb_to_numpy` — reused, never a hand-rolled
+    scan). Returns ``None`` when the surface is fully transparent.
+    """
+    alpha = _qimage_argb_to_numpy(qimg)[..., 3]
+    ys, xs = np.nonzero(alpha > 0)
+    if ys.size == 0:
+        return None
+    bx, by = int(xs.min()), int(ys.min())
+    return bx, by, int(xs.max()) - bx + 1, int(ys.max()) - by + 1
+
+
 class TypesetOverlayItem(QGraphicsItem):
     """The renderer-driven OPAQUE typeset overlay child (D-01, plan 07-01 Task 2).
 
@@ -510,9 +545,17 @@ class TypesetOverlayItem(QGraphicsItem):
     canvas calls ``_sync_handles`` on EVERY mousemove during a drag, so a
     full re-layout per mousemove is prohibited).
 
-    The pixmap covers the layout's ink rect padded by the outline half-width
-    (so the outermost stroke is never clipped on canvas); the item's position
-    is the box top-left + the renderer inset + that padded ink offset.
+    The pixmap covers the MEASURED painted extent (quick-260826-09m): the
+    render runs into an oversized scratch surface, the scratch's alpha
+    channel is measured for the true glyph bounding box (fonts overshoot
+    the QTextDocument-derived ink rect — Mango ~10px above ``ink.top()``
+    at 100px), and the pixmap is cropped to that box. ``set_content``
+    performs up to TWO renders per content change (a defensive retry with
+    a doubled safety margin if the measurement ever touches the scratch
+    border) — acceptable, because it runs only on text/style/box-size
+    changes, never per-mousemove (RC-1). The item's position derives from
+    the MEASURED box so placement stays pixel-equivalent to the bake
+    (:meth:`refresh_position`).
     """
 
     def __init__(self, parent: "BoxItem") -> None:
@@ -602,6 +645,15 @@ class TypesetOverlayItem(QGraphicsItem):
         shadow radii + offsets) so enabled effect halos never clip on the
         canvas (the 07-03 handoff: the bake never clips, the canvas now
         matches it — D-01 canvas ≡ bake).
+
+        quick-260826-09m: the surface is now sized by MEASUREMENT, not
+        analytically — pass 1 paints into an oversized scratch exactly as
+        today's transform math dictates, pass 2 crops to the TRUE painted
+        bounding box measured from the scratch alpha channel and derives
+        ``_ink_offset`` from that box. Fonts whose glyphs overshoot the
+        QTextDocument-derived ink rect (Mango) no longer clip. Up to two
+        renders per content change (retry with doubled margin) — content
+        changes only, never per-mousemove (RC-1).
         """
         if not text:
             self._pixmap = None
@@ -630,36 +682,82 @@ class TypesetOverlayItem(QGraphicsItem):
         # never leave a stale bake behind.
         self._baked_rotation = 0.0
         ink = result.ink
-        w = max(1, math.ceil(ink.width() + 2.0 * pad))
-        h = max(1, math.ceil(ink.height() + 2.0 * pad))
-        qimg = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-        qimg.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(qimg)
+        # quick-260826-09m TWO-PASS MEASURED RENDER (unrotated path): the
+        # analytic ``ink + 2*pad`` surface chopped glyph overshoot for fonts
+        # whose paint exceeds the QTextDocument-derived rect. Pass 1 paints
+        # into a scratch inflated by the safety margin S on every side; the
+        # cancel-translate keeps its exact form, only shifted by S.
+        base_w = max(1, math.ceil(ink.width() + 2.0 * pad))
+        base_h = max(1, math.ceil(ink.height() + 2.0 * pad))
+        margin = _measure_margin(result.used_font_size_px)
+        scratch = QImage(
+            base_w + 2 * margin, base_h + 2 * margin,
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        scratch.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(scratch)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         # CR-01 (07-REVIEW): ``renderer_paint`` translates by ``result.origin``
         # (the box top-left + the inner inset) ITSELF, so the pixmap painter
         # must CANCEL that translate (net zero) — otherwise the ink lands at
         # pixmap-local ``(origin.x + pad, origin.y + pad)`` inside a pixmap
         # sized to the ink rect: blank (or clipped) for any box at a non-zero
-        # position (D-01 canvas ≡ bake).
+        # position (D-01 canvas ≡ bake). The S shift recentres the analytic
+        # window inside the scratch; measurement below replaces it wholesale.
         painter.translate(
-            -result.origin.x() - ink.left() + pad,
-            -result.origin.y() - ink.top() + pad,
+            -result.origin.x() - ink.left() + pad + margin,
+            -result.origin.y() - ink.top() + pad + margin,
         )
         renderer_paint(painter, result, style)
         painter.end()
+        bbox = _measured_bbox(scratch)
+        if bbox is not None and (
+            bbox[0] == 0
+            or bbox[1] == 0
+            or bbox[0] + bbox[2] == scratch.width()
+            or bbox[1] + bbox[3] == scratch.height()
+        ):
+            # Defensive retry: the measured paint touches the scratch border
+            # — redo pass 1 ONCE with S doubled (should never trigger with
+            # adequate S). No logging; just do it.
+            s = margin * 2
+            scratch = QImage(
+                base_w + 2 * s, base_h + 2 * s,
+                QImage.Format.Format_ARGB32_Premultiplied,
+            )
+            scratch.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(scratch)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.translate(
+                -result.origin.x() - ink.left() + pad + s,
+                -result.origin.y() - ink.top() + pad + s,
+            )
+            renderer_paint(painter, result, style)
+            painter.end()
+            bbox = _measured_bbox(scratch) or (s, s, base_w, base_h)
+            margin = s
+        elif bbox is None:
+            # Fully transparent paint (theoretically unreachable for
+            # non-empty text): keep the analytic window centred in scratch.
+            bbox = (margin, margin, base_w, base_h)
+        bx, by, bw, bh = bbox
+        qimg = scratch.copy(bx, by, bw, bh)
         self._pixmap = QPixmap.fromImage(qimg)
         # G-07-5 (plan 07-08): the origin-cancel translate above cancels the
         # layout origin IN FULL, but the align_v dy rides that origin (the
         # renderer offsets horizontal blocks top/middle/bottom via
         # result.origin.y). Re-add the box-relative origin delta to the ink
         # offset so the overlay sits exactly where the bake paints for
-        # align_v != top (D-01 canvas ≡ bake). The vertical path's origin
-        # carries no dy (origin.y == box.y + inset — text_renderer
-        # :func:`_layout_vertical_result`), so dy is exactly 0 there and the
-        # tategaki geometry is byte-unchanged.
+        # align_v != top (D-01 canvas ≡ bake).
         dy = result.origin.y() - box_rect.y() - _OVERLAY_INSET
-        self._ink_offset = QPointF(ink.left() - pad, ink.top() - pad + dy)
+        # quick-260826-09m: a scratch pixel (bx, by) equals old-surface pixel
+        # (bx - S, by - S), and the old surface origin sat at box-relative
+        # (ink.left() - pad, ink.top() - pad) — so the MEASURED box replaces
+        # the analytic ink corner as the offset source:
+        self._ink_offset = QPointF(
+            ink.left() - pad + bx - margin,
+            ink.top() - pad + by - margin + dy,
+        )
         self.update()
 
     def _render_rotated(
@@ -683,11 +781,14 @@ class TypesetOverlayItem(QGraphicsItem):
         ``t0 + C + R(p + origin - C)`` where ``C`` is the box center and
         ``R`` the rotation (``translate(C); rotate; translate(-C);
         translate(origin)`` composes with the rotation INSIDE — ``origin``
-        rotates together with ``p``). The surface bounding box comes from
-        mapping the padded-ink corners through that expression; the item
-        position that reproduces the bake's absolute placement is
-        ``P = min_g - t0`` (stored box-relative in :attr:`_render_offset`
-        for the setPos-only :meth:`refresh_position`, RC-1).
+        rotates together with ``p``). The ANALYTIC surface bounding box
+        comes from mapping the padded-ink corners through that expression;
+        quick-260826-09m inflates that analytic box by the safety margin S
+        for the scratch and then CROPS to the measured alpha bounding box,
+        so glyph overshoot never clips. The item position uses the MEASURED
+        box in place of the analytic min-corner in ``P = min_g - t0``
+        (stored box-relative in :attr:`_render_offset` for the setPos-only
+        :meth:`refresh_position`, RC-1).
         """
         ink = result.ink
         pr = QRectF(
@@ -711,7 +812,7 @@ class TypesetOverlayItem(QGraphicsItem):
                 t0y + c.y() + vx * sin_a + vy * cos_a,
             )
 
-        # Surface bounds: map the padded-ink corners through _g.
+        # ANALYTIC surface bounds: map the padded-ink corners through _g.
         xs: list[float] = []
         ys: list[float] = []
         for corner in (
@@ -726,20 +827,54 @@ class TypesetOverlayItem(QGraphicsItem):
         left, top = min(xs), min(ys)
         w = max(1, math.ceil(max(xs) - left))
         h = max(1, math.ceil(max(ys) - top))
-        qimg = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-        qimg.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(qimg)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # Shift the composed local coords (_g = t0 + paint-output) into the
-        # surface: translate by t0 - (left, top). At angle 0 this reduces
-        # EXACTLY to the legacy cancel translate (t0x, t0y).
-        painter.translate(t0x - left, t0y - top)
-        renderer_paint(painter, result, style)  # rotates about box_center
-        painter.end()
+        # quick-260826-09m: inflate the analytic box by the safety margin S
+        # for the scratch (corner mapping through _g UNCHANGED), render with
+        # the same formula anchored at the inflated corner, measure the TRUE
+        # painted extent from the scratch alpha, crop. One defensive retry
+        # with S doubled on border contact.
+        margin = _measure_margin(result.used_font_size_px)
+
+        def _render_scratch(
+            s: int,
+        ) -> tuple[QImage, tuple[int, int, int, int] | None, int]:
+            lp, tp = left - s, top - s
+            scratch = QImage(
+                w + 2 * s, h + 2 * s, QImage.Format.Format_ARGB32_Premultiplied
+            )
+            scratch.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(scratch)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            # Shift the composed local coords (_g = t0 + paint-output) into
+            # the INFLATED surface: translate by t0 - (left', top'). At
+            # angle 0 this still reduces to the legacy cancel translate
+            # shifted by S.
+            painter.translate(t0x - lp, t0y - tp)
+            renderer_paint(painter, result, style)  # rotates about box_center
+            painter.end()
+            return scratch, _measured_bbox(scratch), s
+
+        scratch, bbox, s_used = _render_scratch(margin)
+        if bbox is not None and (
+            bbox[0] == 0
+            or bbox[1] == 0
+            or bbox[0] + bbox[2] == scratch.width()
+            or bbox[1] + bbox[3] == scratch.height()
+        ):
+            scratch, bbox, s_used = _render_scratch(margin * 2)
+        if bbox is None:
+            # Fully transparent paint (defensive): keep the analytic window.
+            bx, by, bw, bh = s_used, s_used, w, h
+        else:
+            bx, by, bw, bh = bbox
+        qimg = scratch.copy(bx, by, bw, bh)
         self._pixmap = QPixmap.fromImage(qimg)
-        # Item position P = min_g - t0, stored relative to the box top-left.
-        px = left - t0x - box_rect.x()
-        py = top - t0y - box_rect.y()
+        # Item position P = measured composed min-corner - t0, stored
+        # relative to the box top-left. A scratch pixel (bx, by) sits at
+        # composed-local (left' + bx, top' + by) where left'/top' are the
+        # INFLATED analytic corners of the LAST rendered scratch.
+        lp_final, tp_final = left - s_used, top - s_used
+        px = lp_final + bx - t0x - box_rect.x()
+        py = tp_final + by - t0y - box_rect.y()
         self._render_offset = QPointF(px, py)
         self.update()
 
