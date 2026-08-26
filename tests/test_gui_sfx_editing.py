@@ -17,6 +17,7 @@ Mirrors tests/test_gui_boxes.py's header (importorskip + qtbot +
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -917,3 +918,194 @@ def test_inspector_size_spin_loads_800_without_truncation(qtbot, tmp_path) -> No
 
     panel = window.inspector_panel
     assert panel.size_spin.value() == 800
+
+
+# ===========================================================================
+# quick-260826-09m — two-pass MEASURED canvas render (no straight-edge clip)
+# ===========================================================================
+
+
+MANGO_PATH = Path(
+    r"C:\Users\Stella\AppData\Local\Microsoft\Windows\Fonts\Mango.otf"
+)
+
+
+def _mango_style() -> TextStyle:
+    """A Mango style at a fixed 100px (the reported straight-edge clip case).
+
+    Loads the user-local font via QFontDatabase.addApplicationFont; callers
+    gate on ``MANGO_PATH.is_file()`` so machines without the font skip
+    cleanly.
+    """
+    from PySide6.QtGui import QFontDatabase
+    from PySide6.QtWidgets import QApplication
+
+    # QFontDatabase is a QGuiApplication-scoped registry — guarantee an
+    # instance exists so this helper is safe standalone AND under pytest-qt
+    # (the 01-01 reuse-existing-singleton discipline).
+    if QApplication.instance() is None:
+        QApplication([])
+
+    font_id = QFontDatabase.addApplicationFont(str(MANGO_PATH))
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    assert families, "Mango must expose at least one font family"
+    return TextStyle(font_family=families[0], font_size_px=100.0, auto_fit=False)
+
+
+def _alpha_plane(img: QImage) -> np.ndarray:
+    """The detached ``(H, W)`` alpha plane of a QImage (ARGB32)."""
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    return np.frombuffer(bytes(img.bits()), dtype=np.uint8).reshape(
+        img.height(), img.width(), 4
+    )[..., 3].copy()
+
+
+def _assert_transparent_margin(alpha: np.ndarray) -> None:
+    """>=1px of transparent margin on ALL four borders (no straight-edge clip)."""
+    assert not (alpha[0] > 0).any(), "painted pixels touch the TOP border"
+    assert not (alpha[-1] > 0).any(), "painted pixels touch the BOTTOM border"
+    assert not (alpha[:, 0] > 0).any(), "painted pixels touch the LEFT border"
+    assert not (alpha[:, -1] > 0).any(), "painted pixels touch the RIGHT border"
+
+
+@pytest.mark.gui
+@pytest.mark.skipif(
+    not MANGO_PATH.is_file(), reason="user-local Mango font not installed"
+)
+def test_mango_overlay_full_glyph_paint_no_border_clip() -> None:
+    """THE defect (quick-260826-09m): Mango glyphs overshoot the
+    QTextDocument-derived ink rect (~10px above ink.top() at 100px), so the
+    analytic ``ink + 2*pad`` surface chopped them along a straight edge. The
+    measured render must leave a transparent margin on every side AND be
+    strictly taller than the analytic estimate."""
+    from manga_ai_studio.gui.text_renderer import effect_padding
+
+    style = _mango_style()
+    pb = PageBox(box=Box(40, 40, 400, 260), origin=USER, style=style)
+    pb.set_translation("M")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay = item._text_overlay
+
+    pm = overlay.pixmap()
+    assert pm is not None
+    img = pm.toImage()
+    alpha = _alpha_plane(img)
+    _assert_transparent_margin(alpha)
+
+    result = overlay.layout_result
+    assert result is not None
+    pad = effect_padding(style)
+    analytic_h = math.ceil(result.ink.height() + 2.0 * pad)
+    assert img.height() > analytic_h, (
+        f"measured pixmap height {img.height()} must EXCEED the analytic "
+        f"ink+pad estimate {analytic_h} for an overshooting font"
+    )
+
+
+@pytest.mark.gui
+def test_measured_overlay_keeps_margin_on_any_font() -> None:
+    """Generic guarantee for ANY font: non-empty text leaves >=1px of
+    transparent margin on all four sides of the cached pixmap."""
+    style = TextStyle(auto_fit=False, font_size_px=24.0)
+    pb = PageBox(box=Box(30, 30, 200, 110), origin=USER, style=style)
+    pb.set_translation("Hello")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+
+    pm = item._text_overlay.pixmap()
+    assert pm is not None
+    _assert_transparent_margin(_alpha_plane(pm.toImage()))
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("angle", [0.0, 40.0])
+def test_measured_render_placement_matches_bake_pixels(qtbot, angle: float) -> None:
+    """D-01 spot-check across the measured-vs-analytic offset swap:
+    compositing the overlay pixmap at its scene position matches
+    ``bake_typeset_page`` within the established AA envelopes — angle 0 is
+    near-exact; 40 deg admits the double-AA phase noise (the envelope shape
+    mirrors test_rotation_rendered_overlay_matches_bake_pixels)."""
+    from manga_ai_studio.gui.text_renderer import (
+        bake_typeset_page,
+        numpy_to_qimage,
+        qimage_to_numpy,
+    )
+
+    style = TextStyle(
+        font_size_px=14.0,
+        auto_fit=False,
+        align_h="left",
+        align_v="top",
+        rotation_deg=angle,
+        outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+    )
+    page = np.full((240, 320, 3), (30, 40, 50), dtype=np.uint8)
+    pb = PageBox(box=Box(60, 50, 240, 130), origin=USER, style=style)
+    pb.set_translation("Hello")
+
+    baked = bake_typeset_page(page, [pb])
+
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay = item._text_overlay
+    assert overlay.pixmap() is not None
+
+    qimg = numpy_to_qimage(page).copy()
+    painter = QPainter(qimg)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.drawPixmap(overlay.pos(), overlay.pixmap())
+    painter.end()
+    canvas_arr = qimage_to_numpy(qimg)
+
+    changed = np.any(canvas_arr != baked, axis=2)
+    assert changed.any(), "the overlay must paint SOMETHING over the page"
+    ys_c, xs_c = np.nonzero(changed)
+    diff = np.abs(
+        canvas_arr[ys_c, xs_c].astype(int) - baked[ys_c, xs_c].astype(int)
+    ).max(axis=1)
+
+    if angle == 0.0:
+        # Near-exact: same renderer, same absolute placement; only the
+        # pixmap-cache premultiplied round trip perturbs pixels (measured
+        # on this stack: p90=6, max=9 — a DISPLACED overlay would light up
+        # whole glyph bodies at near-full contrast).
+        assert np.percentile(diff, 90) <= 8.0, (
+            f"angle-0 overlay diverges from the bake (p90={np.percentile(diff, 90)})"
+        )
+        assert diff.max() <= 16.0, (
+            f"angle-0 overlay compositing diverges beyond the cache "
+            f"round-trip envelope: max channel delta {diff.max()}"
+        )
+    else:
+        # Double-AA phase noise (the 45-deg template's envelope shape,
+        # re-measured for THIS angle on this Qt/font stack: p90=34.7,
+        # max=50 — identical under the legacy analytic render, i.e. the
+        # measured-crop swap moved nothing beyond the phase noise).
+        assert np.percentile(diff, 90) <= 40.0, (
+            f"rotated overlay diverges from the bake (p90={np.percentile(diff, 90)})"
+        )
+        assert diff.max() <= 56.0, (
+            f"rotated overlay compositing diverges beyond the double-AA "
+            f"envelope: max channel delta {diff.max()}"
+        )
+
+
+@pytest.mark.gui
+def test_empty_text_clears_measured_cache() -> None:
+    """After a valid (rotated) render, set_content("") clears the whole
+    cache: pixmap None, layout_result None, _render_offset None,
+    _baked_rotation back to 0."""
+    style = _rotated_style(30.0)
+    pb = PageBox(box=Box(40, 40, 220, 110), origin=USER, style=style)
+    pb.set_translation("CLEAR")
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    overlay = item._text_overlay
+    assert overlay.pixmap() is not None  # precondition: valid render
+
+    overlay.set_content("", style, item.rect())
+    assert overlay.pixmap() is None
+    assert overlay.layout_result is None
+    assert overlay._render_offset is None
+    assert overlay._baked_rotation == 0.0
