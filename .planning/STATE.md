@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 status: Awaiting next milestone
-stopped_at: Completed quick task 260824-viq — SFX editing features (rotation handle, char/line spacing, box copy/paste)
-last_updated: "2026-08-25T19:40:00.000Z"
-last_activity: 2026-08-25
-last_activity_desc: Completed quick task 260824-viq — rotation_deg/char_spacing_px/line_spacing_px style fields + renderer support, RotationHandle canvas drag, Inspector Spacing H/V rows, Ctrl+C/Ctrl+V box duplication; full suite 1138 passed
+stopped_at: Completed quick task 260826-09m — canvas text clipping fix (two-pass measured render in TypesetOverlayItem; Mango no-clip regression tests)
+last_updated: "2026-08-26T00:55:00.000Z"
+last_activity: 2026-08-26
+last_activity_desc: Completed quick task 260826-09m — TypesetOverlayItem now renders into an oversized scratch and crops to the MEASURED alpha bbox (+1px margin), offsets derived from the measured box (D-01 pixel-parity preserved at 0/40 deg); full suite 1159 passed
 progress:
   total_phases: 10
   completed_phases: 10
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-25 — Completed quick task 260825-wfy: rotation drag fixes — delta preview (no double rotation), rotation-aware overlay boundingRect (no straight-edge clipping), font-size cap 200→1024
+Last activity: 2026-08-26 — Completed quick task 260826-09m: two-pass measured render in TypesetOverlayItem — no straight-edge glyph clipping for overshooting fonts (Mango); placement offsets derive from the measured bbox; full suite 1159 passed
 
 ## Performance Metrics
 
@@ -386,6 +386,7 @@ None yet.
 | 260825-u9q | Fix unloadable projects: stale-dims per-box masks load sanitized instead of rejecting; save-side guard blocks future stale saves | 2026-08-25 | 5d95d07 | [260825-u9q-fix-project-load-failure-valid-v1-manife](./quick/260825-u9q-fix-project-load-failure-valid-v1-manife/)
 | 260825-uzv | Fix dead rotation handle: view-level press dispatch now recognizes RotationHandle — drag-to-rotate arms and commits | 2026-08-25 | 36cbd30 | [260825-uzv-fix-rotation-handle-dead-canvas-view-lev](./quick/260825-uzv-fix-rotation-handle-dead-canvas-view-lev/)
 | 260825-wfy | Rotation drag UX: delta-based preview (fixes double rotation + release snap), rotation-aware boundingRect (fixes straight-edge clipping), font-size cap 200→1024 | 2026-08-25 | bd0c238 | [260825-wfy-fix-rotation-drag-ux-double-rotation-pre](./quick/260825-wfy-fix-rotation-drag-ux-double-rotation-pre/)
+| 260826-09m | Canvas text clipping fix: two-pass measured-surface render in TypesetOverlayItem — full glyphs for any font (Mango regression-tested); D-01 placement preserved | 2026-08-26 | 5f14ce5 | [260826-09m-fix-canvas-text-clipping-for-fonts-whose](./quick/260826-09m-fix-canvas-text-clipping-for-fonts-whose/)
 
 ## Deferred Items
 
