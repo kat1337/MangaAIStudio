@@ -1369,13 +1369,25 @@ class EditorCanvas(QGraphicsView):
             # box interaction from ever arming.  Search the stack for the
             # first *interactive box* instead, preserving handle-over-body
             # priority while ignoring visual-only overlays.
-            item = self._box_item_at(scene_pos)
+            item = self._topmost_box_hit(scene_pos)
             if self.current_tool in PAINT_TOOLS:
                 if alt:
                     # D-15: Alt gates the box interaction under a paint tool —
                     # today's box behavior exactly. NOTE: no Shift-toggle here
                     # (the UI-SPEC §39 Shift row — Shift+click under a paint
                     # tool paints; selection toggling needs Move/Pan).
+                    # quick-260825-uzv: the visible RotationHandle is an
+                    # interactive affordance under a paint tool too — Alt+
+                    # press arms rotation (D-15 parity with the CornerHandle
+                    # carve-out above) instead of starting a create-box drag.
+                    if isinstance(item, RotationHandle):
+                        parent_item = item.parentItem()
+                        assert isinstance(parent_item, BoxItem), (
+                            "RotationHandle must be parented to a BoxItem"
+                        )
+                        self._begin_rotation(parent_item, scene_pos)
+                        event.accept()
+                        return
                     if isinstance(item, CornerHandle):
                         if len(self._scene.selectedItems()) == 1:
                             self._begin_resize(item, scene_pos)
@@ -1396,6 +1408,18 @@ class EditorCanvas(QGraphicsView):
                 if item is None:
                     self._clear_selection()
             else:
+                # quick-260825-uzv: a press on the VISIBLE RotationHandle arms
+                # the rotate drag — BEFORE any selection-clear fall-through
+                # (previously it hit the empty-canvas path, which deselected
+                # the box and hid the handle, so rotation could never arm).
+                if isinstance(item, RotationHandle):
+                    parent_item = item.parentItem()
+                    assert isinstance(parent_item, BoxItem), (
+                        "RotationHandle must be parented to a BoxItem"
+                    )
+                    self._begin_rotation(parent_item, scene_pos)
+                    event.accept()
+                    return
                 if isinstance(item, CornerHandle):
                     if len(self._scene.selectedItems()) == 1:
                         self._begin_resize(item, scene_pos)
@@ -2501,6 +2525,12 @@ class EditorCanvas(QGraphicsView):
         ``CornerHandle`` nor ``BoxItem`` here, so it is a visual-only overlay
         for this hit-test; its own mousePressEvent (reached through the view's
         fall-through path) handles the click.
+
+        quick-260825-uzv: press dispatch no longer uses THIS helper — see
+        :meth:`_topmost_box_hit`, which additionally matches a visible
+        ``RotationHandle``. This helper keeps its visual-only contract because
+        ``mouseDoubleClickEvent`` relies on it (a double-click on the rotation
+        circle must not re-enter dispatch).
         """
         candidates = self._scene.items(
             scene_pos,
@@ -2514,6 +2544,36 @@ class EditorCanvas(QGraphicsView):
             if isinstance(candidate, CornerHandle):
                 return candidate
             if isinstance(candidate, BoxItem):
+                return candidate
+        return None
+
+    def _topmost_box_hit(
+        self, scene_pos: QPointF
+    ) -> CornerHandle | BoxItem | RotationHandle | None:
+        """Return the topmost INTERACTIVE box-layer item at ``scene_pos``.
+
+        quick-260825-uzv: body copied verbatim from :meth:`_box_item_at`
+        (identity-transform ``items()`` query, visible+enabled filter) with
+        one addition — a VISIBLE ``RotationHandle`` counts as an interactive
+        hit so the view-level press can arm a rotate drag instead of falling
+        into the empty-canvas selection-clear. Unlike ``_box_item_at``, this
+        helper is for PRESS dispatch only; double-click dispatch keeps the
+        ``_box_item_at`` contract (the rotation circle is not an edit entry).
+        """
+        candidates = self._scene.items(
+            scene_pos,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            QTransform(),
+        )
+        for candidate in candidates:
+            if not candidate.isVisible() or not candidate.isEnabled():
+                continue
+            if isinstance(candidate, CornerHandle):
+                return candidate
+            if isinstance(candidate, BoxItem):
+                return candidate
+            if isinstance(candidate, RotationHandle):
                 return candidate
         return None
 
