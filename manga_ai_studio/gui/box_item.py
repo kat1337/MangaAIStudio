@@ -530,6 +530,27 @@ def _measured_bbox(qimg: QImage) -> tuple[int, int, int, int] | None:
     return bx, by, int(xs.max()) - bx + 1, int(ys.max()) - by + 1
 
 
+def _expand_bbox(
+    bbox: tuple[int, int, int, int], w: int, h: int
+) -> tuple[int, int, int, int]:
+    """Grow a measured bbox by the 1px transparent margin contract.
+
+    quick-260826-09m guarantee: the cached pixmap's alpha bounding box has
+    >=1 transparent pixel on EVERY side (the crop is never the paint
+    itself). Clamped to the scratch bounds (the S margin makes the clamp
+    unreachable in practice).
+    """
+    bx, by, bw, bh = bbox
+    x0 = max(0, bx - 1)
+    y0 = max(0, by - 1)
+    return (
+        x0,
+        y0,
+        min(w, bx + bw + 1) - x0,
+        min(h, by + bh + 1) - y0,
+    )
+
+
 class TypesetOverlayItem(QGraphicsItem):
     """The renderer-driven OPAQUE typeset overlay child (D-01, plan 07-01 Task 2).
 
@@ -711,36 +732,39 @@ class TypesetOverlayItem(QGraphicsItem):
         renderer_paint(painter, result, style)
         painter.end()
         bbox = _measured_bbox(scratch)
-        if bbox is not None and (
+        touched = bbox is not None and (
             bbox[0] == 0
             or bbox[1] == 0
             or bbox[0] + bbox[2] == scratch.width()
             or bbox[1] + bbox[3] == scratch.height()
-        ):
-            # Defensive retry: the measured paint touches the scratch border
-            # — redo pass 1 ONCE with S doubled (should never trigger with
-            # adequate S). No logging; just do it.
-            s = margin * 2
-            scratch = QImage(
-                base_w + 2 * s, base_h + 2 * s,
-                QImage.Format.Format_ARGB32_Premultiplied,
-            )
-            scratch.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(scratch)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.translate(
-                -result.origin.x() - ink.left() + pad + s,
-                -result.origin.y() - ink.top() + pad + s,
-            )
-            renderer_paint(painter, result, style)
-            painter.end()
-            bbox = _measured_bbox(scratch) or (s, s, base_w, base_h)
-            margin = s
-        elif bbox is None:
+        )
+        if bbox is None:
             # Fully transparent paint (theoretically unreachable for
             # non-empty text): keep the analytic window centred in scratch.
-            bbox = (margin, margin, base_w, base_h)
-        bx, by, bw, bh = bbox
+            bx, by, bw, bh = margin, margin, base_w, base_h
+        else:
+            if touched:
+                # Defensive retry: the measured paint touches the scratch
+                # border — redo pass 1 ONCE with S doubled (should never
+                # trigger with adequate S). No logging; just do it.
+                s = margin * 2
+                scratch = QImage(
+                    base_w + 2 * s, base_h + 2 * s,
+                    QImage.Format.Format_ARGB32_Premultiplied,
+                )
+                scratch.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(scratch)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.translate(
+                    -result.origin.x() - ink.left() + pad + s,
+                    -result.origin.y() - ink.top() + pad + s,
+                )
+                renderer_paint(painter, result, style)
+                painter.end()
+                bbox = _measured_bbox(scratch) or (s, s, base_w, base_h)
+                margin = s
+            # +1px transparent margin on every side (the no-clip contract).
+            bx, by, bw, bh = _expand_bbox(bbox, scratch.width(), scratch.height())
         qimg = scratch.copy(bx, by, bw, bh)
         self._pixmap = QPixmap.fromImage(qimg)
         # G-07-5 (plan 07-08): the origin-cancel translate above cancels the
@@ -854,18 +878,20 @@ class TypesetOverlayItem(QGraphicsItem):
             return scratch, _measured_bbox(scratch), s
 
         scratch, bbox, s_used = _render_scratch(margin)
-        if bbox is not None and (
+        touched = bbox is not None and (
             bbox[0] == 0
             or bbox[1] == 0
             or bbox[0] + bbox[2] == scratch.width()
             or bbox[1] + bbox[3] == scratch.height()
-        ):
-            scratch, bbox, s_used = _render_scratch(margin * 2)
+        )
         if bbox is None:
             # Fully transparent paint (defensive): keep the analytic window.
             bx, by, bw, bh = s_used, s_used, w, h
         else:
-            bx, by, bw, bh = bbox
+            if touched:
+                scratch, bbox, s_used = _render_scratch(margin * 2)
+            # +1px transparent margin on every side (the no-clip contract).
+            bx, by, bw, bh = _expand_bbox(bbox, scratch.width(), scratch.height())
         qimg = scratch.copy(bx, by, bw, bh)
         self._pixmap = QPixmap.fromImage(qimg)
         # Item position P = measured composed min-corner - t0, stored
