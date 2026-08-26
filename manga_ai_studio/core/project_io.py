@@ -4,9 +4,10 @@ Origin: our own module — Phase 5 greenfield per 05-CONTEXT canonical refs
 (PROJ-01 serialization is built from scratch on stdlib ``lzma``; no vendored
 PanelCleaner code is involved).
 
-Dependency contract: this module imports ONLY stdlib + numpy + Pillow — no
-Qt, no torch, no models — so it is safe to call from a worker thread and
-unit-testable headless (mirrors ``core/image_io.py``).
+Dependency contract: this module imports ONLY stdlib + numpy + Pillow (+ loguru
+for stale-mask-drop warnings, quick-260825-u9q) — no Qt, no torch, no models —
+so it is safe to call from a worker thread and unit-testable headless (mirrors
+``core/image_io.py``).
 
 The on-disk layout is a published, one-way format (CONTEXT D-01/D-02/D-03/
 D-04): a chapter is a ``<chapter>.mas-project/`` folder holding a plain-JSON
@@ -44,6 +45,7 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
 from PIL import Image, UnidentifiedImageError
 
 from manga_ai_studio.core.image_io import save_image_bytes
@@ -291,6 +293,13 @@ def json_to_pagebox(d: dict):
     full try/except wrap (T-08-06 — no raw binascii/PIL exception escapes
     the loader, the T-05-01 pattern; PIL's MAX_IMAGE_PIXELS bomb guard stays
     active).
+
+    quick-260825-u9q: a DECODES-FINE but WRONG-SIZE mask is stale fit data
+    (the box was resized after its mask was fitted), not corruption — the
+    loader drops it (``mask=None``) and nulls ``std_dev``/``fill_color``
+    with it (a std-dev/median-color measured against different geometry is
+    meaningless), instead of rejecting the whole project. Only decode-level
+    garbage still raises.
     """
     from manga_ai_studio.core.box_model import PageBox
     from manga_ai_studio.core.text_style import TextStyle
@@ -358,9 +367,17 @@ def json_to_pagebox(d: dict):
 
     # Phase 8 (plan 08-04): per-box mask — base64 PNG -> box-cropped mode-"1"
     # PIL image, size-cross-checked and fully wrapped (T-08-06).
+    # quick-260825-u9q: a decodes-fine-but-wrong-size mask is STALE (box
+    # resized after fit) — decode to None and null the fit-derived
+    # std_dev/fill_color with it (they die together). inpaint_override is
+    # explicit user intent and survives.
+    mask_raw = d.get("mask")
     mask = None
-    if d.get("mask") is not None:
-        mask = _pagebox_mask_from_json(d["mask"], box)
+    if mask_raw is not None:
+        mask = _pagebox_mask_from_json(mask_raw, box)
+        if mask is None:
+            std_dev = None
+            fill_color = None
 
     payload = None
     if payload_raw is not None:
@@ -405,7 +422,7 @@ def json_to_pagebox(d: dict):
     )
 
 
-def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image:
+def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image | None:
     """Decode a base64 PNG per-box mask, size-cross-checked and hardened.
 
     ASVS V5 / T-08-06: the base64 decode + ``Image.open`` are fully wrapped —
@@ -414,10 +431,13 @@ def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image:
     as ProjectFormatError, so no raw library exception escapes the loader
     (the T-05-01 pattern). PIL's default ``MAX_IMAGE_PIXELS``
     decompression-bomb guard stays ACTIVE (not raised or disabled here; its
-    ``DecompressionBombError`` surfaces as ProjectFormatError); the explicit
-    decoded-size cross-check against the declared box dims additionally
-    bounds the decoded image to the box, whose coords are themselves clamped
-    by the V5 box build.
+    ``DecompressionBombError`` surfaces as ProjectFormatError).
+
+    quick-260825-u9q stale-tolerant contract: a mask that DECODES FINE but
+    whose size does not match the declared box dims is STALE fit data (the
+    box was resized after its mask was fitted), not corruption — this
+    returns ``None`` and logs a loguru warning naming both sizes instead of
+    raising. Only decode-level garbage raises ProjectFormatError.
     """
     try:
         png_bytes = base64.b64decode(mask_value)
@@ -435,10 +455,17 @@ def _pagebox_mask_from_json(mask_value: str, box) -> Image.Image:
     box_w = box.x2 - box.x1
     box_h = box.y2 - box.y1
     if decoded.size != (box_w, box_h):
-        raise ProjectFormatError(
-            f"per-box mask size {decoded.size} does not match the box dims "
-            f"{box_w}x{box_h}"
+        # quick-260825-u9q: stale mask (box resized after fit) — drop it,
+        # never reject the whole project (T-QKN-03: the warning names both
+        # sizes so a stale save is distinguishable from genuine corruption).
+        logger.warning(
+            "Dropping stale per-box mask: mask size {} does not match "
+            "the box dims {}x{} — mask/std_dev/fill_color cleared",
+            decoded.size,
+            box_w,
+            box_h,
         )
+        return None
     return decoded.convert("1", dither=Image.NONE)
 
 
