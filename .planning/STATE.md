@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-25 — Completed quick task 260824-viq: SFX editing features — rotation handle, char/line spacing, box copy/paste
+Last activity: 2026-08-25 — Completed quick task 260825-u9q: stale per-box masks load sanitized instead of rejecting the project; save-side guard prevents unloadable files
 
 ## Performance Metrics
 
@@ -382,6 +382,8 @@ None yet.
 | 260823-hge | Standards-grade line breaker: uniseg UAX #14 atoms + pyphen hyphenation; auto-fit rejects Latin-split candidates (fixes Hert/a! mid-word splits) | 2026-08-23 | a28b5cd | [260823-hge-fix-owned-line-breaker-quality-latin-wor](./quick/260823-hge-fix-owned-line-breaker-quality-latin-wor/)
 | 260824-pqn | Fix Save Project writing nothing (ndarray-payload JSON crash) + loud save failures; remove grace timer — manual stale-gated re-detect only | 2026-08-24 | 51e3f62 | [260824-pqn-fix-bubble-re-detection-remove-grace-per](./quick/260824-pqn-fix-bubble-re-detection-remove-grace-per/)
 | 260824-t64 | Box UX fixes: zoom-compensated inline editor font, constant screen-size corner grab zones (incl. bottom-left), live font-size rendering from the Inspector | 2026-08-24 | b28969d | [260824-t64-box-ux-fixes-1-in-box-text-editor-font-t](./quick/260824-t64-box-ux-fixes-1-in-box-text-editor-font-t/)
+| 260824-viq | SFX editing features: corner-grab text rotation (persisted + export parity), Inspector Spacing H/V controls, Ctrl+C/Ctrl+V box duplication | 2026-08-25 | b38f7c1 | [260824-viq-sfx-editing-features-rotate-text-at-an-a](./quick/260824-viq-sfx-editing-features-rotate-text-at-an-a/)
+| 260825-u9q | Fix unloadable projects: stale-dims per-box masks load sanitized instead of rejecting; save-side guard blocks future stale saves | 2026-08-25 | 5d95d07 | [260825-u9q-fix-project-load-failure-valid-v1-manife](./quick/260825-u9q-fix-project-load-failure-valid-v1-manife/)
 
 ## Deferred Items
 
