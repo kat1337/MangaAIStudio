@@ -57,6 +57,7 @@ from PySide6.QtGui import (
     QPen,
     QPainterPath,
     QPixmap,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
@@ -529,13 +530,34 @@ class TypesetOverlayItem(QGraphicsItem):
         # ROTATED render (``None`` = the unrotated ``_ink_offset`` path — the
         # legacy code path must stay byte-identical at rotation 0).
         self._render_offset: QPointF | None = None
+        # quick-260825-wfy: the rotation_deg currently baked INTO the cached
+        # pixmap (set by the rotated branch of set_content). The live-drag
+        # preview applies (live - baked) so an ALREADY-ROTATED box tracks
+        # the mouse instead of double-rotating.
+        self._baked_rotation: float = 0.0
 
     # ------------------------------------------------------------ geometry
     def boundingRect(self) -> QRectF:  # noqa: D401 (Qt API casing)
-        """The cached pixmap rect (a 1x1 placeholder before the first render)."""
+        """The cached pixmap rect (a 1x1 placeholder before the first render).
+
+        quick-260825-wfy: during a rotation preview the item transform is
+        non-identity, so the rect grows to cover the ROTATED extents (the
+        base rect mapped through the same rotate-about-origin transform) —
+        Qt culls repaints to boundingRect and would otherwise chop the
+        previewed glyphs along straight edges. At rotation 0 this returns
+        the base rect unchanged (legacy path byte-identical).
+        """
         if self._pixmap is None:
             return QRectF(0.0, 0.0, 1.0, 1.0)
-        return QRectF(QPointF(0.0, 0.0), QSizeF(self._pixmap.size()))
+        base = QRectF(QPointF(0.0, 0.0), QSizeF(self._pixmap.size()))
+        if abs(self.rotation()) <= 1e-6:
+            return base
+        origin = self.transformOriginPoint()
+        t = QTransform()
+        t.translate(origin.x(), origin.y())
+        t.rotate(self.rotation())
+        t.translate(-origin.x(), -origin.y())
+        return t.mapRect(base).normalized()
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: D401
         """Blit the cached pixmap (opaque glyphs composite over the page).
@@ -586,6 +608,7 @@ class TypesetOverlayItem(QGraphicsItem):
             self.layout_result = None
             self._ink_offset = QPointF(0.0, 0.0)
             self._render_offset = None
+            self._baked_rotation = 0.0
             self.update()
             return
         result = renderer_layout(text, style, box_rect, vertical=vertical)
@@ -597,8 +620,15 @@ class TypesetOverlayItem(QGraphicsItem):
         angle = _normalize_rotation(getattr(style, "rotation_deg", 0.0))
         if abs(angle) > 1e-6:
             self._render_rotated(result, style, box_rect, angle, pad)
+            # quick-260825-wfy: the angle is now baked INTO the pixmap —
+            # the live preview applies (live - this) as the delta.
+            self._baked_rotation = angle
             return
         self._render_offset = None
+        # Straight-through (unrotated) path: nothing is baked into the
+        # pixmap — reset the tracker so a rotated->unrotated re-render can
+        # never leave a stale bake behind.
+        self._baked_rotation = 0.0
         ink = result.ink
         w = max(1, math.ceil(ink.width() + 2.0 * pad))
         h = max(1, math.ceil(ink.height() + 2.0 * pad))
@@ -1273,20 +1303,36 @@ class BoxItem(QGraphicsRectItem):
         origin point). NO re-layout, NO re-render — the per-mousemove
         discipline (RC-1); the caller follows a committed angle with
         :meth:`refresh_text_overlay` to bake it into the cached pixmap.
+
+        quick-260825-wfy: when the cached pixmap ALREADY carries a committed
+        rotation (baked by ``_render_rotated``), only the DELTA
+        (``angle_deg - _baked_rotation``) is applied — applying the absolute
+        live angle on a baked pixmap double-rotates (start + live) and snaps
+        on release.
         """
         overlay = self._text_overlay
         center = self.rect().center()
         pos = overlay.pos()
+        delta = _normalize_rotation(angle_deg - overlay._baked_rotation)
+        # boundingRect depends on the rotation — Qt must be told BEFORE the
+        # transform changes so it repaints the enlarged extents (wfy).
+        overlay.prepareGeometryChange()
         overlay.setTransformOriginPoint(
             center.x() - pos.x(), center.y() - pos.y()
         )
-        overlay.setRotation(angle_deg)
+        overlay.setRotation(delta)
         overlay.update()
 
     def clear_preview_rotation(self) -> None:
-        """Reset the live-drag preview rotation (the commit path re-renders)."""
-        self._text_overlay.setRotation(0.0)
-        self._text_overlay.setTransformOriginPoint(0.0, 0.0)
+        """Reset the live-drag preview rotation (the commit path re-renders).
+
+        After clear the item transform is identity: the pixmap's own baked
+        rotation shows through untouched. prepareGeometryChange fires first
+        so Qt releases the enlarged preview boundingRect (wfy)."""
+        overlay = self._text_overlay
+        overlay.prepareGeometryChange()
+        overlay.setRotation(0.0)
+        overlay.setTransformOriginPoint(0.0, 0.0)
 
     # ------------------------------------------- inline-editor edit-mode hooks
     def enter_edit_mode(self) -> None:

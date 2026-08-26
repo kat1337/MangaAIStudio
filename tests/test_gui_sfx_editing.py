@@ -31,6 +31,7 @@ from PySide6.QtGui import (  # noqa: E402
     QKeyEvent,
     QMouseEvent,
     QPainter,
+    QTransform,
 )
 from PySide6.QtWidgets import QApplication, QGraphicsScene  # noqa: E402
 
@@ -684,4 +685,204 @@ def test_alt_brush_press_on_visible_rotation_handle_arms_rotation(qtbot) -> None
 
     assert canvas._rotating_box is item, (
         "Alt+press on the visible rotation handle under BRUSH must arm rotation"
+    )
+
+
+# ===========================================================================
+# quick-260825-wfy — delta rotation preview + rotation-aware boundingRect
+# ===========================================================================
+
+
+def _rotated_style(deg: float) -> TextStyle:
+    """A fixed-size left/top style with a baked rotation angle."""
+    return TextStyle(
+        auto_fit=False,
+        font_size_px=12.0,
+        align_h="left",
+        align_v="top",
+        rotation_deg=deg,
+    )
+
+
+def _overlay_with_baked_style(qtbot, deg: float, text: str = "WFY"):
+    """Scene + BoxItem whose overlay is rendered at ``rotation_deg=deg``."""
+    pb = PageBox(box=Box(40, 40, 220, 110), origin=USER, style=_rotated_style(deg))
+    pb.set_translation(text)
+    _scene, item = _scene_with_box(pb)
+    item.refresh_text_overlay()
+    return _scene, item, item._text_overlay
+
+
+@pytest.mark.gui
+def test_preview_rotation_applies_delta_over_baked_angle(qtbot) -> None:
+    """THE double-rotation defect: when the cached pixmap already carries a
+    committed angle (baked by _render_rotated), preview_rotation must apply
+    the DELTA (live - baked), not the absolute live angle."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 30.0)
+    assert overlay._baked_rotation == pytest.approx(30.0)
+    assert overlay.rotation() == 0.0  # nothing applied yet
+
+    item.preview_rotation(50.0)
+    assert overlay.rotation() == pytest.approx(20.0), (
+        "preview must apply (live - baked) = 50 - 30 = 20 deg"
+    )
+    # Transform origin stays box-center-relative.
+    center = item.rect().center()
+    pos = overlay.pos()
+    origin = overlay.transformOriginPoint()
+    assert origin.x() == pytest.approx(center.x() - pos.x())
+    assert origin.y() == pytest.approx(center.y() - pos.y())
+
+
+@pytest.mark.gui
+def test_preview_rotation_from_zero_keeps_absolute_parity(qtbot) -> None:
+    """Legacy parity: with NOTHING baked (straight-through render), the
+    preview applies the absolute live angle — existing behavior unchanged."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 0.0)
+    assert overlay._baked_rotation == 0.0
+
+    item.preview_rotation(30.0)
+    assert overlay.rotation() == pytest.approx(30.0)
+
+
+@pytest.mark.gui
+def test_clear_preview_rotation_resets_to_zero_regardless_of_bake(qtbot) -> None:
+    """After clear_preview_rotation the item transform is identity — the
+    pixmap's own baked rotation shows through untouched."""
+    for baked in (0.0, 30.0):
+        _scene, item, overlay = _overlay_with_baked_style(qtbot, baked)
+        item.preview_rotation(120.0)
+        assert overlay.rotation() != 0.0
+        item.clear_preview_rotation()
+        assert overlay.rotation() == 0.0
+        assert overlay.transformOriginPoint() == QPointF(0.0, 0.0)
+
+
+@pytest.mark.gui
+def test_delta_path_placement_matches_direct_render(qtbot) -> None:
+    """D-01 spot-check: bake at 30 -> preview at 50 (delta) -> clear ->
+    commit-bake at 50 lands the overlay at EXACTLY the scene placement of a
+    DIRECT render at 50 deg (geometry comparison, not pixels)."""
+    box = Box(40, 40, 220, 110)
+    text = "PLACEMENT"
+
+    # Path A: the drag lifecycle (bake 30 -> preview delta -> clear -> bake 50).
+    pb_a = PageBox(box=box, origin=USER, style=_rotated_style(30.0))
+    pb_a.set_translation(text)
+    _scene_a, item_a = _scene_with_box(pb_a)
+    item_a.refresh_text_overlay()
+    item_a.preview_rotation(50.0)
+    item_a.clear_preview_rotation()
+    pb_a.style = _rotated_style(50.0)
+    item_a.refresh_text_overlay()
+
+    # Path B: direct render at 50 deg.
+    pb_b = PageBox(box=box, origin=USER, style=_rotated_style(50.0))
+    pb_b.set_translation(text)
+    _scene_b, item_b = _scene_with_box(pb_b)
+    item_b.refresh_text_overlay()
+
+    ov_a, ov_b = item_a._text_overlay, item_b._text_overlay
+    assert ov_a.pos().x() == pytest.approx(ov_b.pos().x(), abs=1e-6)
+    assert ov_a.pos().y() == pytest.approx(ov_b.pos().y(), abs=1e-6)
+    assert ov_a.rotation() == ov_b.rotation() == 0.0
+    assert ov_a._render_offset is not None and ov_b._render_offset is not None
+    assert ov_a._render_offset.x() == pytest.approx(ov_b._render_offset.x(), abs=1e-6)
+    assert ov_a._render_offset.y() == pytest.approx(ov_b._render_offset.y(), abs=1e-6)
+
+
+@pytest.mark.gui
+def test_empty_text_resets_baked_rotation(qtbot) -> None:
+    """set_content("") clears the cache AND the baked-angle tracker."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 30.0)
+    assert overlay._baked_rotation == pytest.approx(30.0)
+
+    item.pagebox.set_translation("")
+    item.refresh_text_overlay()
+    assert overlay._baked_rotation == 0.0
+
+
+@pytest.mark.gui
+def test_unrotated_rerender_resets_baked_rotation(qtbot) -> None:
+    """A rotated render followed by an UNROTATED re-render must leave the
+    tracker at 0 (the straight-through path cannot inherit the stale bake)."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 30.0)
+    assert overlay._baked_rotation == pytest.approx(30.0)
+
+    item.pagebox.style = _rotated_style(0.0)
+    item.refresh_text_overlay()
+    assert overlay._baked_rotation == 0.0
+
+
+@pytest.mark.gui
+def test_bounding_rect_identity_at_zero_rotation(qtbot) -> None:
+    """At rotation 0 boundingRect IS the pixmap rect (legacy byte-compat)."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 0.0)
+    pm = overlay.pixmap()
+    assert pm is not None
+    expected = QRectF(QPointF(0.0, 0.0), QSizeF(pm.size()))
+    br = overlay.boundingRect()
+    assert br.width() == pytest.approx(expected.width())
+    assert br.height() == pytest.approx(expected.height())
+
+
+@pytest.mark.gui
+def test_bounding_rect_contains_rotated_extents_during_preview(qtbot) -> None:
+    """During a 45-deg preview the boundingRect strictly grows past the base
+    pixmap rect and contains every rotated corner of it (no straight-edge
+    clipping of the previewed glyphs)."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 0.0)
+    pm = overlay.pixmap()
+    assert pm is not None
+    base = QRectF(QPointF(0.0, 0.0), QSizeF(pm.size()))
+    base_area = base.width() * base.height()
+
+    item.preview_rotation(45.0)
+
+    br = overlay.boundingRect()
+    assert br.width() * br.height() > base_area, (
+        "preview boundingRect must be strictly larger than the base pixmap rect"
+    )
+
+    # Map the base corners through the SAME rotation-about-origin transform
+    # preview installs and assert containment in the reported boundingRect.
+    o = overlay.transformOriginPoint()
+    t = QTransform()
+    t.translate(o.x(), o.y())
+    t.rotate(overlay.rotation())
+    t.translate(-o.x(), -o.y())
+    for corner in (
+        base.topLeft(),
+        base.topRight(),
+        base.bottomRight(),
+        base.bottomLeft(),
+    ):
+        mapped = t.map(corner)
+        assert br.contains(mapped), (
+            f"rotated corner {mapped} escapes the preview boundingRect {br}"
+        )
+
+
+@pytest.mark.gui
+def test_prepare_geometry_change_called_on_preview_and_clear(
+    qtbot, monkeypatch
+) -> None:
+    """prepareGeometryChange must fire BEFORE every rotation mutation so Qt
+    repaints the enlarged boundingRect (both preview and clear paths)."""
+    _scene, item, overlay = _overlay_with_baked_style(qtbot, 0.0)
+    calls: list[str] = []
+    real = overlay.prepareGeometryChange
+
+    def _spy() -> None:
+        calls.append("prepare")
+        real()
+
+    monkeypatch.setattr(overlay, "prepareGeometryChange", _spy)
+
+    item.preview_rotation(45.0)
+    item.clear_preview_rotation()
+
+    assert calls.count("prepare") == 2, (
+        "both preview_rotation and clear_preview_rotation must call "
+        "prepareGeometryChange exactly once"
     )
