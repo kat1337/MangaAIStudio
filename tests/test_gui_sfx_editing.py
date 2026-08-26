@@ -25,11 +25,18 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSizeF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QImage,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+)
 from PySide6.QtWidgets import QApplication, QGraphicsScene  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.box_model import USER, PageBox  # noqa: E402
+from manga_ai_studio.core.mask_editor import ToolMode  # noqa: E402
 from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
 from panelcleaner.structures import Box  # noqa: E402
 
@@ -572,3 +579,109 @@ def test_paste_empty_clipboard_silent_noop(qtbot, tmp_path) -> None:
     )
     assert emitted == []
     assert canvas.box_count() == 1
+
+
+# ===========================================================================
+# quick-260825-uzv — Canvas dispatch — RotationHandle press
+# ===========================================================================
+
+
+def _press_at(canvas: EditorCanvas, scene_pt: QPointF,
+              modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+              ) -> QMouseEvent:
+    """Viewport-coord press builder landing on SCENE ``scene_pt``.
+
+    The test_gui_canvas ``_press`` pattern: QGraphicsView centers the scene,
+    so the desired scene point is mapped back to viewport coords first.
+    """
+    vp = canvas.mapFromScene(scene_pt)
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        modifiers,
+    )
+
+
+def _selected_box_with_visible_rotation_handle(qtbot) -> tuple[EditorCanvas, BoxItem]:
+    """Canvas + selected/primary box whose RotationHandle is VISIBLE."""
+    from manga_ai_studio.gui.box_item import RotationHandle as _RH
+
+    canvas = _canvas_with_image(qtbot)
+    style = TextStyle(auto_fit=False, font_size_px=12.0)
+    item = _seed_box(canvas, Box(60, 60, 220, 140), style=style)
+    item.setSelected(True)
+    canvas._primary_box = item
+    canvas._sync_handles_visibility()
+    QApplication.processEvents()
+    rh = item._rotation_handle
+    assert isinstance(rh, _RH)
+    assert rh.isVisible(), "setup must produce a VISIBLE rotation handle"
+    return canvas, item
+
+
+@pytest.mark.gui
+def test_press_on_visible_rotation_handle_arms_rotate_instead_of_deselecting(
+    qtbot,
+) -> None:
+    """THE DEFECT (quick-260825-uzv): a view-level press on the visible
+    RotationHandle must arm the rotate drag — NOT clear the selection. After
+    the press the drag is advanced and committed so the full dispatch path
+    (press -> arm -> preview -> commit) is proven end-to-end."""
+    canvas, item = _selected_box_with_visible_rotation_handle(qtbot)
+    rh = item._rotation_handle
+    scene_pos = rh.mapToScene(rh.boundingRect().center())
+
+    ev = _press_at(canvas, scene_pos)
+    canvas.mousePressEvent(ev)
+
+    assert canvas._rotating_box is item, (
+        "press on the visible rotation handle must arm the rotate drag"
+    )
+    assert item.isSelected(), (
+        "pressing the rotation handle must NOT clear the selection"
+    )
+    assert rh.isVisible(), "the handle must stay visible during a rotate drag"
+
+    center = item.rect().center()
+    canvas._advance_rotation(QPointF(center.x() + 70.0, center.y()))
+    canvas._commit_rotation()
+    assert item.pagebox.style is not None
+    assert item.pagebox.style.rotation_deg != pytest.approx(0.0), (
+        "the committed handle drag must write style.rotation_deg"
+    )
+
+
+@pytest.mark.gui
+def test_press_on_genuinely_empty_canvas_still_clears_selection(qtbot) -> None:
+    """Regression guard (UI-SPEC §12d preserved): pressing genuinely EMPTY
+    canvas far from any box/handle/badge clears the selection and never arms
+    a rotate drag. Passes today; must KEEP passing."""
+    canvas, item = _selected_box_with_visible_rotation_handle(qtbot)
+
+    # (280, 280) is inside the 300x300 page but clear of the box
+    # (60..220 x 60..140), its TL bubble badge, TR redetect handle, and the
+    # TL-above rotation handle.
+    ev = _press_at(canvas, QPointF(280.0, 280.0))
+    canvas.mousePressEvent(ev)
+
+    assert not item.isSelected(), "empty-canvas press still clears selection"
+    assert canvas._rotating_box is None
+
+
+@pytest.mark.gui
+def test_alt_brush_press_on_visible_rotation_handle_arms_rotation(qtbot) -> None:
+    """Alt parity (D-15 consistency): under an active paint tool, Alt+press
+    on the visible RotationHandle arms rotation instead of creating a box."""
+    canvas, item = _selected_box_with_visible_rotation_handle(qtbot)
+    canvas.set_tool(ToolMode.BRUSH)
+    rh = item._rotation_handle
+    scene_pos = rh.mapToScene(rh.boundingRect().center())
+
+    ev = _press_at(canvas, scene_pos, Qt.KeyboardModifier.AltModifier)
+    canvas.mousePressEvent(ev)
+
+    assert canvas._rotating_box is item, (
+        "Alt+press on the visible rotation handle under BRUSH must arm rotation"
+    )
