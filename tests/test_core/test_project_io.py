@@ -530,6 +530,56 @@ def test_per_box_mask_garbage_rejected() -> None:
 
 
 @pytest.mark.unit
+def test_save_side_stale_mask_serializes_null() -> None:
+    """Save-side guard (quick-260825-u9q): pagebox_to_json on a live
+    PageBox whose mask.size != box dims emits mask/std_dev/fill_color as
+    null (the fit-derived trio dies together) so a resized-after-fit box
+    can never produce an unloadable file; inpaint_override/style/payload
+    emit normally. A matching-size mask still serializes to base64."""
+    stale = PageBox(
+        box=Box(0, 0, 80, 60),
+        origin=USER,
+        payload=None,
+        edited=False,
+        bubble_no=None,
+        manual_override=False,
+        style=TextStyle(),
+        std_dev=12.5,
+        inpaint_override="always",
+        mask=Image.new("1", (100, 40), 0),  # fitted at old geometry
+        fill_color=(10, 20, 30),
+    )
+    d = pagebox_to_json(stale)
+    assert d["mask"] is None
+    assert d["std_dev"] is None
+    assert d["fill_color"] is None
+    # User intent and non-fit fields survive verbatim.
+    assert d["inpaint_override"] == "always"
+    assert d["style"] == TextStyle().to_dict()
+    assert d["payload"] is None
+
+    # Happy case: matching-size mask serializes to a non-null base64 PNG.
+    fresh = PageBox(
+        box=Box(0, 0, 100, 40),
+        origin=USER,
+        payload=None,
+        edited=False,
+        bubble_no=None,
+        manual_override=False,
+        style=None,
+        std_dev=9.1,
+        inpaint_override=None,
+        mask=Image.new("1", (100, 40), 0),
+        fill_color=(4, 5, 6),
+    )
+    d2 = pagebox_to_json(fresh)
+    assert isinstance(d2["mask"], str)
+    assert base64.b64decode(d2["mask"])[:8] == b"\x89PNG\r\n\x1a\n"
+    assert d2["std_dev"] == 9.1
+    assert d2["fill_color"] == [4, 5, 6]
+
+
+@pytest.mark.unit
 def test_build_page_entries_writes_optional_plane_entries() -> None:
     """build_page_entries with raw/auto/manual/erase binaries writes the four
     optional plane entries; without them a legacy-shaped state writes none."""

@@ -231,8 +231,14 @@ def pagebox_to_json(pb) -> dict:
     Coordinates coerce via ``int()`` (T-QKN-01 — garbage numerics become
     plain ints, never leak into manifest JSON); text fields via null-safe
     ``str()``; ``font_size`` falls back to -1 on a non-numeric (the loader's
-    own default). ``json_to_pagebox`` already accepts both plain-list and
+    own default).     ``json_to_pagebox`` already accepts both plain-list and
     ndarray-shaped input — the load side is untouched.
+
+    quick-260825-u9q: a STALE per-box mask (mask.size != box dims — the box
+    was resized after its mask was fitted) serializes as null mask +
+    null std_dev + null fill_color (the fit-derived trio dies together,
+    mirroring the load-side sanitization exactly), so a future SAVE can
+    never produce an unloadable file.
     """
     payload = pb.payload
 
@@ -245,6 +251,15 @@ def pagebox_to_json(pb) -> dict:
         except (TypeError, ValueError):
             return -1
 
+    # quick-260825-u9q save-side stale-mask guard: a mask whose size no
+    # longer matches the box geometry is stale fit data; it and the
+    # std_dev/fill_color measured against that geometry must never reach
+    # disk (the loader would sanitize them anyway, but emitting them makes
+    # the file unloadable only under the OLD loader — emit nulls instead).
+    box_w = pb.box.x2 - pb.box.x1
+    box_h = pb.box.y2 - pb.box.y1
+    mask_stale = pb.mask is not None and pb.mask.size != (box_w, box_h)
+
     return {
         "box": list(pb.box.as_tuple),  # [x1, y1, x2, y2] — Box is @frozen
         "origin": pb.origin,  # D-03: "detected" | "user"
@@ -253,10 +268,16 @@ def pagebox_to_json(pb) -> dict:
         "manual_override": pb.manual_override,
         "style": pb.style.to_dict() if pb.style is not None else None,  # D-07
         # Phase 8 (plan 08-04) — the D-15 seam fields close through save/load.
-        "std_dev": pb.std_dev,  # float | null (None = not yet fitted)
+        "std_dev": None if mask_stale else pb.std_dev,  # float | null (None = not yet fitted)
         "inpaint_override": pb.inpaint_override,  # "always" | "fill" | "never" | null (08.1 adds fill)
-        "mask": _pagebox_mask_to_json(pb.mask),  # base64 PNG | null
-        "fill_color": list(pb.fill_color) if getattr(pb, "fill_color", None) is not None else None,  # 08.1 optional triple
+        "mask": None if mask_stale else _pagebox_mask_to_json(pb.mask),  # base64 PNG | null
+        "fill_color": (
+            None
+            if mask_stale
+            else list(pb.fill_color)
+            if getattr(pb, "fill_color", None) is not None
+            else None
+        ),  # 08.1 optional triple
         "payload": None if payload is None else {
             "xyxy": [int(v) for v in payload.xyxy],
             # quick-260824-pqn: nested int() coercion handles BOTH ndarray
