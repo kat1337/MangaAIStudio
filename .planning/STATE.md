@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-25 — Completed quick task 260825-uzv: rotation handle now receives its press (view-level dispatch recognizes it) — drag-to-rotate works
+Last activity: 2026-08-25 — Completed quick task 260825-wfy: rotation drag fixes — delta preview (no double rotation), rotation-aware overlay boundingRect (no straight-edge clipping), font-size cap 200→1024
 
 ## Performance Metrics
 
@@ -385,6 +385,7 @@ None yet.
 | 260824-viq | SFX editing features: corner-grab text rotation (persisted + export parity), Inspector Spacing H/V controls, Ctrl+C/Ctrl+V box duplication | 2026-08-25 | b38f7c1 | [260824-viq-sfx-editing-features-rotate-text-at-an-a](./quick/260824-viq-sfx-editing-features-rotate-text-at-an-a/)
 | 260825-u9q | Fix unloadable projects: stale-dims per-box masks load sanitized instead of rejecting; save-side guard blocks future stale saves | 2026-08-25 | 5d95d07 | [260825-u9q-fix-project-load-failure-valid-v1-manife](./quick/260825-u9q-fix-project-load-failure-valid-v1-manife/)
 | 260825-uzv | Fix dead rotation handle: view-level press dispatch now recognizes RotationHandle — drag-to-rotate arms and commits | 2026-08-25 | 36cbd30 | [260825-uzv-fix-rotation-handle-dead-canvas-view-lev](./quick/260825-uzv-fix-rotation-handle-dead-canvas-view-lev/)
+| 260825-wfy | Rotation drag UX: delta-based preview (fixes double rotation + release snap), rotation-aware boundingRect (fixes straight-edge clipping), font-size cap 200→1024 | 2026-08-25 | bd0c238 | [260825-wfy-fix-rotation-drag-ux-double-rotation-pre](./quick/260825-wfy-fix-rotation-drag-ux-double-rotation-pre/)
 
 ## Deferred Items
 
