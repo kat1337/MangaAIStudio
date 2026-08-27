@@ -992,3 +992,123 @@ def test_save_pre_write_exception_shows_dialog_and_cleans_stray(
     assert criticals
     assert criticals[0][0].startswith("Couldn't save")
     assert not default.exists()  # WR-01: stray empty folder cleaned up
+
+
+@pytest.mark.gui
+def test_cross_session_swap_does_not_bleed_planes_into_new_list(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick 260826-1by (T-Q1B-01/03): replacing a session over a live canvas
+    must retire ``_last_page_index`` BEFORE the fresh ImageFile list is
+    observable and can never land outgoing-canvas plane blobs of the wrong
+    length on the new session's pages (no wrong-dims mask corruption by a
+    page switch after a session swap)."""
+    folder_a = tmp_path / "a"
+    window = _make_window(qtbot, tmp_path, folder=folder_a, size=60)
+    _isolate_settings(window, tmp_path, monkeypatch)
+
+    # Navigate to page 2 and paint real mask content onto it.
+    page2 = window.image_files[1].path
+    window.file_table.select_path(page2)
+    window.on_page_selected(page2)
+    QApplication.processEvents()
+    assert window._last_page_index == 1
+    _seed_mask_content(window)
+
+    # Observe the seam index DURING the swap: _set_pages re-selects the
+    # first page AFTER retiring the outgoing index, so the value seen at
+    # that moment is the contamination gate.
+    observed: list = []
+    orig_select = window.file_table.select_path
+
+    def _spy_select(path):
+        observed.append(window._last_page_index)
+        orig_select(path)
+
+    monkeypatch.setattr(window.file_table, "select_path", _spy_select)
+
+    # Replace the session with different-sized pages (seam called directly,
+    # like an Open Folder over a live project session would).
+    folder_b = tmp_path / "b"
+    paths_b = _make_pages(folder_b, count=2, size=90)
+    window._set_pages(paths_b)
+    QApplication.processEvents()
+
+    assert observed[-1] is None  # swap retired the outgoing index first
+    required = (90 * 90 + 7) // 8
+    for imf in window.image_files:
+        for slot_name in ("auto_mask", "mask_manual", "mask_erase"):
+            blob = getattr(imf, slot_name)
+            assert blob is None or len(blob) == required, (
+                f"{imf.path.name}.{slot_name} has foreign-length blob"
+                f" ({len(blob)} bytes, expected {required})"
+            )
+        m = imf.mask
+        assert m is None or m.isNull() or (m.height(), m.width()) == (90, 90)
+
+
+@pytest.mark.gui
+def test_outgoing_persistence_dims_guard_skips_mismatched_write(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick 260826-1by (T-Q1B-01): a stale seam index pointing at an
+    ImageFile whose page dims differ from the live canvas planes must write
+    NOTHING into that ImageFile (slots unchanged) while navigation itself
+    still completes normally."""
+    folder = tmp_path / "guard"
+    window = _make_window(qtbot, tmp_path, folder=folder, size=60)
+    _isolate_settings(window, tmp_path, monkeypatch)
+
+    stale = window.image_files[1]
+    stale.current_image = np.zeros((90, 90, 3), dtype=np.uint8)
+    sentinel_auto = np.arange(17, dtype=np.uint8)
+    sentinel_manual = np.arange(23, dtype=np.uint8)
+    sentinel_erase = np.arange(31, dtype=np.uint8)
+    stale.auto_mask = sentinel_auto.copy()
+    stale.mask_manual = sentinel_manual.copy()
+    stale.mask_erase = sentinel_erase.copy()
+
+    # Canvas planes are 60x60 while the stale target's page is 90x90.
+    _seed_mask_content(window)
+    window._last_page_index = 1
+    window.file_table.select_path(window.image_files[0].path)
+    window.on_page_selected(window.image_files[0].path)
+    QApplication.processEvents()
+
+    np.testing.assert_array_equal(stale.auto_mask, sentinel_auto)
+    np.testing.assert_array_equal(stale.mask_manual, sentinel_manual)
+    np.testing.assert_array_equal(stale.mask_erase, sentinel_erase)
+    assert stale.boxes is None
+    # Navigation completed: the incoming page shows on the canvas.
+    img = window.canvas.get_image_numpy()
+    assert img is not None and img.shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_corrupt_plane_blob_restores_degraded_with_boxes_intact(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """quick 260826-1by (T-Q1B-02): a corrupt/wrong-dims packed auto blob
+    degrades to "no plane" inside _display_page_state — no ValueError
+    propagates out of the display path and a valid text-boxes payload still
+    restores onto the canvas."""
+    from manga_ai_studio.core.box_model import USER, PageBox
+    from manga_ai_studio.core.mask_planes import pack_binary
+    from panelcleaner.structures import Box
+
+    folder = tmp_path / "corrupt"
+    window = _make_window(qtbot, tmp_path, folder=folder, size=60)
+    _isolate_settings(window, tmp_path, monkeypatch)
+
+    imf = window.image_files[0]
+    imf.current_image = np.zeros((60, 60, 3), dtype=np.uint8)
+    imf.auto_mask = pack_binary(np.zeros((40, 40), dtype=np.uint8))  # len 200 != 450
+    pb = PageBox(box=Box(5, 5, 40, 20), origin=USER)
+    imf.boxes = [pb]
+
+    # Must NOT raise despite the blob length not fitting 60x60.
+    window._display_page_state(imf)
+    QApplication.processEvents()
+
+    assert window.canvas.has_boxes() is True  # boxes/text restoration intact
+    assert window.canvas._auto_bin is None  # corrupt plane contributed nothing
