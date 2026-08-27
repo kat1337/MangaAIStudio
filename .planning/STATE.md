@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-26 — Completed quick task 260826-1by: cross-session plane bleed fixed — wrong-page plane persistence blocked, corrupt plane blobs degrade instead of crashing; full suite 1161 passed (1 pre-existing flake)
+Last activity: 2026-08-27 — Completed quick task 260826-u9m: Show Original (P) references the verified original on disk after reopen; page displays fully redefine preview state (cross-page baseline bleed fixed); full suite 1169 passed
 
 ## Performance Metrics
 
@@ -388,6 +388,7 @@ None yet.
 | 260825-wfy | Rotation drag UX: delta-based preview (fixes double rotation + release snap), rotation-aware boundingRect (fixes straight-edge clipping), font-size cap 200→1024 | 2026-08-25 | bd0c238 | [260825-wfy-fix-rotation-drag-ux-double-rotation-pre](./quick/260825-wfy-fix-rotation-drag-ux-double-rotation-pre/)
 | 260826-09m | Canvas text clipping fix: two-pass measured-surface render in TypesetOverlayItem — full glyphs for any font (Mango regression-tested); D-01 placement preserved | 2026-08-26 | 5f14ce5 | [260826-09m-fix-canvas-text-clipping-for-fonts-whose](./quick/260826-09m-fix-canvas-text-clipping-for-fonts-whose/)
 | 260826-1by | Fix cross-session plane bleed: retire _last_page_index on session swap, dims guard on outgoing plane persistence, unpack ValueError backstop (no more repeated page-switch crashes / dead boxes) | 2026-08-26 | e05a71b | [260826-1by-fix-cross-session-plane-bleed-on-page-se](./quick/260826-1by-fix-cross-session-plane-bleed-on-page-se/)
+| 260826-u9m | Show Original (P) now references the verified original ON DISK after reopen (D-06 pixels decoded lazily + seeded via new set_image_from_numpy_page seam — also fixes cross-page baseline bleed; unverified/dims-mismatch falls back to in-memory) | 2026-08-27 | 1915859 | [260826-u9m-fix-show-original-p-key-to-reference-ori](./quick/260826-u9m-fix-show-original-p-key-to-reference-ori/)
 
 ## Deferred Items
 
