@@ -990,6 +990,60 @@ class EditorCanvas(QGraphicsView):
         """
         return self._set_image_from_numpy(image_rgb, None, capture_original=capture_original)
 
+    def set_image_from_numpy_page(
+        self, rgb: np.ndarray, original_baseline: np.ndarray | None = None
+    ) -> QImage:
+        """Display a PAGE and FULLY redefine the per-page preview state.
+
+        CALLERS ARE PAGE DISPLAYS ONLY (page switch via the numpy branch of
+        ``MainWindow.on_page_selected``, project-open display via
+        ``MainWindow._display_page_state``). Op write-backs and undo STAY on
+        :meth:`set_image_from_numpy` — D-14 (rebaseline-after-op) governs
+        those. ``original_baseline`` comes from the MainWindow D-06 disk
+        decode (``_decode_original_reference``) and is ``None`` whenever the
+        persisted original is unverified, unreadable, or dims-mismatched.
+
+        This seam exists because ``_set_image_from_numpy``'s capture-if-None
+        semantic cannot express "a page display defines its OWN complete
+        preview state": a raw page switch kept the OUTGOING page's baseline
+        (and possibly its stale ``_showing_original=True`` flag), letting
+        Show Original on page B display page A's pixels (cross-page bleed).
+        The shared display machinery runs once (crop-state clear, the
+        different-dims plane re-seed, the Pitfall-2 copy-detached pixmap,
+        the empty-state refresh), then all three preview slots are
+        explicitly redefined — never relying on capture-if-None:
+
+        - ``_original_image_numpy`` = ``original_baseline.copy()`` when
+          provided, else ``rgb.copy()`` (the incoming page's own displayed
+          pixels — reproduces the pre-fix observable outcome where Show
+          Original shows the saved state, WITHOUT ever inheriting a foreign
+          page's baseline);
+        - ``_inpainted_qimage`` = the displayed QImage (the claim
+          ``capture_original=True`` would set — makes
+          :meth:`has_inpaint_result` True so the P action /
+          ``btn_preview_hold`` gating works on freshly loaded pages);
+        - ``_showing_original`` = False.
+        """
+        # Validate BOTH arrays BEFORE any display mutation: a malformed
+        # baseline must raise with the displayed pixmap still untouched (the
+        # same ValueError contract _set_image_from_numpy enforces for rgb).
+        if original_baseline is not None and (
+            original_baseline.ndim != 3
+            or original_baseline.shape[2] != 3
+            or original_baseline.dtype != np.uint8
+        ):
+            raise ValueError(
+                "expected (H,W,3) uint8 RGB array,"
+                f" got shape={original_baseline.shape} dtype={original_baseline.dtype}"
+            )
+        qimg = self._set_image_from_numpy(rgb, None, capture_original=False)
+        self._original_image_numpy = (
+            original_baseline.copy() if original_baseline is not None else rgb.copy()
+        )
+        self._inpainted_qimage = qimg
+        self._showing_original = False
+        return qimg
+
     def rebaseline_original(self) -> None:
         """Re-baseline the Show Original cache to the current displayed image.
 

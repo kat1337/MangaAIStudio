@@ -720,6 +720,125 @@ def test_preview_path_does_not_capture_original(qtbot) -> None:
 
 
 # ===========================================================================
+# Quick 260826-u9m — set_image_from_numpy_page: page-level preview-state rebase
+# ===========================================================================
+#
+# A PAGE DISPLAY defines its OWN complete preview state: the incoming baseline
+# (the D-06 disk decode when the persisted original verifies, else the page's
+# own displayed pixels), an inpaint-result claim (so Show Original gating
+# works on freshly loaded pages), and _showing_original=False. The OLD
+# capture-if-None semantic leaked the OUTGOING page's baseline (and its stale
+# toggle flag) across page switches — P on page B could show page A's pixels.
+
+
+def _rgb_array(h: int, w: int, rgb: tuple[int, int, int]) -> np.ndarray:
+    """A contiguous (h, w, 3) uint8 array filled with one constant color
+    (pixel-equality asserts on constant colors are exact)."""
+    return np.full((h, w, 3), rgb, dtype=np.uint8)
+
+
+@pytest.mark.gui
+def test_set_image_from_numpy_page_seeds_disk_baseline_and_inpaint_claim(qtbot) -> None:
+    """A provided original_baseline becomes THE Show Original baseline.
+
+    Simulates the verified-reopen contract (quick 260826-u9m): the D-06 disk
+    decode seeds the baseline (NOT a foreign capture), _showing_original is
+    reset, has_inpaint_result() is True so the P action can enable, and the
+    toggle swaps between the pristine baseline and the page's displayed pixels.
+    """
+    canvas = _canvas_with_image(qtbot)
+    arr_a = _rgb_array(10, 10, (200, 10, 10))
+    canvas.set_image_from_numpy(arr_a)
+
+    arr_b = _rgb_array(12, 12, (10, 200, 10))
+    arr_b_orig = _rgb_array(12, 12, (10, 10, 220))
+    qimg = canvas.set_image_from_numpy_page(arr_b, arr_b_orig)
+    assert qimg is not None
+    assert np.array_equal(canvas._original_image_numpy, arr_b_orig)
+    assert not np.array_equal(canvas._original_image_numpy, arr_a)
+    assert canvas._showing_original is False
+    assert canvas.has_inpaint_result() is True
+
+    # P shows the pristine baseline; toggling off restores the saved state.
+    canvas.show_original(True)
+    assert np.array_equal(canvas.get_image_numpy(), arr_b_orig)
+    canvas.show_original(False)
+    assert np.array_equal(canvas.get_image_numpy(), arr_b)
+
+
+@pytest.mark.gui
+def test_set_image_from_numpy_page_rebases_no_foreign_bleed(qtbot) -> None:
+    """The EXACT cross-page bleed state cannot survive a page display.
+
+    Build today's bug by hand: display A via the ordinary path (which
+    capture-if-None seeds a foreign fresh-canvas baseline), run
+    show_original(True) so a foreign baseline AND _showing_original=True are
+    live, then display page B WITHOUT a baseline. Page B must define its OWN
+    fallback baseline (its own displayed pixels) and start untoggled.
+    """
+    canvas = _canvas_with_image(qtbot, size=20)
+    arr_a = _rgb_array(20, 20, (250, 0, 0))
+    canvas.set_image_from_numpy(arr_a)
+    foreign_baseline = canvas._original_image_numpy.copy()
+    canvas.show_original(True)
+    assert canvas._showing_original is True
+
+    arr_b = _rgb_array(14, 14, (0, 90, 250))
+    canvas.set_image_from_numpy_page(arr_b)
+
+    assert np.array_equal(canvas._original_image_numpy, arr_b)
+    assert not np.array_equal(canvas._original_image_numpy, foreign_baseline)
+    assert not np.array_equal(canvas._original_image_numpy, arr_a)
+    assert canvas._showing_original is False
+    assert np.array_equal(canvas.get_image_numpy(), arr_b)
+
+
+@pytest.mark.gui
+def test_set_image_from_numpy_page_invalid_baseline_raises(qtbot) -> None:
+    """A malformed baseline raises ValueError BEFORE any display mutation."""
+    canvas = _canvas_with_image(qtbot, size=16)
+    arr_a = _rgb_array(16, 16, (5, 5, 5))
+    canvas.set_image_from_numpy(arr_a)
+    shown_before = canvas.get_image_numpy().copy()
+    baseline_before = (
+        canvas._original_image_numpy.copy()
+        if canvas._original_image_numpy is not None
+        else None
+    )
+
+    bad_rank = np.zeros((4, 4), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        canvas.set_image_from_numpy_page(_rgb_array(8, 8, (9, 9, 9)), bad_rank)
+
+    # Nothing mutated: the previously displayed page and its baseline stand.
+    assert np.array_equal(canvas.get_image_numpy(), shown_before)
+    if baseline_before is None:
+        assert canvas._original_image_numpy is None
+    else:
+        assert np.array_equal(canvas._original_image_numpy, baseline_before)
+
+
+@pytest.mark.gui
+def test_set_image_from_numpy_page_fresh_canvas_has_inpaint_claim(qtbot) -> None:
+    """One page display on a freshly cleared canvas carries the claim.
+
+    Locks the ``_inpainted_qimage`` assignment: without it the P action /
+    btn_preview_hold gating would stay disabled on freshly loaded pages.
+    """
+    canvas = EditorCanvas()
+    qtbot.addWidget(canvas)
+    canvas.clear()
+    assert canvas.has_inpaint_result() is False
+
+    arr = _rgb_array(10, 10, (77, 77, 77))
+    arr_orig = _rgb_array(10, 10, (11, 22, 33))
+    canvas.set_image_from_numpy_page(arr, arr_orig)
+    assert canvas.has_inpaint_result() is True
+    assert canvas._showing_original is False
+    assert np.array_equal(canvas.get_image_numpy(), arr)
+
+
+# ===========================================================================
 # Plan 04-04 Task 2 — Toggle Text Overlay (T) independent visibility layer
 # ===========================================================================
 #
