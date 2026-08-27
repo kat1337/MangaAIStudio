@@ -1868,6 +1868,12 @@ class MainWindow(QMainWindow):
         project's manifest and ``.mas`` files with the new session's pages.
         Project loads (``_load_project_session`` / ``_load_single_page_mas``)
         set their own identity and never route through this method.
+
+        The ``_last_page_index = None`` reset before the auto-select prevents
+        cross-session outgoing-state bleed (D-11 seam rule): a stale index
+        that still lands inside the fresh list would make the
+        :meth:`on_page_selected` call below persist the OLD session's canvas
+        planes into a NEW list's ImageFile at that index.
         """
         ordered = natsorted(paths, key=lambda p: str(p))
         # D-06 (plan 05-05): a normal image/folder open loads each page from
@@ -1875,6 +1881,11 @@ class MainWindow(QMainWindow):
         # original_verified=True (consumed by plan 05-06's Show Original
         # gating; .mas-loaded pages set it per the checksum rule instead).
         self.image_files = [ImageFile(path=p, original_verified=True) for p in ordered]
+        # Cross-session bleed fix (quick 260826-1by): ``None`` retires the
+        # OUTGOING index so the explicitly-called on_page_selected below can
+        # never persist the previous session's canvas mask/planes into this
+        # fresh list at the stale index.
+        self._last_page_index = None
         self._project_dir = None
         self._project_name = None
         self.file_table.set_pages([imf.path for imf in self.image_files])
@@ -2969,11 +2980,19 @@ class MainWindow(QMainWindow):
 
         # ---- session swap (everything above succeeded) ----
         self.image_files = page_files
+        # Cross-session bleed fix (quick 260826-1by): retire the OUTGOING
+        # index BEFORE anything can observe the swapped-in list while the
+        # canvas still holds prior-session state (D-11 seam rule).
+        self._last_page_index = None
         self.file_table.set_pages([imf.path for imf in page_files])
         self.file_table.select_path(page_files[0].path)
-        self._last_page_index = 0
         self._display_page_state(page_files[0])
         self.reset_history()  # D-05: fresh undo on reopen
+        # The canvas now displays page 0's own restored state — establish the
+        # D-11 seam baseline so post-open edits persist on first navigation
+        # and _refresh_action_states' original-verification gating reads a
+        # real page (None would silently skip it).
+        self._last_page_index = 0
         self._project_dir = manifest_path.parent
         self._project_name = data["name"]
         for imf in self.image_files:
@@ -3005,11 +3024,19 @@ class MainWindow(QMainWindow):
 
         # ---- session swap ----
         self.image_files = [imf]
+        # Cross-session bleed fix (quick 260826-1by): retire the OUTGOING
+        # index BEFORE anything can observe the swapped-in list while the
+        # canvas still holds prior-session state (D-11 seam rule).
+        self._last_page_index = None
         self.file_table.set_pages([imf.path])
         self.file_table.select_path(imf.path)
-        self._last_page_index = 0
         self._display_page_state(imf)
         self.reset_history()
+        # The canvas now displays page 0's own restored state — establish the
+        # D-11 seam baseline so post-open edits persist on first navigation
+        # and _refresh_action_states' original-verification gating reads a
+        # real page (None would silently skip it).
+        self._last_page_index = 0
         self._project_dir = None
         self._project_name = None
         for imf_ in self.image_files:
