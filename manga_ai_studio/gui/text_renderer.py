@@ -2,7 +2,7 @@
 canvas overlay AND the bake (D-01 single visual truth, RESEARCH Pattern 1).
 
 ``layout()`` produces pure geometry (wrap at the inner width, H/V alignment,
-the Auto-fit bounded loop, the overflow flag); ``paint()`` draws a laid-out
+the Auto-fit fit loop, the overflow flag); ``paint()`` draws a laid-out
 result through a ``QPainter``; ``bake_typeset_page()`` composites every box's
 current-focus text onto a DETACHED copy of the page image (D-02/D-04, Pitfall
 2); ``current_focus_text()`` is the D-04 content rule shared with the canvas.
@@ -25,9 +25,13 @@ Mechanism notes (verified by probe on the pinned Python 3.14.2 / PySide6
   before any block-layout reads (reading ``lineAt()`` on an un-laid-out
   block access-violates on this stack).
 - Auto-fit preserves the 04-09 machinery at SCENE px (D-15 / UI-SPEC A2):
-  box-adaptive base ``14 x min(w,h)/100``, ``[10,28]`` base clamp, bounded
-  shrink (12 iterations x 0.9, 5 px floor checked at the loop top — no
-  iteration ever renders below the floor).
+  box-adaptive base ``14 x min(w,h)/100``, ``[10,28]`` base clamp as the
+  STARTING target. GROWTH has no iteration bound (quick-260826-vhh): it stops
+  only when the fit predicate fails or ``min(inner_w, inner_h)`` is reached —
+  the legacy shared-iteration budget plateaued big-box growth near
+  28 x 1.1**11 (~80 px). The never-fits shrink path keeps the exact old shape
+  (12 iterations x 0.9, 5 px floor checked at the loop top — no iteration
+  ever renders below the floor).
 - Overflow renders UNCLIPPED (UI-SPEC A6): ``paint()`` never installs a
   clip; the bake clips only at the page edge (the image's natural bound).
 
@@ -42,9 +46,9 @@ flow right-to-left (later chars at smaller x) from the box's right inner
 edge; each column is 1 em wide (the max char extent in the column), gap 0;
 every char is centered within its column. ``align_h`` shifts the column
 BLOCK left/center/right, ``align_v`` shifts the run top/middle/bottom
-along the column axis (A3). The vertical Auto-fit variant reuses the
-bounded loop (12 x 0.9, 5 px floor) on the column count
-(floor(inner_w / 1 em)) and the run's vertical extent. Placements are
+along the column axis (A3). The vertical Auto-fit variant reuses the same
+loop (cap-bounded growth, legacy 12 x 0.9 shrink, 5 px floor) on the column
+count (floor(inner_w / 1 em)) and the run's vertical extent. Placements are
 INNER-LOCAL coordinates (0..inner_w x 0..inner_h); paint() draws them
 after translating to ``result.origin``.
 
@@ -91,7 +95,8 @@ from manga_ai_studio.core.text_wrap import break_lines_ex
 _OVERLAY_INSET = 2.0  # inner margin on every side of the box rect
 _OVERLAY_FONT_BASE = 14.0  # scene-px base for the UI-SPEC reference box
 _OVERLAY_BOX_REF_DIM = 100.0  # the reference box min dimension
-_OVERLAY_FIT_MAX_ITERS = 12  # bounded shrink loop
+_OVERLAY_FIT_MAX_ITERS = 12  # SHRINK-path budget ONLY (quick-260826-vhh):
+# growth is bounded by grow_cap = min(inner_w, inner_h), never by this count.
 _OVERLAY_FIT_STEP = 0.9  # per-iteration reduction factor
 _OVERLAY_FIT_GROW_STEP = 1.1  # per-iteration growth factor (G-07-4)
 _OVERLAY_FIT_FLOOR_PX = 5.0  # hard floor, checked at the loop TOP
@@ -556,8 +561,9 @@ def layout_vertical(
     wrapper can consume these placements): ``[{char, x, y, rotate, w, h},
     ...]`` in INNER-LOCAL coordinates. ``size_px`` is the glyph size; when
     None the style resolves it (manual size, or the vertical Auto-fit loop:
-    bounded 12 x 0.9 iterations on the column count and vertical extent,
-    5 px floor — the horizontal machinery applied to vertical metrics).
+    cap-bounded growth on the column count and vertical extent, the legacy
+    12 x 0.9 shrink path, 5 px floor — the horizontal machinery applied to
+    vertical metrics).
 
     Classification and column rules: see the module docstring and
     ``char_rotates`` (G-07-1: Latin letters/digits stay upright, one above
@@ -578,16 +584,22 @@ def layout_vertical(
 def _vertical_fit_size(
     text: str, style: TextStyle, inner_w: float, inner_h: float
 ) -> float:
-    """The vertical Auto-fit size: the bounded loop on column count.
+    """The vertical Auto-fit size: growth runs until the fit genuinely fails.
 
     Fit = the layout's column count <= floor(inner_w / 1 em) AND the run's
     vertical extent fits inner_h. Same machinery as the horizontal loop:
     box-adaptive base (the box dims = the inner dims + the constant inset),
-    [10,28] clamp as the STARTING target, then grow-while-fits-with-cap
-    (G-07-4: ``grow_cap = min(inner_w, inner_h)``, ``_OVERLAY_FIT_GROW_STEP``
-    — the clamp is not a hard max); a text that never fits at the base
-    follows the exact old shrink path (12 x 0.9, 5 px floor checked at the
-    loop TOP — no iteration renders below it).
+    [10,28] clamp as the STARTING target, then grow-while-it-fits with NO
+    iteration bound — only a failing fit predicate or ``grow_cap =
+    min(inner_w, inner_h)`` stops growth (G-07-4 + quick-260826-vhh: the
+    legacy shared 12-iteration budget plateaued big-box growth near
+    28 x 1.1**11 (~80 px)). A text that never fits at the base follows the
+    exact old shrink path (12 x 0.9 under the dedicated
+    ``_OVERLAY_FIT_MAX_ITERS`` SHRINK budget, endpoint identical to the old
+    range(12) loop; 5 px floor checked at the loop TOP — no iteration
+    renders below it). No extra safety bound is added for growth:
+    iterations are ceil(log(grow_cap/start)/log(1.1)) — dozens at most for
+    any realistic scene box, each probe cheap relative to a paint.
     """
     box_w = inner_w + 2.0 * _OVERLAY_INSET
     box_h = inner_h + 2.0 * _OVERLAY_INSET
@@ -596,15 +608,17 @@ def _vertical_fit_size(
     grow_cap = min(inner_w, inner_h)
     size = target
     fit_held = False
-    for _ in range(_OVERLAY_FIT_MAX_ITERS):
+    shrink_budget = _OVERLAY_FIT_MAX_ITERS
+    while True:
         # Floor check at the loop TOP — no iteration renders below it.
         if target <= _OVERLAY_FIT_FLOOR_PX:
             break
         _, ncols, _, block_h = _vertical_placements(text, style, inner_w, inner_h, target)
         max_cols = max(1, int(inner_w // target))
         if ncols <= max_cols and block_h <= inner_h + _EPS:
-            # Fits: keep the last-fitting candidate, then grow (bounded by
-            # the cap — same cap/iteration rules as the horizontal loop).
+            # Fits: keep the last-fitting candidate, then grow (bounded ONLY
+            # by the cap — same cap as the horizontal loop; never by an
+            # iteration budget).
             size = target
             fit_held = True
             if target >= grow_cap - _EPS:
@@ -612,11 +626,15 @@ def _vertical_fit_size(
             target = min(grow_cap, target * _OVERLAY_FIT_GROW_STEP)
         else:
             # Does not fit: after growth, keep the last fit; from the base,
-            # the old shrink path (byte-equivalent when the base never fits).
+            # the old shrink path under the dedicated shrink budget
+            # (endpoint byte-equivalent to the legacy 12-iteration loop).
             if fit_held:
                 break
             size = target
             target *= _OVERLAY_FIT_STEP
+            shrink_budget -= 1
+            if shrink_budget <= 0:
+                break
     return size
 
 
@@ -638,7 +656,9 @@ def layout(
     result's ``origin``. A manual size
     (``font_size_px`` set, ``auto_fit`` False) renders exactly at that size
     and reports ``overflow`` when the block exceeds the inner height.
-    Auto-fit (the default) runs the 04-09 bounded loop at scene px.
+    Auto-fit (the default) runs the 04-09 auto-fit loop at scene px
+    (quick-260826-vhh: growth continues past the former iteration-bound
+    ~80 px plateau until the fit predicate fails or the box cap is reached).
 
     Vertical mode (``vertical=True`` — plan 07-03, D-11): the result
     carries ``vertical_placements`` (per-char boxes, upright CJK / rotated
@@ -685,9 +705,12 @@ def layout(
         overflow = doc.size().height() > inner_h + _EPS
     else:
         # Auto-fit (D-15 / G-07-4): box-adaptive base + [10,28] clamp as the
-        # STARTING target, then grow-while-fits-with-cap — the base clamp is
-        # no longer a hard max. A text that never fits at the base follows
-        # the exact old shrink path (12 x 0.9, 5 px floor at the loop TOP).
+        # STARTING target, then grow-while-it-fits with NO iteration bound —
+        # growth stops only when the fit predicate fails or the cap is hit
+        # (quick-260826-vhh removed the shared 12-iteration budget that
+        # plateaued big-box growth near 28 x 1.1**11 ~ 80 px). A text that
+        # never fits at the base follows the exact old shrink path (12 x 0.9
+        # under the dedicated shrink budget, 5 px floor at the loop TOP).
         base = (
             _OVERLAY_FONT_BASE
             * min(box_rect.width(), box_rect.height())
@@ -699,7 +722,8 @@ def layout(
         size = target
         overflow = True
         fit_held = False
-        for _ in range(_OVERLAY_FIT_MAX_ITERS):
+        shrink_budget = _OVERLAY_FIT_MAX_ITERS
+        while True:
             # Floor check at the loop TOP — no iteration renders below it.
             if target <= _OVERLAY_FIT_FLOOR_PX:
                 break
@@ -723,7 +747,8 @@ def layout(
             fits = candidate.size().height() <= inner_h + _EPS and not split_latin
             if fits:
                 # Fits: keep the last-fitting candidate, then grow (bounded
-                # by the cap — the fit check and the cap share the inner box).
+                # ONLY by the cap — the fit check and the cap share the inner
+                # box; never by an iteration budget).
                 doc, size = candidate, target
                 overflow = False
                 fit_held = True
@@ -732,12 +757,17 @@ def layout(
                 target = min(grow_cap, target * _OVERLAY_FIT_GROW_STEP)
             else:
                 # Does not fit: after growth, keep the last fit (never a
-                # shrink fall-through); from the base, the old shrink path.
+                # shrink fall-through); from the base, the old shrink path
+                # under the dedicated shrink budget (endpoint byte-equivalent
+                # to the legacy 12-iteration loop).
                 if fit_held:
                     break
                 doc, size = candidate, target
                 overflow = True
                 target *= _OVERLAY_FIT_STEP
+                shrink_budget -= 1
+                if shrink_budget <= 0:
+                    break
 
     used_size = float(max(1, int(round(size))))
     block_h = doc.size().height()
@@ -781,9 +811,10 @@ def _layout_vertical_result(
     """The vertical (tategaki) LayoutResult — per-char placements (D-11).
 
     Manual size: placements at exactly that size; overflow when the column
-    BLOCK exceeds the inner rect in either dimension. Auto-fit: the bounded
-    loop on column count + vertical extent (``_vertical_fit_size``);
-    overflow when the final candidate still does not fit (the floor held).
+    BLOCK exceeds the inner rect in either dimension. Auto-fit: cap-bounded
+    growth on column count + vertical extent (``_vertical_fit_size``,
+    quick-260826-vhh); overflow when the final candidate still does not fit
+    (the floor held).
     """
     manual = style.font_size_px is not None and not style.auto_fit
     if manual:

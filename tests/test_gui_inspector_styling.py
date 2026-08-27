@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from manga_ai_studio.core.box_model import PageBox  # noqa: E402
-from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
+from manga_ai_studio.core.text_style import EFFECT_GEOM_MAX, TextStyle  # noqa: E402
 from manga_ai_studio.gui.inspector_panel import InspectorPanel  # noqa: E402
 from panelcleaner.structures import Box  # noqa: E402
 
@@ -1175,3 +1175,64 @@ def test_font_filter_contains_match_scenario(qtbot) -> None:
     panel.load_box(_pagebox_with_style())
     assert panel.font_filter_edit.text() == ""
     assert panel._font_proxy.rowCount() == full
+
+
+# ===========================================================================
+# quick-260826-vhh — effect spin ranges read the TextStyle model constant
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_effect_spin_ranges_read_model_constant(qtbot) -> None:
+    """All three effect rows span 0..int(EFFECT_GEOM_MAX) — the same symbol
+    the TextStyle V5 coercion clamps with, so UI == model by construction.
+    The DEFAULT VALUES are untouched (outline 2 / glow 4 / shadow 2)."""
+    panel = _make_inspector(qtbot)
+    for key in ("outline", "glow", "shadow"):
+        spin = panel._effect_spins[key]
+        assert spin.minimum() == 0
+        assert spin.maximum() == int(EFFECT_GEOM_MAX), (
+            f"{key} spin max must equal int(EFFECT_GEOM_MAX)"
+        )
+    assert panel._effect_spins["outline"].value() == 2
+    assert panel._effect_spins["glow"].value() == 4
+    assert panel._effect_spins["shadow"].value() == 2
+
+
+@pytest.mark.gui
+def test_glow_radius_256_commit_reaches_the_model_unreclamped(qtbot) -> None:
+    """A 256 glow radius is enterable in the panel (the old cap stopped at
+    20) and its commit payload carries value=256 — which the TextStyle V5
+    coercion accepts UN-re-clamped (256 is the inclusive boundary)."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    # A real uniform glow row at radius 250 so the 256 commit is a CHANGE
+    # under the WR-01 loaded-memory guard.
+    panel.load_box(
+        _pagebox_with_style(
+            auto_fit=False,
+            font_size_px=14.0,
+            glow={"enabled": True, "color": "#ffff00", "radius_px": 250.0, "opacity": 0.8},
+        )
+    )
+    spin = panel._effect_spins["glow"]
+    spin.setValue(256)
+    spin.editingFinished.emit()
+    assert fired["effect"] == [
+        ("glow", {"enabled": True, "color": "#ffff00", "value": 256})
+    ]
+
+    # The committed value feeds the model boundary unchanged: build the
+    # resulting style like the MainWindow consumer would and re-coerce it.
+    result = TextStyle.from_dict(
+        {
+            "auto_fit": False,
+            "font_size_px": 14.0,
+            "glow": {"enabled": True, "color": "#ffff00", "radius_px": 256, "opacity": 0.8},
+        }
+    )
+    assert result.glow["radius_px"] == 256.0

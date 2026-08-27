@@ -41,6 +41,11 @@ from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
 from panelcleaner.structures import Box  # noqa: E402
 
 from manga_ai_studio.gui.text_renderer import (  # noqa: E402
+    _BASE_CLAMP_MAX,
+    _OVERLAY_FIT_FLOOR_PX,
+    _OVERLAY_FIT_GROW_STEP,
+    _OVERLAY_FIT_MAX_ITERS,
+    _OVERLAY_FIT_STEP,
     _build_document,
     _style_font,
     _vertical_placements,
@@ -269,3 +274,55 @@ def test_bake_rotated_box_paints_outside_axis_aligned_rect(qapp) -> None:
     ys, xs = np.nonzero(changed)
     dist = np.hypot(xs - cx, ys - cy)
     assert dist.max() <= reach
+
+
+# ---------------------------------------------------------------------------
+# quick-260826-vhh — auto-fit growth past the legacy iteration plateau
+# ---------------------------------------------------------------------------
+
+# The legacy loop spent ONE shared 12-iteration budget on BOTH directions, so
+# growth started at the clamped base 28 and multiplied by 1.1 at most 11
+# times — a mathematical ceiling of ~79.5 scene px no matter how big the box.
+_LEGACY_PLATEAU = _BASE_CLAMP_MAX * _OVERLAY_FIT_GROW_STEP ** (_OVERLAY_FIT_MAX_ITERS - 1)
+
+
+def test_auto_fit_growth_exceeds_legacy_plateau_horizontal(qapp) -> None:
+    """A big box resolves horizontal auto-fit FAR past the former ~80 px
+    plateau: growth stops only when the fit predicate fails or the box cap
+    is reached (shrink/floor behavior untouched)."""
+    rect = QRectF(0, 0, 1200, 1200)
+    result = layout("hello", TextStyle(), rect)
+    # Any size >= 100 is unreachable under the old budget (> plateau + the
+    # rounding granularity), so this pins the budget split explicitly.
+    assert result.used_font_size_px >= 100.0
+    assert result.used_font_size_px > _LEGACY_PLATEAU
+    inner_w = rect.width() - 2 * 2.0
+    inner_h = rect.height() - 2 * 2.0
+    assert result.used_font_size_px <= min(inner_w, inner_h) + 1e-6
+    assert result.overflow is False
+
+
+def test_auto_fit_growth_exceeds_legacy_plateau_vertical(qapp) -> None:
+    """Vertical-mode twin: tategaki auto-fit also grows past the plateau in
+    a tall box."""
+    rect = QRectF(0, 0, 1200, 1200)
+    result = layout("hello", TextStyle(), rect, vertical=True)
+    assert result.used_font_size_px >= 100.0
+    assert result.used_font_size_px > _LEGACY_PLATEAU
+    inner_w = rect.width() - 2 * 2.0
+    inner_h = rect.height() - 2 * 2.0
+    assert result.used_font_size_px <= min(inner_w, inner_h) + 1e-6
+
+
+def test_auto_fit_shrink_endpoint_matches_legacy_budget(qapp) -> None:
+    """The never-fits path is byte-equivalent to the old range(12) loop:
+    starting from the clamped base 28 with the base never fitting, the final
+    size is exactly 28 x 0.9**11 (computed inline, not hardcoded) — and the
+    pure-budget endpoint sits ABOVE the floor, proving the floor was not
+    what terminated the loop here."""
+    tiny = QRectF(0, 0, 250, 220)  # base = 14 * min(250,220)/100 = 30.8 -> clamp to 28
+    result = layout("word " * 300, TextStyle(), tiny)  # never fits even near the floor
+    expected_size = _BASE_CLAMP_MAX * _OVERLAY_FIT_STEP ** (_OVERLAY_FIT_MAX_ITERS - 1)
+    assert expected_size >= _OVERLAY_FIT_FLOOR_PX
+    assert result.used_font_size_px == float(max(1, int(round(expected_size))))
+    assert result.overflow is True

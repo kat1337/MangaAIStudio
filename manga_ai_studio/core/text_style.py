@@ -48,16 +48,20 @@ DEFAULT_SHADOW = {
 # V5 bounds (ASVS V5 — the from_dict coercion boundary).
 _FONT_SIZE_MIN = 1.0
 _FONT_SIZE_MAX = 1024.0
-_EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
 _OPACITY_MAX = 1.0
 
 # quick-260824-viq bounds: free-angle text rotation is clamped to a full
 # half-turn in either direction; character spacing and line/column spacing
 # are non-negative gaps with generous ceilings (a larger value is garbage,
-# not intent).
+# not intent). quick-260826-vhh promotes the effect geometry bound into the
+# same PUBLIC block (one shared symbol, no private duplicate): the Inspector
+# spins read ``EFFECT_GEOM_MAX`` directly so the UI range == the model clamp
+# by construction. Generous sanity ceiling like its neighbors — a big SFX
+# stroke/glow/shadow is intent; larger values are garbage, not intent.
 ROTATION_MAX = 180.0
 CHAR_SPACING_MAX = 64.0
 LINE_SPACING_MAX = 256.0
+EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
 
 _ALIGN_H_VALUES = ("left", "center", "right")
 _ALIGN_V_VALUES = ("top", "middle", "bottom")
@@ -120,7 +124,7 @@ def _coerce_effect(raw, default: dict) -> dict:
         elif key == "color":
             out[key] = _coerce_str(value, out[key])
         elif key in ("width_px", "radius_px"):
-            out[key] = _clamp_float(value, 0.0, _EFFECT_GEOM_MAX, out[key])
+            out[key] = _clamp_float(value, 0.0, EFFECT_GEOM_MAX, out[key])
         elif key == "opacity":
             out[key] = _clamp_float(value, 0.0, _OPACITY_MAX, out[key])
         elif key in ("dx", "dy"):

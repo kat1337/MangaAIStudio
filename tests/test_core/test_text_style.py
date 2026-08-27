@@ -381,3 +381,45 @@ def test_v5_clamp_char_and_line_spacing_px() -> None:
     assert TextStyle.from_dict({"line_spacing_px": 20.25}).line_spacing_px == 20.25
     assert TextStyle.from_dict({"line_spacing_px": "tall"}).line_spacing_px == 0.0
     assert TextStyle.from_dict({"line_spacing_px": None}).line_spacing_px == 0.0
+
+
+# ---------------------------------------------------------------------------
+# quick-260826-vhh — EFFECT_GEOM_MAX promoted to a public shared constant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_effect_geom_max_public_constant_is_the_single_clamp_source() -> None:
+    """EFFECT_GEOM_MAX is public and IS the coercion bound (the Inspector
+    spins read the same symbol, so UI == model by construction). The private
+    duplicate spelling must be gone — exactly one shared symbol exists."""
+    import manga_ai_studio.core.text_style as ts_mod
+
+    assert ts_mod.EFFECT_GEOM_MAX == 256.0
+    assert not hasattr(ts_mod, "_EFFECT_GEOM_MAX"), (
+        "the private _EFFECT_GEOM_MAX spelling must be removed"
+    )
+    # Every effect geometry field clamps to it: 999 -> 256.
+    s = TextStyle.from_dict({"outline": {"width_px": 999}, "glow": {"radius_px": 999}})
+    assert s.outline["width_px"] == ts_mod.EFFECT_GEOM_MAX
+    assert s.glow["radius_px"] == ts_mod.EFFECT_GEOM_MAX
+    assert s.shadow["radius_px"] == 4.0  # untouched field keeps its default
+    # Non-numeric falls back to the per-field default, unchanged (V5).
+    s2 = TextStyle.from_dict({"glow": {"radius_px": "huge"}})
+    assert s2.glow["radius_px"] == 4.0
+
+
+@pytest.mark.unit
+def test_effect_geom_boundary_value_round_trips_unclamped() -> None:
+    """A 256.0 radius (the boundary itself) survives to_dict/from_dict
+    unchanged — the clamp is inclusive at EFFECT_GEOM_MAX."""
+    glow = {
+        "enabled": True,
+        "color": "#ffff00",
+        "radius_px": 256.0,
+        "opacity": 0.8,
+    }
+    s = TextStyle(glow=glow)
+    r = TextStyle.from_dict(s.to_dict())
+    assert r.glow["radius_px"] == 256.0
+    assert r == s

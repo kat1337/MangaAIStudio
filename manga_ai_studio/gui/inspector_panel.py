@@ -59,8 +59,11 @@ Security:
       1..9999 (T-4-08 mitigation unchanged).
     - Style values leave the panel only as real values (the "Mixed" sentinel
       never crosses into a ``TextStyle`` — T-07-11 / RESEARCH Pitfall 7); the
-      spinbox ranges clamp the effect geometry at the UI (V5 — outline 0..10,
-      glow 0..20, shadow 0..10, size 0..1024 with 0 = Auto).
+      spinbox ranges clamp inputs at the UI: size 0..1024 with 0 = Auto, and
+      effect width/radius 0..256 = ``EFFECT_GEOM_MAX`` from the TextStyle
+      model itself (quick-260826-vhh — UI == model by construction; a big SFX
+      stroke/glow is intent, not garbage, and garbage still cannot reach the
+      model since the V5 coercion clamps to the same constant).
 """
 
 from __future__ import annotations
@@ -92,6 +95,7 @@ from PySide6.QtWidgets import (
 )
 
 from manga_ai_studio.core.box_model import DETECTED, USER
+from manga_ai_studio.core.text_style import EFFECT_GEOM_MAX
 from manga_ai_studio.core.text_style import TextStyle
 
 # Dark QSS for the Inspector panel (UI-SPEC §Color tokens — copied from the
@@ -207,8 +211,10 @@ _FONT_STYLE_NAME = {
     (True, True): "Bold Italic",
 }
 
-# Effect-row defaults (UI-SPEC §Color / §Spacing exceptions): outline 0..10/2,
-# glow 0..20/4, shadow 0..10/2; colors = the semantic defaults. Used when a
+# Effect-row defaults (UI-SPEC §Color / §Spacing exceptions): outline width
+# 2, glow radius 4, shadow offset 2 — the VALUES are the UI-SPEC defaults;
+# the RANGES now span 0..int(EFFECT_GEOM_MAX) each (quick-260826-vhh — see
+# the effect-row loop below). Colors = the semantic defaults. Used when a
 # MIXED row's user interaction needs a real value where the sentinel sat
 # (Pitfall 7 — a commit always carries real values).
 _EFFECT_DEFAULT_COLORS = {"outline": "#0b0b0e", "glow": "#e8e8ea", "shadow": "#000000"}
@@ -542,21 +548,19 @@ class InspectorPanel(QWidget):
         form.addRow("Align V", self.align_v_combo)
 
         # Outline / Glow / Shadow — one row each: enable QCheckBox + 24x24
-        # swatch + QSpinBox (ranges per UI-SPEC §Spacing exceptions: outline
-        # 0..10, glow 0..20, shadow 0..10). A disabled checkbox greys the
-        # row's swatch+spin (_apply_effect_row_state).
+        # swatch + QSpinBox. Ranges read straight from the TextStyle model
+        # constant (quick-260826-vhh): every row spans 0..int(EFFECT_GEOM_MAX)
+        # so the UI can never produce a value the V5 coercion clamps
+        # differently — a big SFX stroke/glow is intent. A disabled checkbox
+        # greys the row's swatch+spin (_apply_effect_row_state).
         self._effect_checks: dict[str, QCheckBox] = {}
         self._effect_swatches: dict[str, _ColorSwatchButton] = {}
         self._effect_spins: dict[str, QSpinBox] = {}
-        for key, (lo, hi) in (
-            ("outline", (0, 10)),
-            ("glow", (0, 20)),
-            ("shadow", (0, 10)),
-        ):
+        for key in ("outline", "glow", "shadow"):
             check = QCheckBox()
             swatch = _ColorSwatchButton()
             spin = QSpinBox()
-            spin.setRange(lo, hi)
+            spin.setRange(0, int(EFFECT_GEOM_MAX))
             spin.setValue(_EFFECT_DEFAULT_VALUES[key])
             row = QWidget()
             row_h = QHBoxLayout(row)
