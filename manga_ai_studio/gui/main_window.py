@@ -1898,6 +1898,68 @@ class MainWindow(QMainWindow):
             self.status_bar_left.setText("No images found in folder")
         self._refresh_status_bar()
 
+    def _plane_dims_match(self, imf: ImageFile, idx: int | None) -> bool:
+        """Whether the live canvas planes fit ``imf``'s page dims.
+
+        T-Q1B-01 mitigation (quick 260826-1by): the D-11 outgoing persistence
+        must never pack canvas planes into an ImageFile whose page dims differ
+        — a stale index after a session swap would create wrong-dims packed
+        blobs whose restore raises ValueError and kills text-box restoration.
+        Returns False ONLY on a measurable mismatch: when either side's dims
+        are unknown (a legacy no-image slot / no canvas plane yet) it returns
+        True so the pre-existing behavior for those slots is preserved.
+
+        Callers must SKIP all outgoing writes (composite mask + the three
+        planes + the boxes snapshot, which shares the stale-index failure
+        mode) when this returns False — this is contamination prevention,
+        not validation of trusted input.
+        """
+        if imf.current_image is None:
+            return True
+        manual = self.canvas._mask_manual
+        if manual is None or manual.isNull():
+            return True
+        page_h, page_w = imf.current_image.shape[:2]
+        canvas_h, canvas_w = manual.height(), manual.width()
+        if (canvas_h, canvas_w) == (page_h, page_w):
+            return True
+        logger.warning(
+            f"Skipped outgoing plane persistence for page {idx}: canvas"
+            f" planes {canvas_w}x{canvas_h} do not match page dims"
+            f" {page_w}x{page_h} — suspected cross-session contamination"
+        )
+        return False
+
+    def _safe_unpack(
+        self,
+        packed: np.ndarray | None,
+        h: int,
+        w: int,
+        slot: str,
+        idx: int | None,
+    ) -> np.ndarray | None:
+        """unpack_binary backstop: a wrong-dims blob degrades to no plane.
+
+        T-Q1B-02 mitigation (quick 260826-1by): a corrupt or stale packed
+        plane blob must never raise out of a display path (the crash loop
+        that froze navigation and killed text-box restoration) — ValueError
+        is caught, logged with the slot name and both lengths, and the slot
+        restores as ``None`` ("no plane") so the rest of the page state still
+        loads.
+        """
+        if packed is None:
+            return None
+        try:
+            return unpack_binary(packed, h, w)
+        except ValueError:
+            logger.warning(
+                f"Discarded corrupt '{slot}' plane blob on page {idx}:"
+                f" length {len(packed)} does not fit {w}x{h}"
+                f" (expected {(h * w + 7) // 8} bytes)"
+                " — restoring an empty plane"
+            )
+            return None
+
     def on_page_selected(self, path: Path) -> None:
         """Load ``path`` into the canvas and sync window title + status bar.
 
@@ -1945,6 +2007,9 @@ class MainWindow(QMainWindow):
             outgoing_idx is not None
             and 0 <= outgoing_idx < len(self.image_files)
             and self.canvas.has_mask()
+            # T-Q1B-01 (quick 260826-1by): dims contamination guard — never
+            # pack canvas planes into an ImageFile whose page dims differ.
+            and self._plane_dims_match(self.image_files[outgoing_idx], outgoing_idx)
         ):
             # MANDATORY .copy(): detaches the QImage from the live canvas buffer
             # so subsequent canvas mutation cannot reach back through the shared
@@ -1983,6 +2048,10 @@ class MainWindow(QMainWindow):
             outgoing_idx is not None
             and 0 <= outgoing_idx < len(self.image_files)
             and self.canvas.has_boxes()
+            # T-Q1B-01 (quick 260826-1by): same stale-index failure mode as
+            # the plane packs — a mismatched write would land foreign boxes
+            # on the wrong page, so share the dims guard.
+            and self._plane_dims_match(self.image_files[outgoing_idx], outgoing_idx)
         ):
             self.image_files[outgoing_idx].boxes = self.canvas.boxes_snapshot()
 
@@ -2054,20 +2123,16 @@ class MainWindow(QMainWindow):
                 # unpacked arrays are fresh by construction.
                 page_mask = self.canvas.get_mask()
                 h, w = page_mask.height(), page_mask.width()
-                manual_bin = (
-                    unpack_binary(imf_in.mask_manual, h, w)
-                    if imf_in.mask_manual is not None
-                    else None
+                # T-Q1B-02 (quick 260826-1by): a corrupt/wrong-dims blob
+                # degrades to "no plane" instead of raising out of this slot.
+                manual_bin = self._safe_unpack(
+                    imf_in.mask_manual, h, w, "manual", incoming_idx
                 )
-                erase_bin = (
-                    unpack_binary(imf_in.mask_erase, h, w)
-                    if imf_in.mask_erase is not None
-                    else None
+                erase_bin = self._safe_unpack(
+                    imf_in.mask_erase, h, w, "erase", incoming_idx
                 )
-                auto_bin = (
-                    unpack_binary(imf_in.auto_mask, h, w)
-                    if imf_in.auto_mask is not None
-                    else None
+                auto_bin = self._safe_unpack(
+                    imf_in.auto_mask, h, w, "auto", incoming_idx
                 )
                 self.canvas.set_planes(
                     numpy_binary_to_mask_qimage(manual_bin)
@@ -2313,6 +2378,11 @@ class MainWindow(QMainWindow):
         """
         idx = self._last_page_index
         if idx is None or not (0 <= idx < len(self.image_files)):
+            return
+        if not self._plane_dims_match(self.image_files[idx], idx):
+            # T-Q1B-01 (quick 260826-1by): the canvas state does not belong
+            # to this page (stale seam index after a session swap) — flushing
+            # would create wrong-dims plane blobs / cross-page images. Skip.
             return
         if self.canvas.has_mask():
             self.image_files[idx].mask = self.canvas.get_mask().copy()
@@ -2840,21 +2910,11 @@ class MainWindow(QMainWindow):
             # (a fresh project-open has re-seeded the planes but the composite
             # ``_mask`` is still None until the first recompose).
             h, w = imf.current_image.shape[:2]
-            manual_bin = (
-                unpack_binary(imf.mask_manual, h, w)
-                if imf.mask_manual is not None
-                else None
-            )
-            erase_bin = (
-                unpack_binary(imf.mask_erase, h, w)
-                if imf.mask_erase is not None
-                else None
-            )
-            auto_bin = (
-                unpack_binary(imf.auto_mask, h, w)
-                if imf.auto_mask is not None
-                else None
-            )
+            # T-Q1B-02 (quick 260826-1by): corrupt/wrong-dims blobs degrade
+            # to "no plane" — boxes/text restoration below MUST still run.
+            manual_bin = self._safe_unpack(imf.mask_manual, h, w, "manual", None)
+            erase_bin = self._safe_unpack(imf.mask_erase, h, w, "erase", None)
+            auto_bin = self._safe_unpack(imf.auto_mask, h, w, "auto", None)
             self.canvas.set_planes(
                 numpy_binary_to_mask_qimage(manual_bin)
                 if manual_bin is not None
@@ -7192,6 +7252,11 @@ class MainWindow(QMainWindow):
             return
         canvas_mask = self.canvas.get_mask()
         if canvas_mask is None or canvas_mask.isNull():
+            return
+        # T-Q1B-01 (quick 260826-1by): the same contamination guard as the
+        # D-11 seam / _snapshot_current_page — a mismatched canvas holds
+        # another session's state and must not be flushed into this page.
+        if not self._plane_dims_match(self.image_files[idx], idx):
             return
         # Pitfall 2: detach from the live canvas buffer. on_page_selected's
         # identical .copy() is the load-bearing boundary the regression test
