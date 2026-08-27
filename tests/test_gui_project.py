@@ -1274,3 +1274,236 @@ def test_corrupt_plane_blob_restores_degraded_with_boxes_intact(
 
     assert window.canvas.has_boxes() is True  # boxes/text restoration intact
     assert window.canvas._auto_bin is None  # corrupt plane contributed nothing
+
+
+# ===========================================================================
+# quick-260826-vhh — incremental dirty-only saves (synchronous core)
+# ===========================================================================
+
+
+def _open_three_page_session(qtbot, tmp_path, chapter_name: str = "chapter"):
+    """A 3-page chapter session open in a MainWindow (house fixture shape)."""
+    chapter = tmp_path / chapter_name
+    _make_pages(chapter, count=3)
+    window = _make_window(qtbot, tmp_path)
+    window._load_folder(chapter)
+    QApplication.processEvents()
+    return chapter, window
+
+
+def _dirty_page_idx(window: MainWindow, idx: int, add_box: bool = True) -> None:
+    """Mark ONE page dirty with a real content change (an extra user box)."""
+    from manga_ai_studio.core.box_model import PageBox
+    from panelcleaner.structures import Box
+
+    imf = window.image_files[idx]
+    if add_box:
+        imf.boxes = list(imf.boxes or []) + [
+            PageBox(box=Box(5, 5, 40, 20), origin="user")
+        ]
+    imf.dirty = True
+
+
+@pytest.mark.gui
+def test_incremental_save_rewrites_only_the_dirty_page(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A repeat save after editing ONLY page 2 leaves pages 1/3 byte-
+    identical on disk, rewrites page 2's .mas, and the manifest still lists
+    all three pages in sidebar order."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    b1 = (project_dir / "page_01.mas").read_bytes()
+    b2 = (project_dir / "page_02.mas").read_bytes()
+    b3 = (project_dir / "page_03.mas").read_bytes()
+
+    _dirty_page_idx(window, 1)
+    window._save_project()
+    QApplication.processEvents()
+
+    manifest = load_project(project_dir / "manifest.json")
+    assert [p["name"] for p in manifest["pages"]] == [
+        "page_01",
+        "page_02",
+        "page_03",
+    ]
+    # Clean pages: BYTE-IDENTICAL (never decoded/re-encoded/rewritten).
+    assert (project_dir / "page_01.mas").read_bytes() == b1
+    assert (project_dir / "page_03.mas").read_bytes() == b3
+    # The edited page changed.
+    assert (project_dir / "page_02.mas").read_bytes() != b2
+    assert not window._session_dirty()
+
+
+@pytest.mark.gui
+def test_incremental_save_builds_only_eligible_pages(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """The second save calls ``build_page_entries`` exactly ONCE (the edited
+    page only) — clean pages are never hashed/encoded/compressed — and the
+    transient reports both totals (N pages, M written)."""
+    import manga_ai_studio.core.project_io as pio_mod
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    calls = {"n": 0}
+    real = pio_mod.build_page_entries
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(pio_mod, "build_page_entries", _counting)
+
+    _dirty_page_idx(window, 1)
+    window._save_project()
+    QApplication.processEvents()
+
+    assert calls["n"] == 1
+    assert (
+        "Saved project 'chapter' (3 pages, 1 written)"
+        in window.status_bar_left.text()
+    )
+
+
+@pytest.mark.gui
+def test_missing_mas_page_is_resurrected_by_clean_save(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Deleting a page's .mas from a saved project makes the NEXT clean save
+    rebuild EXACTLY that page (missing-file eligibility) while the untouched
+    pages stay byte-identical — a clean session with everything present still
+    flashes 'No changes to save.'"""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+    b1 = (project_dir / "page_01.mas").read_bytes()
+    b2 = (project_dir / "page_02.mas").read_bytes()
+
+    # Clean session, nothing missing -> the legacy flash.
+    window._save_project()
+    QApplication.processEvents()
+    assert "No changes to save." in window.status_bar_left.text()
+
+    (project_dir / "page_03.mas").unlink()
+
+    import manga_ai_studio.core.project_io as pio_mod
+
+    calls = {"n": 0}
+    real = pio_mod.build_page_entries
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(pio_mod, "build_page_entries", _counting)
+    window._save_project()
+    QApplication.processEvents()
+
+    assert calls["n"] == 1  # only the missing page was rebuilt
+    assert (project_dir / "page_03.mas").is_file()
+    assert (project_dir / "page_01.mas").read_bytes() == b1
+    assert (project_dir / "page_02.mas").read_bytes() == b2
+    manifest = load_project(project_dir / "manifest.json")
+    assert len(manifest["pages"]) == 3
+
+
+@pytest.mark.gui
+def test_save_as_rewrites_every_page(qtbot, tmp_path, monkeypatch) -> None:
+    """force_as coverage: Save As… writes EVERY page into the fresh folder
+    (legacy full-save semantics), even pages whose .mas exists elsewhere."""
+    import manga_ai_studio.core.project_io as pio_mod
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    first_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, first_dir, monkeypatch)
+
+    calls = {"n": 0}
+    real = pio_mod.build_page_entries
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(pio_mod, "build_page_entries", _counting)
+
+    second_dir = tmp_path / "copy.mas-project"
+    _save_as(window, second_dir, monkeypatch, isolate_settings=False)
+
+    assert calls["n"] == 3  # every page rebuilt on Save As…
+    assert sorted(p.name for p in second_dir.glob("*.mas")) == [
+        "page_01.mas",
+        "page_02.mas",
+        "page_03.mas",
+    ]
+    assert window._project_dir == second_dir
+    assert not window._session_dirty()
+
+
+@pytest.mark.gui
+def test_duplicate_stem_among_clean_pages_still_aborts_pre_write(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """WR-03 tightened scope: a duplicate stem pair trips the guard over the
+    FULL session stem list even when only ONE of the colliding pair is
+    eligible — nothing is written and the dirty flags stay intact."""
+    chapter = tmp_path / "dupes"
+    chapter.mkdir(exist_ok=True)
+    PILImage.new("RGB", (60, 60), color=(30, 60, 90)).save(chapter / "dup.png")
+    PILImage.new("RGB", (60, 60), color=(90, 30, 60)).save(chapter / "dup.jpg")
+    PILImage.new("RGB", (60, 60), color=(10, 10, 10)).save(chapter / "solo.png")
+
+    window = _make_window(qtbot, tmp_path)
+    window._load_folder(chapter)
+    QApplication.processEvents()
+    # Mark exactly ONE of the colliding pair dirty.
+    idx = next(i for i, imf in enumerate(window.image_files) if imf.path.stem == "dup")
+    _dirty_page_idx(window, idx, add_box=False)
+
+    default = chapter / "dupes.mas-project"
+    _stub_dir_dialog(monkeypatch, default)
+    criticals = _capture_critical(monkeypatch)
+
+    saved = window._save_project(force_as=True)
+    QApplication.processEvents()
+
+    assert saved is False
+    assert criticals, "the duplicate-stem failure dialog was shown"
+    assert "share the same file name" in criticals[0][1]
+    assert not default.exists()  # aborted BEFORE any write -> stray removed
+    assert window.image_files[idx].dirty is True  # flags untouched
+
+
+@pytest.mark.gui
+def test_eligible_page_without_source_aborts_whole_save(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """WR-02 (quick-260826-vhh): an ELIGIBLE page whose image source cannot
+    be resolved aborts the ENTIRE save before writing anything — the other
+    pages' edits must not be persisted while the broken page's dirty flag
+    would have been cleared by the success tail."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    # A second page edited AND unresolvable: rename its path to a file
+    # that does not exist anywhere beside the sources.
+    ghost = window.image_files[1]
+    assert ghost.current_image is None  # never navigated to it
+    ghost.path = chapter / "ghost.png"
+    _dirty_page_idx(window, 1, add_box=False)
+
+    default = chapter / "chapter.mas-project"
+    _stub_dir_dialog(monkeypatch, default)
+    criticals = _capture_critical(monkeypatch)
+
+    saved = window._save_project(force_as=True)
+    QApplication.processEvents()
+
+    assert saved is False
+    assert criticals
+    assert criticals[0][0].startswith("Couldn't save 'chapter'.")
+    assert "No page could be read for saving." in criticals[0][1]
+    assert not any(default.glob("*.mas"))  # NOTHING was written
+    assert window.image_files[1].dirty is True

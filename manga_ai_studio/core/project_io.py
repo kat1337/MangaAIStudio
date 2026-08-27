@@ -603,6 +603,53 @@ def save_project(
     return manifest_path
 
 
+def save_project_incremental(
+    project_dir: Path,
+    project_name: str,
+    rebuilt_pages: list[tuple[str, dict[str, bytes]]],
+    all_stems: list[str],
+) -> Path:
+    """Write a chapter project incrementally: full manifest + ONLY the
+    submitted pages' ``.mas`` files (quick-260826-vhh).
+
+    Identical folder/atomicity/non-destructive-overwrite rules as
+    :func:`save_project` (D-02), and the manifest is identical in shape —
+    it lists EVERY entry of ``all_stems``, in order. But ``save_page_file``
+    runs ONLY for the tuples in ``rebuilt_pages``; every other listed
+    ``<stem>.mas`` already on disk is left byte-identical (a repeat save
+    touching one page must not re-decode/re-hash/re-encode/re-compress the
+    clean pages).
+
+    Contract: callers MUST guarantee each ``all_stems`` entry either appears
+    in ``rebuilt_pages`` or ALREADY has a resolvable ``<stem>.mas`` beside
+    the manifest (the MainWindow's eligibility rule: a page is rebuilt when
+    ``imf.dirty`` OR its ``<stem>.mas`` file is missing).
+
+    :param project_dir: the ``<chapter>.mas-project/`` folder.
+    :param project_name: the chapter/session name (UTF-8 in the manifest).
+    :param rebuilt_pages: ``(stem, entries)`` pairs to (re)write.
+    :param all_stems: every page stem in manifest order.
+    :return: the manifest path.
+    """
+    project_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "version": _FORMAT_VERSION,
+        "name": project_name,
+        "pages": [{"name": stem, "file": f"{stem}.mas"} for stem in all_stems],
+    }
+    manifest_path = project_dir / "manifest.json"
+    # Plain, human-readable, diffable JSON (D-04) — UTF-8, indented.
+    _atomic_write_bytes(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    rebuilt = dict(rebuilt_pages)
+    for stem in all_stems:
+        if stem in rebuilt:
+            save_page_file(project_dir / f"{stem}.mas", rebuilt[stem])
+    return manifest_path
+
+
 def load_project(manifest_path: Path) -> dict:
     """Read + validate a plain-JSON chapter manifest (D-01/D-04).
 

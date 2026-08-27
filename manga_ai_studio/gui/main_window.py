@@ -2537,26 +2537,51 @@ class MainWindow(QMainWindow):
             return np.asarray(Image.open(imf.path).convert("RGB")).copy()
         return None
 
+    def _eligible_save_pages(self, project_dir: Path | None) -> list[int]:
+        """Indices needing a ``.mas`` rebuild for ``project_dir`` (D-07 rule).
+
+        quick-260826-vhh eligibility: a page is rebuilt when it is DIRTY or
+        its ``<stem>.mas`` is missing beside the manifest (first-ever saves
+        and resurrect-after-deletion fall out naturally). Clean pages whose
+        ``.mas`` exists are never decoded / hashed / encoded / rewritten.
+        Callers MUST resolve the final directory first — the existence check
+        needs it (the folder dialog runs BEFORE this helper).
+        """
+        eligible: list[int] = []
+        for idx, imf in enumerate(self.image_files):
+            if imf.dirty:
+                eligible.append(idx)
+            elif project_dir is not None and not (
+                project_dir / f"{imf.path.stem}.mas"
+            ).is_file():
+                eligible.append(idx)
+        return eligible
+
     def _save_project(self, force_as: bool = False) -> bool:
         """Save Project… (Ctrl+S) — write the session as a project folder.
 
         D-07/D-02 flow: no page open → no-op (the action is disabled too);
-        a clean session flashes "No changes to save." and writes nothing;
-        otherwise flush the current page, then save — routing through the
+        a fully clean session (no dirty page AND every ``<stem>.mas`` present)
+        flashes "No changes to save." and writes nothing; otherwise flush the
+        current page, then save INCREMENTALLY (quick-260826-vhh): only pages
+        that are dirty or missing their ``<stem>.mas`` are rebuilt and
+        rewritten (:func:`project_io.save_project_incremental`; the manifest
+        always lists the FULL session), while clean pages stay byte-identical
+        on disk. ``force_as`` (Save As…) writes EVERY page into the chosen
+        folder, exactly like the legacy full save. Routing goes through the
         Save As… folder dialog when ``force_as`` or the session has no
-        project dir yet. The disk write is core's
-        :func:`project_io.save_project` (the only disk boundary);
-        an OSError surfaces the save-failure copy (T-05-12) and the in-memory
-        session is untouched. quick-260824-pqn: an UNEXPECTED exception in
-        the pre-write phase (page flush / folder dialog / ``build_page_entries``
-        serialization) surfaces the same copy + stray-folder cleanup instead
-        of dying silently inside the Qt slot (T-QKN-02/T-QKN-03). On success:
-        dirty cleared, project dir/name
+        project dir yet. An OSError surfaces the save-failure copy (T-05-12)
+        and the in-memory session is untouched. quick-260824-pqn: an
+        UNEXPECTED exception in the pre-write phase (page flush / folder
+        dialog / ``build_page_entries`` serialization) surfaces the same copy
+        + stray-folder cleanup instead of dying silently inside the Qt slot
+        (T-QKN-02/T-QKN-03). On success: dirty cleared, project dir/name
         recorded, Recent Projects updated, title refreshed (no ``*``), and
-        the "Saved project …" transient shows. WR-01: when the dialog
-        accepted a folder this save pre-created, an abort before/at the
-        write (duplicate stems, no resolvable page source, save OSError)
-        removes the empty stray folder best-effort.
+        the "Saved project …" transient shows both totals (N pages,
+        M written). WR-01: when the dialog accepted a folder this save
+        pre-created, an abort before/at the write (duplicate stems, no
+        resolvable page source, save OSError) removes the empty stray folder
+        best-effort.
 
         :return: True when the project was written (or there was nothing to
             save); False when the save was aborted (cancelled folder dialog)
@@ -2567,8 +2592,15 @@ class MainWindow(QMainWindow):
         if self._current_page_index() is None:
             return False
         if not force_as and not self._session_dirty():
-            self._show_transient_status("No changes to save.")
-            return True
+            # quick-260826-vhh: a CLEAN session normally means "nothing to
+            # save" — unless a listed ``<stem>.mas`` vanished from the
+            # project folder, in which case the missing-file eligibility
+            # resurrects exactly those pages below.
+            if self._project_dir is None or not self._eligible_save_pages(
+                self._project_dir
+            ):
+                self._show_transient_status("No changes to save.")
+                return True
 
         # quick-260824-pqn (T-QKN-02/T-QKN-03): the ENTIRE pre-write phase —
         # current-page flush, folder dialog, name derivation, and the
@@ -2598,13 +2630,27 @@ class MainWindow(QMainWindow):
             else:
                 name = self.image_files[0].path.parent.name
 
-            for idx, imf in enumerate(self.image_files):
+            # quick-260826-vhh — classify BEFORE building (the existence
+            # checks need the FINAL directory, so this runs after the
+            # dialog): only dirty pages / pages missing their ``.mas`` are
+            # rebuilt. ``force_as`` writes every page (legacy Save As
+            # semantics). Clean pages with a present ``.mas`` cost nothing —
+            # no sha256, no PNG encode, no LZMA.
+            if force_as or project_dir is None:
+                eligible = list(range(len(self.image_files)))
+            else:
+                eligible = self._eligible_save_pages(project_dir)
+
+            unresolved_names: list[str] = []
+            for idx in eligible:
+                imf = self.image_files[idx]
                 image_rgb = self._page_image_source(idx)
                 if image_rgb is None:
                     logger.warning(
                         f"Save Project: page '{imf.path.name}' has no image source"
                         " — skipped"
                     )
+                    unresolved_names.append(imf.path.name)
                     continue
                 mask_bin = None
                 if imf.mask is not None and not imf.mask.isNull():
@@ -2648,8 +2694,10 @@ class MainWindow(QMainWindow):
         # ``<stem>.mas`` — the second overwrites the first and the manifest
         # lists two pages pointing at one file. Surface a save error listing
         # the colliding stems BEFORE writing anything (the dirty flags stay
-        # untouched).
-        stems = [stem for stem, _ in page_files]
+        # untouched). quick-260826-vhh: this runs over the FULL session stem
+        # list — including skipped/clean pages — so a collision where only
+        # ONE of the pair is dirty still trips the guard.
+        stems = [imf.path.stem for imf in self.image_files]
         if len(stems) != len(set(stems)):
             duplicates = sorted({s for s in stems if stems.count(s) > 1})
             logger.error(f"Save Project failed: duplicate page stems {duplicates}")
@@ -2664,13 +2712,40 @@ class MainWindow(QMainWindow):
                 self._discard_stray_project_dir(project_dir)
             return False
 
-        # WR-02: every page's image source unresolvable (e.g. originals
-        # deleted before a folder session's first save) would write a 0-page
-        # manifest and then clear the dirty flags — the user believes the
-        # session was saved, but reopening fails with "project contains no
-        # pages". Abort with the save-failure copy BEFORE writing; the dirty
-        # flags stay untouched so the session remains recoverable.
+        # WR-02 (quick-260826-vhh): an ELIGIBLE page whose image source is
+        # unresolvable aborts the whole save BEFORE writing anything. The
+        # legacy skip-and-continue would let the success tail clear that
+        # page's dirty flag while its edits were never persisted. Same
+        # save-failure copy as before; the dirty flags stay untouched so the
+        # session remains recoverable.
+        if unresolved_names:
+            logger.error(
+                "Save Project failed: no resolvable image source for"
+                f" {sorted(set(unresolved_names))}"
+            )
+            QMessageBox.critical(
+                self,
+                f"Couldn't save '{name}'.",
+                "No page could be read for saving. Check that the source"
+                " images still exist and see the log for details.",
+            )
+            if created_default:
+                self._discard_stray_project_dir(project_dir)
+            return False
+
+        all_stems = [imf.path.stem for imf in self.image_files]
         if not page_files:
+            # Defensive (quick-260826-vhh): mathematically unreachable — a
+            # non-force_as save only reaches here through the dirty gate, and
+            # a dirty page is by definition eligible, so the eligible set was
+            # empty ONLY if some state-machine invariant broke. Do not mask
+            # it: log loudly and rewrite the manifest-only shape anyway so
+            # the on-disk project stays internally consistent.
+            logger.error(
+                "Save Project: eligible-page set empty while the save"
+                " proceeded (state inconsistency) — rewriting the manifest"
+                " only"
+            )
             logger.error(
                 "Save Project failed: no page has a resolvable image source"
             )
@@ -2685,7 +2760,12 @@ class MainWindow(QMainWindow):
             return False
 
         try:
-            project_io.save_project(project_dir, name, page_files)
+            # quick-260826-vhh: incremental write — the manifest lists ALL
+            # pages, but only the rebuilt subset's ``.mas`` files are
+            # rewritten (clean pages stay byte-identical on disk).
+            project_io.save_project_incremental(
+                project_dir, name, page_files, all_stems
+            )
         except OSError as exc:
             # T-05-12: the save-failure copy; the traceback goes to loguru
             # (the in-memory session is untouched).
@@ -2706,7 +2786,8 @@ class MainWindow(QMainWindow):
         self._add_recent_project(project_dir)
         self._update_title()
         self._show_transient_status(
-            f"Saved project '{name}' ({len(page_files)} pages)."
+            f"Saved project '{name}' ({len(all_stems)} pages,"
+            f" {len(page_files)} written)."
         )
         return True
 
