@@ -2084,7 +2084,18 @@ class MainWindow(QMainWindow):
             # Pitfall 2: the .copy() detaches the embedded numpy before the
             # QImage build (canvas.py:658-663); decode-time .convert("RGB")
             # already guarantees the (H,W,3) uint8 contract.
-            self.canvas.set_image_from_numpy(imf.current_image.copy())
+            # D-06 (quick 260826-u9m): when the persisted original verifies,
+            # ITS decoded pixels seed the Show Original baseline — P shows
+            # the PRISTINE on-disk file (and after reopen + a NEW inpaint
+            # still does: inpaint must NOT rebaseline; only a geometry op's
+            # rebaseline_original() may move the baseline mid-session,
+            # D-14 unchanged). The fallback keeps today's behavior (P shows
+            # the saved state) for unverified/unreadable/dims-mismatched
+            # pages, so _refresh_action_states' gating needs no changes.
+            baseline = self._decode_original_reference(imf)
+            self.canvas.set_image_from_numpy_page(
+                imf.current_image.copy(), baseline
+            )
             if imf.mask is None or imf.mask.isNull():
                 # The path-based load resets the mask to a fresh transparent
                 # one (set_image); mirror it here so a stale overlay from the
@@ -2804,6 +2815,53 @@ class MainWindow(QMainWindow):
             return "page"
         return None
 
+    def _decode_original_reference(self, imf: ImageFile) -> np.ndarray | None:
+        """Decode the verified D-06 original reference from disk (P pixels).
+
+        Quick 260826-u9m: Show Original must display the PRISTINE on-disk
+        original when the persisted reference verifies, never the saved
+        (already inpainted/edited) embedded image. Returns the decoded
+        ``(H, W, 3)`` uint8 array, or ``None`` whenever the caller must fall
+        back to today's in-memory embedded capture: the ref is unverified,
+        ``current_image`` is absent (no expected dims), the path does not
+        resolve, the file fails to decode, or the decoded dims mismatch.
+
+        Dims guard rationale: a geometry-altered page's pristine file
+        legitimately mismatches the embedded dims; swapping a different-size
+        pixmap onto ``image_item`` during a P toggle would desync sceneRect /
+        mask-overlay dims, so such references degrade to the in-memory
+        fallback like unreadable ones do.
+
+        Perf note: this synchronous single-file decode runs PER DISPLAYED
+        PAGE only (lazy — only the displayed page decodes, never
+        eager-decoding all pages), with direct precedent in
+        ``set_image_from_path``'s decode-per-switch.
+
+        The sha256 gate is NOT re-run here — ``verify_original`` already
+        gated load time (a mid-session corruption surfaces as an OSError ->
+        graceful None fallback, which is acceptable).
+        """
+        if not imf.original_verified or imf.current_image is None:
+            return None
+        try:
+            resolved = Path(imf.path).resolve()
+        except (OSError, ValueError):
+            return None
+        try:
+            # Same decode contract as the embedded-blob decode below: the
+            # .copy() detaches AND guarantees contiguous C-order (Pitfall 2)
+            # — show_original builds an RGB888 QImage straight off arr.data.
+            decoded = np.asarray(Image.open(resolved).convert("RGB")).copy()
+        except (OSError, ValueError, Image.DecompressionBombError):
+            return None
+        if decoded.shape[:2] != imf.current_image.shape[:2]:
+            # A geometry-altered page's pristine file legitimately mismatches
+            # the embedded dims — swapping a different-size pixmap onto
+            # image_item during a P toggle would desync sceneRect / mask
+            # overlay dims. Degrade to the in-memory fallback.
+            return None
+        return decoded
+
     def _build_image_file_from_parsed(
         self, parsed: dict, fallback_path: Path
     ) -> ImageFile:
@@ -2899,8 +2957,14 @@ class MainWindow(QMainWindow):
         has none — the stale overlay must not linger), and the boxes via
         ``set_boxes`` split by origin, with the ``_suppress_boxes_push`` guard
         (WR-05: a pure restore must not push).
+
+        Quick 260826-u9m (D-06): when the persisted original reference
+        verifies, ITS decoded disk pixels seed the Show Original baseline via
+        ``set_image_from_numpy_page``; unverified/unreadable/dims-mismatched
+        pages keep today's embedded-capture fallback.
         """
-        self.canvas.set_image_from_numpy(imf.current_image.copy())
+        baseline = self._decode_original_reference(imf)
+        self.canvas.set_image_from_numpy_page(imf.current_image.copy(), baseline)
         if imf.has_mask_planes():
             # Phase 8 (plan 08-02): restore the three planes when the page
             # carries plane data (the on_page_selected Step-4 mirror for the

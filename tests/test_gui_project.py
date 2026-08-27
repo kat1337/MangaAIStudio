@@ -759,6 +759,168 @@ def test_show_original_gating(qtbot, tmp_path, monkeypatch) -> None:
 
 
 # ===========================================================================
+# Quick 260826-u9m — Show Original references the D-06 ORIGINAL ON DISK
+# ===========================================================================
+#
+# Before this fix, Show Original's baseline was seeded by capture-if-None
+# from the SAVED embedded image — so after Save Project + reopen, P showed
+# the already-inpainted/edited result as the "original". Now the verified
+# D-06 disk reference is decoded lazily per displayed page; unverified /
+# unreadable / dims-mismatched pages keep today's fallback; and a page
+# switch can never inherit a foreign baseline or stale toggle flag.
+
+
+def _seed_two_tone(
+    path: Path, top: tuple[int, int, int], bottom: tuple[int, int, int],
+    size: int = 60,
+) -> np.ndarray:
+    """Overwrite ``path`` with a non-uniform two-band PNG and return the
+    pristine pixels.
+
+    The shared ``_make_pages`` fixtures produce SOLID-color pages — on those,
+    flipud/crop edits are pixel identities and every baseline-vs-display
+    assertion degenerates. Two horizontal bands keep flipud a REAL change
+    while staying deterministic.
+    """
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    arr[: size // 2] = top
+    arr[size // 2 :] = bottom
+    PILImage.fromarray(arr).save(path)
+    return arr
+
+
+@pytest.mark.gui
+def test_show_original_uses_persisted_original_after_reopen(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """After Save Project + reopen, P shows the PRISTINE ON-DISK original.
+
+    The saved embed carries an EDITED page (flipud — dims-preserving); the
+    reopened session must decode original.json's verified file for the Show
+    Original baseline while still DISPLAYING the edited embed, and the
+    toggle restores the saved state when switched off.
+    """
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    page_01 = chapter / "page_01.png"
+    pristine = _seed_two_tone(page_01, (200, 40, 40), (30, 60, 90))
+
+    # Simulate an edit on the current page: flip preserves the 60x60 dims.
+    # Both slots are set so the save-side current-page flush stays consistent.
+    edited = np.flipud(pristine).copy()
+    window.image_files[0].current_image = edited
+    window.canvas.set_image_from_numpy(edited)
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    # Reopen through the stubbed manifest dialog (test_show_original_gating pattern).
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+
+    assert window2.image_files[0].original_verified is True
+    # The baseline is the PRISTINE DISK pixels — never the flipped embed.
+    assert np.array_equal(window2.canvas._original_image_numpy, pristine)
+    assert not np.array_equal(window2.canvas._original_image_numpy, edited)
+    # The display itself still resumes exactly where the save left off.
+    assert np.array_equal(window2.canvas.get_image_numpy(), edited)
+    # Verified ref + inpaint claim -> the P action is enabled and toggling
+    # swaps between the pristine disk pixels and the saved state.
+    act = window2.action_show_original
+    assert act.isEnabled()
+    window2.canvas.show_original(True)
+    assert np.array_equal(window2.canvas.get_image_numpy(), pristine)
+    window2.canvas.show_original(False)
+    assert np.array_equal(window2.canvas.get_image_numpy(), edited)
+
+
+@pytest.mark.gui
+def test_show_original_dims_mismatch_falls_back_to_embedded(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A geometry-altered page's pristine file mismatches the embed dims:
+    the disk reference degrades to the in-memory fallback (the embed) and
+    open/navigation raise nothing (the dims guard, not a crash)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    page_01 = chapter / "page_01.png"
+    pristine = _seed_two_tone(page_01, (250, 200, 10), (10, 90, 250))
+    cropped = pristine[:, :40].copy()  # square pristine vs 60x40 crop
+
+    # Display the crop through the real seam and recompose the composite at
+    # the cropped dims (validate_meta requires mask dims == image dims).
+    window.image_files[0].current_image = cropped
+    window.canvas.set_image_from_numpy(cropped)
+    window.canvas.recompose_mask()
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+    imf0 = window2.image_files[0]
+    # Sanity: the crop really persisted into the embed.
+    assert imf0.current_image.shape[:2] == (60, 40)
+    assert imf0.original_verified is True
+
+    # The dims guard rejected the pristine disk decode -> the fallback
+    # baseline IS the cropped embed. No exception reached this line.
+    assert np.array_equal(window2.canvas._original_image_numpy, cropped)
+    assert np.array_equal(window2.canvas.get_image_numpy(), cropped)
+    # The gating contract is unchanged: the action stays enabled.
+    assert window2.action_show_original.isEnabled()
+
+
+@pytest.mark.gui
+def test_page_switch_seeds_baseline_per_page_no_bleed(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Each page's baseline comes from ITS OWN pristine file — a page switch
+    never carries the outgoing page's baseline or a stale toggle flag
+    (end-to-end lock of the cross-page bleed fix)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    page_01, page_02 = chapter / "page_01.png", chapter / "page_02.png"
+    # Non-uniform per-page fixtures (see _seed_two_tone): distinct across
+    # pages AND genuinely altered by the flipud edits.
+    p1_pristine = _seed_two_tone(page_01, (180, 20, 20), (20, 60, 220))
+    p2_pristine = _seed_two_tone(page_02, (10, 140, 30), (240, 200, 10))
+    assert not np.array_equal(p1_pristine, p2_pristine)  # distinct per-page colors
+
+    # Give each page its own distinct edited embed before saving.
+    p1_edit = np.flipud(p1_pristine).copy()
+    p2_edit = np.fliplr(p2_pristine).copy()
+    window.image_files[0].current_image = p1_edit
+    window.canvas.set_image_from_numpy(p1_edit)  # page 1 is current: flush-consistent
+    window.image_files[1].current_image = p2_edit  # non-current: survives untouched
+    _dirty(window)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch)
+
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window2._open_project()
+    QApplication.processEvents()
+    # Page 1 opened first: its pristine file seeds the baseline.
+    assert np.array_equal(window2.canvas._original_image_numpy, p1_pristine)
+
+    # Navigate to page 2 through the REAL seam (sidebar selection entry).
+    second = window2.image_files[1]
+    window2.file_table.select_path(second.path)
+    window2.on_page_selected(second.path)
+    QApplication.processEvents()
+
+    assert np.array_equal(window2.canvas._original_image_numpy, p2_pristine)
+    assert not np.array_equal(window2.canvas._original_image_numpy, p1_pristine)
+    assert window2.canvas._showing_original is False
+    assert np.array_equal(window2.canvas.get_image_numpy(), p2_edit)
+
+
+# ===========================================================================
 # Plan 05-10 — G-05-1/G-05-2 gap closure (UAT test 1 CR-01 repro)
 # ===========================================================================
 # G-05-1: QAction.triggered emits the checked bool as its first argument;
