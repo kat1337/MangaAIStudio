@@ -173,6 +173,20 @@ class MainWindow(QMainWindow):
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
 
+        # quick-260826-vhh (T-QHH-01/T-QHH-02/T-QHH-03): async-save race
+        # infrastructure. ``_page_edit_serials`` bumps on every real edit
+        # event per page index — a save captures the serials at dispatch and
+        # the completion clears a dirty flag ONLY when the serial is
+        # unchanged (an edit made mid-save keeps that page dirty).
+        # ``_session_generation`` bumps wherever ``image_files`` is replaced
+        # wholesale — a save captures it too and a mismatched completion
+        # bails without touching the new session.
+        # ``_save_in_flight`` distinguishes a dispatched-but-unresolved save
+        # from any other op in the shared cleanup path.
+        self._page_edit_serials: dict[int, int] = {}
+        self._session_generation = 0
+        self._save_in_flight = False
+
         # D-08/D-09 (plan 04): True specifically while a BATCH worker runs.
         # Distinct from ``_op_running`` so the Cancel Batch action can gate on
         # it alone (Cancel is only meaningful during a batch, not during a
@@ -1881,6 +1895,9 @@ class MainWindow(QMainWindow):
         # original_verified=True (consumed by plan 05-06's Show Original
         # gating; .mas-loaded pages set it per the checksum rule instead).
         self.image_files = [ImageFile(path=p, original_verified=True) for p in ordered]
+        # quick-260826-vhh (T-QHH-03): a new session invalidates any
+        # in-flight async-save completion for the previous one.
+        self._session_generation += 1
         # Cross-session bleed fix (quick 260826-1by): ``None`` retires the
         # OUTGOING index so the explicitly-called on_page_selected below can
         # never persist the previous session's canvas mask/planes into this
@@ -2373,7 +2390,20 @@ class MainWindow(QMainWindow):
         idx = self._current_page_index()
         if idx is not None and 0 <= idx < len(self.image_files):
             self.image_files[idx].dirty = True
+            # quick-260826-vhh (T-QHH-02): every real edit event bumps the
+            # page's edit serial so an async-save completion captured earlier
+            # can tell — and never clear a flag re-dirtied mid-save.
+            self._bump_page_serial(idx)
         self._update_title()
+
+    def _bump_page_serial(self, idx: int) -> None:
+        """Bump ONE page's edit serial (the single choke point for T-QHH-02).
+
+        Every dirty-marking site routes here (directly or alongside a direct
+        ``dirty = True``) so the async-save completion's serial comparison
+        sees exactly the pages whose content changed since its dispatch.
+        """
+        self._page_edit_serials[idx] = self._page_edit_serials.get(idx, 0) + 1
 
     def _snapshot_current_page(self) -> None:
         """Flush the live canvas state into the outgoing ImageFile (save side).
@@ -2558,38 +2588,52 @@ class MainWindow(QMainWindow):
         return eligible
 
     def _save_project(self, force_as: bool = False) -> bool:
-        """Save Project… (Ctrl+S) — write the session as a project folder.
+        """Save Project… (Ctrl+S) — persist the session NON-BLOCKINGLY
+        (quick-260826-vhh).
 
-        D-07/D-02 flow: no page open → no-op (the action is disabled too);
-        a fully clean session (no dirty page AND every ``<stem>.mas`` present)
-        flashes "No changes to save." and writes nothing; otherwise flush the
-        current page, then save INCREMENTALLY (quick-260826-vhh): only pages
-        that are dirty or missing their ``<stem>.mas`` are rebuilt and
-        rewritten (:func:`project_io.save_project_incremental`; the manifest
-        always lists the FULL session), while clean pages stay byte-identical
-        on disk. ``force_as`` (Save As…) writes EVERY page into the chosen
-        folder, exactly like the legacy full save. Routing goes through the
-        Save As… folder dialog when ``force_as`` or the session has no
-        project dir yet. An OSError surfaces the save-failure copy (T-05-12)
-        and the in-memory session is untouched. quick-260824-pqn: an
-        UNEXPECTED exception in the pre-write phase (page flush / folder
-        dialog / ``build_page_entries`` serialization) surfaces the same copy
-        + stray-folder cleanup instead of dying silently inside the Qt slot
-        (T-QKN-02/T-QKN-03). On success: dirty cleared, project dir/name
-        recorded, Recent Projects updated, title refreshed (no ``*``), and
-        the "Saved project …" transient shows both totals (N pages,
-        M written). WR-01: when the dialog accepted a folder this save
-        pre-created, an abort before/at the write (duplicate stems, no
-        resolvable page source, save OSError) removes the empty stray folder
-        best-effort.
+        PREPARE (this GUI thread, fast): guards, folder dialog, eligibility
+        (Task 2 rule: dirty OR missing ``<stem>.mas``; ``force_as`` takes
+        everything), the WR-03 duplicate-stem scan over the FULL stem list,
+        WR-02 resolution of every ELIGIBLE page's image source, and the
+        T-QHH-01 IMMUTABLE per-page payload snapshot (ndarray ``.copy()`` /
+        detached PageBoxes / plain values only — QImage-touching work never
+        leaves this thread, and NO sha256/PNG/LZMA happens here).
 
-        :return: True when the project was written (or there was nothing to
-            save); False when the save was aborted (cancelled folder dialog)
-            or failed (WR-01: the Unsaved-Changes gate keys on this — a
-            failed save must abort the session-replacing action, even when a
-            project dir already exists from a previous save).
+        WRITE (a pooled :class:`Worker(QRunnable)`): per-page sha256 +
+        ``build_page_entries`` + :func:`project_io.save_project_incremental`
+        (full manifest, rewritten subset's ``.mas``) run OFF the GUI thread.
+        OSError/ProjectFormatError propagate naturally — Worker converts them
+        to the typed error signal.
+
+        COMPLETION lands back on the Qt main thread: ``result`` -> T-QHH-03
+        generation guard (a completion for a swapped-out session bails,
+        leaving its on-disk artifacts internally consistent), then T-QHH-02
+        serial-guarded dirty clearing (a page edited while the save ran keeps
+        its flag and rides the NEXT save), project dir/name recording, Recent
+        Projects, title refresh, and the transient
+        ``Saved project 'X' (N pages, M written).``. ``error`` -> the full
+        traceback goes to the log, the EXISTING T-05-12 critical copy shows,
+        ZERO flags are touched (failure keeps the session recoverable), and
+        created-default stray-folder cleanup is honored exactly as the
+        synchronous path did.
+
+        Clean-session flash, cancelled-dialog, duplicate-stem, unresolvable-
+        source and pre-write-exception behaviors are UNCHANGED and still
+        detected synchronously. Mid-save destructive actions are blocked by
+        their own ``_op_running`` sentinels; closeEvent prompts identically
+        for a running save as for detect/inpaint (interrupted writes stay
+        corruption-free via ``_atomic_write_bytes``).
+
+        :return: True = nothing-to-do OR preparation succeeded and the save
+            is RUNNING off-thread; False = aborted or failed during
+            PREPARATION (WR-01: the Unsaved-Changes gate keys on this — a
+            preparation failure must abort the session-replacing action).
         """
         if self._current_page_index() is None:
+            return False
+        if self._op_running:
+            # Mid-op re-entrancy (free lockout parity with detect/inpaint):
+            # the worker pool + action gating already belong to another op.
             return False
         if not force_as and not self._session_dirty():
             # quick-260826-vhh: a CLEAN session normally means "nothing to
@@ -2602,17 +2646,22 @@ class MainWindow(QMainWindow):
                 self._show_transient_status("No changes to save.")
                 return True
 
-        # quick-260824-pqn (T-QKN-02/T-QKN-03): the ENTIRE pre-write phase —
-        # current-page flush, folder dialog, name derivation, and the
-        # page_files build loop (which runs ``build_page_entries`` ->
-        # ``pagebox_to_json`` -> ``json.dumps``) — is wrapped so an UNEXPECTED
+        # quick-260824-pqn (T-QKN-02/T-QKN-03): the ENTIRE PREPARE phase —
+        # current-page flush, folder dialog, name derivation, eligibility,
+        # and the T-QHH-01 payload snapshot — is wrapped so an UNEXPECTED
         # exception surfaces the save-failure dialog + stray-folder cleanup
-        # instead of dying silently inside this Qt slot (the symptom class:
-        # dialog-accepted folder stays empty, no error UI).
+        # instead of dying silently inside this Qt slot.
         created_default = False
         project_dir = self._project_dir
         name = self._project_name or "project"
-        page_files: list[tuple[str, dict[str, bytes]]] = []
+        payloads: list[dict] = []
+        eligible: list[int] = []
+        unresolved_names: list[str] = []
+        all_stems = [imf.path.stem for imf in self.image_files]
+        total_pages = len(all_stems)
+        # T-QHH-02/T-QHH-03 tokens captured at dispatch-time scope.
+        session_gen = self._session_generation
+        snapshot_serials: dict[int, int] = {}
         try:
             self._snapshot_current_page()
 
@@ -2641,7 +2690,13 @@ class MainWindow(QMainWindow):
             else:
                 eligible = self._eligible_save_pages(project_dir)
 
-            unresolved_names: list[str] = []
+            # T-QHH-02: capture each eligible page's edit serial NOW so the
+            # completion can tell whether the page was edited while the save
+            # ran (a re-bumped serial keeps its dirty flag).
+            snapshot_serials = {
+                idx: self._page_edit_serials.get(idx, 0) for idx in eligible
+            }
+
             for idx in eligible:
                 imf = self.image_files[idx]
                 image_rgb = self._page_image_source(idx)
@@ -2655,27 +2710,23 @@ class MainWindow(QMainWindow):
                 mask_bin = None
                 if imf.mask is not None and not imf.mask.isNull():
                     mask_bin = mask_to_numpy_binary(imf.mask)
-                original_sha = ""
-                if imf.path.is_file():
-                    try:
-                        original_sha = project_io.sha256_file(imf.path)
-                    except OSError:
-                        original_sha = ""
-                page_files.append(
-                    (
-                        imf.path.stem,
-                        project_io.build_page_entries(
-                            {
-                                "boxes": imf.boxes if imf.boxes is not None else [],
-                                "image_rgb": image_rgb,
-                                "mask_bin": mask_bin,
-                                "geometry_altered": imf.geometry_altered,
-                                "original_path": imf.path,
-                                "original_sha256": original_sha,
-                                **self._page_plane_keys(imf, image_rgb.shape[:2]),
-                            }
+                planes = self._page_plane_keys(imf, image_rgb.shape[:2])
+                # T-QHH-01 immutable snapshot: ndarray .copy() / fresh
+                # detached PageBox copies / plain values ONLY cross the
+                # thread boundary — the worker never touches Qt state, and
+                # later GUI mutations cannot mutate what it serializes.
+                payloads.append(
+                    {
+                        "stem": imf.path.stem,
+                        "image_rgb": np.array(image_rgb, copy=True),
+                        "mask_bin": (
+                            None if mask_bin is None else np.array(mask_bin, copy=True)
                         ),
-                    )
+                        "boxes": [b.copy() for b in imf.boxes] if imf.boxes else [],
+                        "geometry_altered": imf.geometry_altered,
+                        "original_path": Path(imf.path),
+                        "planes": {k: v.copy() for k, v in planes.items()},
+                    }
                 )
         except Exception as exc:
             logger.error(f"Save Project failed: {exc}", exc_info=True)
@@ -2733,63 +2784,191 @@ class MainWindow(QMainWindow):
                 self._discard_stray_project_dir(project_dir)
             return False
 
-        all_stems = [imf.path.stem for imf in self.image_files]
-        if not page_files:
+        if not payloads:
             # Defensive (quick-260826-vhh): mathematically unreachable — a
             # non-force_as save only reaches here through the dirty gate, and
-            # a dirty page is by definition eligible, so the eligible set was
-            # empty ONLY if some state-machine invariant broke. Do not mask
-            # it: log loudly and rewrite the manifest-only shape anyway so
-            # the on-disk project stays internally consistent.
+            # a dirty page is by definition eligible, so an empty payload set
+            # means some state-machine invariant broke. Log loudly and
+            # proceed with a manifest-only incremental write rather than
+            # masking the inconsistency.
             logger.error(
                 "Save Project: eligible-page set empty while the save"
                 " proceeded (state inconsistency) — rewriting the manifest"
                 " only"
             )
-            logger.error(
-                "Save Project failed: no page has a resolvable image source"
-            )
-            QMessageBox.critical(
-                self,
-                f"Couldn't save '{name}'.",
-                "No page could be read for saving. Check that the source"
-                " images still exist and see the log for details.",
-            )
-            if created_default:
-                self._discard_stray_project_dir(project_dir)
-            return False
 
-        try:
-            # quick-260826-vhh: incremental write — the manifest lists ALL
-            # pages, but only the rebuilt subset's ``.mas`` files are
-            # rewritten (clean pages stay byte-identical on disk).
-            project_io.save_project_incremental(
-                project_dir, name, page_files, all_stems
-            )
-        except OSError as exc:
-            # T-05-12: the save-failure copy; the traceback goes to loguru
-            # (the in-memory session is untouched).
-            logger.error(f"Save Project failed: {exc}", exc_info=True)
-            QMessageBox.critical(
-                self,
-                f"Couldn't save '{name}'.",
-                "Check that the folder is writable and see the log for details.",
-            )
-            if created_default:
-                self._discard_stray_project_dir(project_dir)
-            return False
-
-        self._project_dir = project_dir
-        self._project_name = name
-        for imf in self.image_files:
-            imf.dirty = False
-        self._add_recent_project(project_dir)
-        self._update_title()
-        self._show_transient_status(
-            f"Saved project '{name}' ({len(all_stems)} pages,"
-            f" {len(page_files)} written)."
+        # ---- WRITE PHASE DISPATCH ----
+        # The GUI thread's work is DONE (frozen payloads; nothing expensive
+        # here). build_page_entries + LZMA + disk writes run on the pooled
+        # Worker; results land back through WorkerSignals on THIS thread.
+        worker = Worker(
+            self._run_save_task,
+            payloads,
+            project_dir,
+            name,
+            all_stems,
+            no_progress_callback=True,
         )
+        # RECEIVER-CONTEXT RULE (probed, quick-260826-vhh): a pooled Worker is
+        # auto-deleted the moment run() returns; cross-thread queued
+        # deliveries addressed to receiver-less callables (lambdas/partials
+        # connected to its signals) reference the SENDER context and get
+        # silently dropped when that teardown wins the race — bound methods
+        # of THIS living window deliver reliably (every vendored handler does
+        # exactly this). The per-dispatch tokens therefore live on SELF and
+        # the handlers are plain bound methods.
+        self._save_op_ctx = {
+            "generation": session_gen,
+            "serials": dict(snapshot_serials),
+            "eligible": list(eligible),
+            "project_dir": project_dir,
+            "name": name,
+            "total_pages": total_pages,
+            "created_default": created_default,
+        }
+        worker.signals.result.connect(self._on_save_finished)
+        worker.signals.error.connect(self._on_save_error)
+        # Vendored-contract tolerance: finished fires on EVERY termination —
+        # including shutdown races where neither result nor error could run.
+        worker.signals.finished.connect(self._on_save_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._save_in_flight = True
+        self._refresh_action_states()
+        # Indeterminate busy feedback — chapters finish well under a minute;
+        # percent math would be noise over this horizon.
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Saving\u2026")
+        QThreadPool.globalInstance().start(worker)
         return True
+
+    def _run_save_task(
+        self,
+        payloads: list[dict],
+        project_dir: Path,
+        name: str,
+        all_stems: list[str],
+    ) -> dict:
+        """Worker task (OFF the GUI thread): entries-build + disk write.
+
+        Touches ONLY its frozen arguments + ``project_io`` (T-QHH-01): the
+        per-page sha256 is computed HERE against each payload's own source
+        path, then ``build_page_entries`` projects the snapshot into ``.mas``
+        entries and ONE :func:`project_io.save_project_incremental` call
+        writes the full manifest + the rebuilt subset of page files.
+        OSError / ProjectFormatError propagate naturally — Worker converts
+        them to the typed error signal carrying the traceback.
+        """
+        rebuilt: list[tuple[str, dict[str, bytes]]] = []
+        for payload in payloads:
+            original_sha = ""
+            if payload["original_path"].is_file():
+                try:
+                    original_sha = project_io.sha256_file(payload["original_path"])
+                except OSError:
+                    original_sha = ""
+            rebuilt.append(
+                (
+                    payload["stem"],
+                    project_io.build_page_entries(
+                        {
+                            "boxes": payload["boxes"],
+                            "image_rgb": payload["image_rgb"],
+                            "mask_bin": payload["mask_bin"],
+                            "geometry_altered": payload["geometry_altered"],
+                            "original_path": payload["original_path"],
+                            "original_sha256": original_sha,
+                            **payload["planes"],
+                        }
+                    ),
+                )
+            )
+        manifest_path = project_io.save_project_incremental(
+            project_dir, name, rebuilt, all_stems
+        )
+        return {"manifest": str(manifest_path), "written": len(rebuilt)}
+
+    def _on_save_finished(self, result) -> None:
+        """Main-thread completion (bound-method receiver): generation guard +
+        serial-guarded flag clearing + bookkeeping (T-QHH-02/T-QHH-03).
+
+        Per-dispatch tokens come from ``self._save_op_ctx`` (see the
+        RECEIVER-CONTEXT RULE note at dispatch)."""
+        ctx = getattr(self, "_save_op_ctx", {}) or {}
+        generation = ctx.get("generation", 0)
+        serials: dict[int, int] = ctx.get("serials", {})
+        eligible_idx: list[int] = ctx.get("eligible", [])
+        name = ctx.get("name", "project")
+        if generation != self._session_generation:
+            # T-QHH-03: stale completion for a swapped-out session — nothing
+            # UI-side is touched; the worker's on-disk artifacts remain
+            # internally consistent with THEIR manifest.
+            logger.debug(
+                f"Save completion ignored: session generation moved "
+                f"({generation} != {self._session_generation})"
+            )
+            self._finish_save_op()
+            return
+        for idx in eligible_idx:
+            if idx >= len(self.image_files):
+                continue
+            # T-QHH-02 no-lost-changes invariant: clear a flag ONLY when the
+            # page's edit serial is unchanged since dispatch — an edit made
+            # while the save ran re-bumped the serial; that page stays dirty
+            # and rides the NEXT save.
+            if serials.get(idx) == self._page_edit_serials.get(idx, 0):
+                self.image_files[idx].dirty = False
+        self._project_dir = ctx["project_dir"]
+        self._project_name = name
+        self._add_recent_project(ctx["project_dir"])
+        self._update_title()
+        written = len(eligible_idx)
+        if isinstance(result, dict) and isinstance(result.get("written"), int):
+            written = result["written"]
+        self._show_transient_status(
+            f"Saved project '{name}' ({ctx['total_pages']} pages,"
+            f" {written} written)."
+        )
+        self._finish_save_op()
+
+    def _on_save_error(self, worker_error) -> None:
+        """Main-thread failure (bound-method receiver): T-05-12 copy, ZERO
+        flags touched (failure keeps the session recoverable), stray-folder
+        cleanup honored. Tokens from ``self._save_op_ctx``."""
+        import traceback as _tb
+
+        tb_text = "".join(
+            _tb.format_exception(
+                worker_error.exception_type, worker_error.value, worker_error.traceback
+            )
+        )
+        logger.error(f"Save Project failed:\n{tb_text}")
+        QMessageBox.critical(
+            self,
+            f"Couldn't save '{self._save_op_ctx.get('name', 'project')}'.",
+            "Check that the folder is writable and see the log for details.",
+        )
+        if self._save_op_ctx.get("created_default"):
+            self._discard_stray_project_dir(self._save_op_ctx["project_dir"])
+        self._finish_save_op()
+
+    def _on_save_cleanup(self, _args) -> None:
+        """Vendored-contract tolerance: ``finished`` fires on EVERY worker
+        termination, including RuntimeError shutdown races where neither the
+        result nor the error handler could run. Result/error tails already
+        reset via :meth:`_finish_save_op`; this catches the leftover path."""
+        if self._save_in_flight:
+            self._finish_save_op()
+
+    def _finish_save_op(self) -> None:
+        """One shared async-save reset tail — no completion path can forget
+        the progress bar or action states."""
+        self._op_running = False
+        self._save_in_flight = False
+        self.progress_bar.hide()
+        self._refresh_action_states()
 
     def _save_project_as(self) -> None:
         """Save Project As… (Ctrl+Shift+S): choose the folder, then save."""
@@ -3185,6 +3364,9 @@ class MainWindow(QMainWindow):
 
         # ---- session swap (everything above succeeded) ----
         self.image_files = page_files
+        # quick-260826-vhh (T-QHH-03): the swap invalidates any in-flight
+        # async-save completion for the previous session.
+        self._session_generation += 1
         # Cross-session bleed fix (quick 260826-1by): retire the OUTGOING
         # index BEFORE anything can observe the swapped-in list while the
         # canvas still holds prior-session state (D-11 seam rule).
@@ -3229,6 +3411,9 @@ class MainWindow(QMainWindow):
 
         # ---- session swap ----
         self.image_files = [imf]
+        # quick-260826-vhh (T-QHH-03): the swap invalidates any in-flight
+        # async-save completion for the previous session.
+        self._session_generation += 1
         # Cross-session bleed fix (quick 260826-1by): retire the OUTGOING
         # index BEFORE anything can observe the swapped-in list while the
         # canvas still holds prior-session state (D-11 seam rule).
@@ -7468,8 +7653,12 @@ class MainWindow(QMainWindow):
         # masks — the session must be dirty so Close prompts save. Clean-only
         # mode does not dirty (the pre-existing behavior).
         if ok > 0 and self._batch_mode in ("detect", "detect_and_clean"):
-            for imf in self.image_files:
+            for i, imf in enumerate(self.image_files):
                 imf.dirty = True
+                # quick-260826-vhh: route batch marking through the serial
+                # choke point so async-save completion never clears a page
+                # this batch just mutated.
+                self._bump_page_serial(i)
             self._update_title()
         self._refresh_action_states()
 
@@ -7537,8 +7726,10 @@ class MainWindow(QMainWindow):
         # prompt a spurious save, never data loss). Clean-only mode keeps its
         # pre-existing behavior (no dirty marking).
         if batch_mode in ("detect", "detect_and_clean"):
-            for imf in self.image_files:
+            for i, imf in enumerate(self.image_files):
                 imf.dirty = True
+                # quick-260826-vhh: serial choke point (see _on_batch_finished).
+                self._bump_page_serial(i)
             self._update_title()
 
         self._op_running = False
@@ -7742,6 +7933,11 @@ class MainWindow(QMainWindow):
         action is gated in :meth:`_on_quit`, and host/test teardown closes
         must not pop a modal dialog. Cancel aborts the close
         (``event.ignore()``); Save/Discard let it proceed.
+
+        quick-260826-vhh: a running ASYNC SAVE gets identical treatment —
+        there is no special close casing for detect/inpaint and none for
+        saves either; an interrupted worker death stays corruption-free via
+        ``project_io._atomic_write_bytes`` (temp + os.replace backstop).
         """
         if event.spontaneous() and not self._confirm_discard_changes():
             event.ignore()

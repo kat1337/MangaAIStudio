@@ -95,8 +95,23 @@ def _stub_open_dialog(monkeypatch, target: Path | None) -> list:
     return calls
 
 
+def _wait_save_done(qtbot, window: MainWindow, timeout_ms: int = 20000) -> None:
+    """Block until a dispatched async save fully lands (quick-260826-vhh).
+
+    Save completion runs queued on the main thread via WorkerSignals;
+    waiting for ``_op_running`` to drop guarantees the dirty flags / title /
+    status reflect the finished save before assertions run.
+    """
+    qtbot.waitUntil(lambda: not window._op_running, timeout=timeout_ms)
+    QApplication.processEvents()
+
+
 def _save_as(
-    window: MainWindow, target_dir: Path, monkeypatch, isolate_settings: bool = True
+    window: MainWindow,
+    target_dir: Path,
+    monkeypatch,
+    isolate_settings: bool = True,
+    qtbot=None,
 ) -> None:
     """Run the Save As flow with the folder dialog stubbed to ``target_dir``.
 
@@ -104,11 +119,17 @@ def _save_as(
     ``_add_recent_project`` never touches the user's real registry settings
     (``isolate_settings=False`` keeps an already-isolated store, e.g. for
     multi-save Recent Projects tests).
+
+    quick-260826-vhh: saves are NON-BLOCKING — pass ``qtbot`` (every test
+    has it) to block until the dispatched save fully lands; without it the
+    call returns after dispatch and assertions race the worker.
     """
     _stub_dir_dialog(monkeypatch, target_dir)
     if isolate_settings:
         _isolate_settings_any(window, monkeypatch)
     window._save_project(force_as=True)
+    if qtbot is not None:
+        _wait_save_done(qtbot, window)
     QApplication.processEvents()
 
 
@@ -239,7 +260,7 @@ def test_save_project_writes_project_folder(qtbot, tmp_path, monkeypatch) -> Non
     assert window._session_dirty()
 
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     assert (project_dir / "manifest.json").is_file()
     mas_files = sorted(p.name for p in project_dir.glob("*.mas"))
@@ -298,7 +319,7 @@ def test_dirty_title_suffix(qtbot, tmp_path, monkeypatch) -> None:
     assert window.windowTitle().endswith("*")
     assert window.windowTitle() == "Manga AI Studio \u2014 page_01.png*"
 
-    _save_as(window, tmp_path / "chapter.mas-project", monkeypatch)
+    _save_as(window, tmp_path / "chapter.mas-project", monkeypatch, qtbot=qtbot)
     assert not window.windowTitle().endswith("*")
     assert window.windowTitle() == "Manga AI Studio \u2014 chapter \u2014 page_01.png"
 
@@ -316,7 +337,7 @@ def test_open_project_restores_session(qtbot, tmp_path, monkeypatch) -> None:
     _dirty(window)
 
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # Reopen in a fresh window via the manifest path.
     window2 = _make_window(qtbot, tmp_path)
@@ -362,7 +383,7 @@ def test_project_open_hides_empty_state_trio(qtbot, tmp_path, monkeypatch) -> No
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # Fresh window starts on the empty state (the D-09 pre-condition).
     window2 = _make_window(qtbot, tmp_path)
@@ -389,7 +410,7 @@ def test_open_project_populates_all_current_images(qtbot, tmp_path, monkeypatch)
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # Delete page 2's original AFTER saving (D-06 missing-original state).
     (chapter / "page_02.png").unlink()
@@ -415,7 +436,7 @@ def test_open_page_mas_with_sibling_prompt(qtbot, tmp_path, monkeypatch) -> None
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     page_mas = project_dir / "page_01.mas"
     assert page_mas.is_file()
 
@@ -490,7 +511,7 @@ def test_open_verified_original_flag(qtbot, tmp_path, monkeypatch) -> None:
     window.canvas.set_image_from_numpy(alt.copy())
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # Original present + matching -> verified True. The first page displays
     # the EMBEDDED image at open (D-05 resume contract); NAVIGATING back to
@@ -537,7 +558,7 @@ def test_page_navigation_uses_embedded_image_for_missing_original(
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     (chapter / "page_02.png").unlink()  # page 2's original goes missing
 
     window2 = _make_window(qtbot, tmp_path)
@@ -627,6 +648,10 @@ def test_unsaved_changes_prompt_save_discard_cancel(qtbot, tmp_path, monkeypatch
     _stub_messagebox_exec(monkeypatch, role=QMessageBox.ButtonRole.AcceptRole, capture=titles)
     _stub_dir_dialog(monkeypatch, tmp_path / "chapter.mas-project")
     window._on_quit()
+    # quick-260826-vhh: the gate's Save leg returns after DISPATCH (True =
+    # accepted+running); the close proceeds and the async save lands
+    # independently. Wait for the completion before asserting the state.
+    _wait_save_done(qtbot, window)
     assert titles == ["Unsaved Changes"]
     assert not window.isVisible()
     assert window._project_dir == tmp_path / "chapter.mas-project"
@@ -688,7 +713,13 @@ def test_recent_projects_menu(qtbot, tmp_path, monkeypatch) -> None:
     # settings store must persist across saves (no re-isolation).
     for i in range(9):
         _dirty(window)
-        _save_as(window, tmp_path / f"chapter{i}.mas-project", monkeypatch, isolate_settings=False)
+        _save_as(
+            window,
+            tmp_path / f"chapter{i}.mas-project",
+            monkeypatch,
+            isolate_settings=False,
+            qtbot=qtbot,
+        )
     entries = entry_actions()
     assert len(entries) == 8
     assert entries[0].text() == "Project \u2014 chapter8.mas-project"
@@ -724,7 +755,7 @@ def test_show_original_gating(qtbot, tmp_path, monkeypatch) -> None:
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     (chapter / "page_01.png").unlink()  # original goes missing -> unverified
 
     window2 = _make_window(qtbot, tmp_path)
@@ -812,7 +843,7 @@ def test_show_original_uses_persisted_original_after_reopen(
     window.canvas.set_image_from_numpy(edited)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # Reopen through the stubbed manifest dialog (test_show_original_gating pattern).
     window2 = _make_window(qtbot, tmp_path)
@@ -856,7 +887,7 @@ def test_show_original_dims_mismatch_falls_back_to_embedded(
     window.canvas.recompose_mask()
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     window2 = _make_window(qtbot, tmp_path)
     _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
@@ -899,7 +930,7 @@ def test_page_switch_seeds_baseline_per_page_no_bleed(
     window.image_files[1].current_image = p2_edit  # non-current: survives untouched
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     window2 = _make_window(qtbot, tmp_path)
     _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
@@ -945,7 +976,7 @@ def test_open_project_trigger_loads_session(qtbot, tmp_path, monkeypatch) -> Non
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     # A FRESH window on the open side; the dialog returns the manifest path.
     window2 = _make_window(qtbot, tmp_path)
@@ -973,14 +1004,14 @@ def test_save_project_trigger_saves_in_place(qtbot, tmp_path, monkeypatch) -> No
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     assert window._project_dir == project_dir
 
     # Dirty again; capture (and stub) the folder dialog — it must NOT open.
     _dirty(window)
     calls = _stub_dir_dialog(monkeypatch, project_dir)
     window.action_save_project.trigger()
-    QApplication.processEvents()
+    _wait_save_done(qtbot, window)
 
     assert calls == []  # no Save-As dialog for an in-place save
     assert window._project_dir == project_dir
@@ -1114,7 +1145,7 @@ def test_save_with_detected_numpy_payload_writes_files(
     _dirty(window)
 
     project_dir = tmp_path / "detected.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     assert (project_dir / "manifest.json").is_file()
     assert sorted(p.name for p in project_dir.glob("*.mas")) == [
@@ -1127,18 +1158,22 @@ def test_save_with_detected_numpy_payload_writes_files(
 
 
 @pytest.mark.gui
-def test_save_pre_write_exception_shows_dialog_and_cleans_stray(
+def test_save_write_phase_exception_shows_dialog_and_cleans_stray(
     qtbot, tmp_path, monkeypatch
 ) -> None:
-    """T-QKN-02/T-QKN-03: an UNEXPECTED exception during the save pre-write
-    phase surfaces the T-05-12 failure dialog and removes the stray
-    self-created default folder — it must never die silently inside the Qt
-    slot leaving an empty folder behind."""
+    """T-QKN-02/T-QKN-03 (quick-260826-vhh adaptation): an UNEXPECTED
+    exception during the save's WRITE phase (serialization now runs on the
+    pooled Worker) reaches the main thread through the typed error signal,
+    surfaces the T-05-12 failure dialog, and removes the stray self-created
+    default folder — it must never die silently. The DISPATCH itself still
+    reports True per the async contract (preparation succeeded); False
+    remains reserved for preparation failures."""
     chapter = tmp_path / "chapter"
     window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)  # a real edit so "flags untouched" is observable
 
     def _boom(*a, **k):
-        raise RuntimeError("simulated pre-write crash")
+        raise RuntimeError("simulated write-phase crash")
 
     monkeypatch.setattr(
         "manga_ai_studio.core.project_io.build_page_entries", _boom
@@ -1148,12 +1183,14 @@ def test_save_pre_write_exception_shows_dialog_and_cleans_stray(
     criticals = _capture_critical(monkeypatch)
 
     saved = window._save_project(force_as=True)
-    QApplication.processEvents()
+    _wait_save_done(qtbot, window)
 
-    assert saved is False
+    assert saved is True  # dispatch accepted; the FAILURE arrived async
     assert criticals
     assert criticals[0][0].startswith("Couldn't save")
     assert not default.exists()  # WR-01: stray empty folder cleaned up
+    # Failure keeps the session recoverable: flags untouched.
+    assert window._session_dirty()
 
 
 @pytest.mark.gui
@@ -1314,14 +1351,14 @@ def test_incremental_save_rewrites_only_the_dirty_page(
     chapter, window = _open_three_page_session(qtbot, tmp_path)
 
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     b1 = (project_dir / "page_01.mas").read_bytes()
     b2 = (project_dir / "page_02.mas").read_bytes()
     b3 = (project_dir / "page_03.mas").read_bytes()
 
     _dirty_page_idx(window, 1)
     window._save_project()
-    QApplication.processEvents()
+    _wait_save_done(qtbot, window)
 
     manifest = load_project(project_dir / "manifest.json")
     assert [p["name"] for p in manifest["pages"]] == [
@@ -1348,7 +1385,7 @@ def test_incremental_save_builds_only_eligible_pages(
 
     chapter, window = _open_three_page_session(qtbot, tmp_path)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
 
     calls = {"n": 0}
     real = pio_mod.build_page_entries
@@ -1361,7 +1398,7 @@ def test_incremental_save_builds_only_eligible_pages(
 
     _dirty_page_idx(window, 1)
     window._save_project()
-    QApplication.processEvents()
+    _wait_save_done(qtbot, window)
 
     assert calls["n"] == 1
     assert (
@@ -1380,7 +1417,7 @@ def test_missing_mas_page_is_resurrected_by_clean_save(
     flashes 'No changes to save.'"""
     chapter, window = _open_three_page_session(qtbot, tmp_path)
     project_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, project_dir, monkeypatch)
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
     b1 = (project_dir / "page_01.mas").read_bytes()
     b2 = (project_dir / "page_02.mas").read_bytes()
 
@@ -1402,7 +1439,7 @@ def test_missing_mas_page_is_resurrected_by_clean_save(
 
     monkeypatch.setattr(pio_mod, "build_page_entries", _counting)
     window._save_project()
-    QApplication.processEvents()
+    _wait_save_done(qtbot, window)
 
     assert calls["n"] == 1  # only the missing page was rebuilt
     assert (project_dir / "page_03.mas").is_file()
@@ -1420,7 +1457,7 @@ def test_save_as_rewrites_every_page(qtbot, tmp_path, monkeypatch) -> None:
 
     chapter, window = _open_three_page_session(qtbot, tmp_path)
     first_dir = tmp_path / "chapter.mas-project"
-    _save_as(window, first_dir, monkeypatch)
+    _save_as(window, first_dir, monkeypatch, qtbot=qtbot)
 
     calls = {"n": 0}
     real = pio_mod.build_page_entries
@@ -1432,7 +1469,7 @@ def test_save_as_rewrites_every_page(qtbot, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pio_mod, "build_page_entries", _counting)
 
     second_dir = tmp_path / "copy.mas-project"
-    _save_as(window, second_dir, monkeypatch, isolate_settings=False)
+    _save_as(window, second_dir, monkeypatch, isolate_settings=False, qtbot=qtbot)
 
     assert calls["n"] == 3  # every page rebuilt on Save As…
     assert sorted(p.name for p in second_dir.glob("*.mas")) == [
@@ -1507,3 +1544,145 @@ def test_eligible_page_without_source_aborts_whole_save(
     assert "No page could be read for saving." in criticals[0][1]
     assert not any(default.glob("*.mas"))  # NOTHING was written
     assert window.image_files[1].dirty is True
+
+
+# ===========================================================================
+# quick-260826-vhh — non-blocking async save + race-safe dirty handling
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_async_save_returns_immediately_and_races_are_serial_guarded(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """T-QHH-01/T-QHH-02: Ctrl+S dispatches and returns while the worker
+    writes; pages edited DURING the save keep their dirty flags after
+    completion (the serial bumped), while a page untouched since dispatch
+    clears."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    # Two eligible pages for the second save.
+    _dirty_page_idx(window, 0, add_box=False)
+    _dirty_page_idx(window, 1, add_box=False)
+
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    real_task = window._run_save_task
+
+    def slow_task(payloads, pdir_, nm_, stems_):
+        started.set()
+        release.wait(timeout=15)
+        return real_task(payloads, pdir_, nm_, stems_)
+
+    monkeypatch.setattr(window, "_run_save_task", slow_task)
+    returned = []
+    returned.append(window._save_project())
+    assert returned == [True]
+    assert window._op_running  # the save is RUNNING (responsiveness)
+    assert "Saving" in window.status_bar_left.text()
+    qtbot.waitUntil(started.is_set, timeout=10000)
+
+    # Mid-save edits: page 1 is RE-edited (serial re-bump); page 2 gets its
+    # FIRST edit via the documented mutator pattern (direct flag + bump —
+    # exactly what _set_session_dirty does beyond navigation).
+    window._bump_page_serial(1)
+    window.image_files[2].dirty = True
+    window._bump_page_serial(2)
+
+    release.set()
+    _wait_save_done(qtbot, window)
+
+    assert not window._op_running
+    assert window.image_files[0].dirty is False   # unchanged since dispatch -> cleared
+    assert window.image_files[1].dirty is True    # re-dirtied mid-save -> kept
+    assert window.image_files[2].dirty is True    # first edit landed mid-save -> kept
+    # The in-flight write still produced a valid manifest listing all pages.
+    manifest = load_project(project_dir / "manifest.json")
+    assert len(manifest["pages"]) == 3
+
+
+@pytest.mark.gui
+def test_async_save_completion_bails_on_swapped_session(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """T-QHH-03: replacing image_files wholesale (+ generation bump) during a
+    running save makes the completion BAIL without touching the new session;
+    the worker's disk artifacts remain internally consistent."""
+    from manga_ai_studio.core.image_file import ImageFile
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    default = chapter / "chapter.mas-project"
+    gen_before = window._session_generation
+
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    real_task = window._run_save_task
+
+    def slow_task(payloads, pdir_, nm_, stems_):
+        started.set()
+        release.wait(timeout=15)
+        return real_task(payloads, pdir_, nm_, stems_)
+
+    monkeypatch.setattr(window, "_run_save_task", slow_task)
+    _stub_dir_dialog(monkeypatch, default)
+    assert window._save_project(force_as=True) is True
+    qtbot.waitUntil(started.is_set, timeout=10000)
+
+    # Swap the session OUT under the running save.
+    new_imfs = [ImageFile(path=window.image_files[0].path, original_verified=True)]
+    new_imfs[0].dirty = True
+    window.image_files = new_imfs
+    window._session_generation = gen_before + 1
+
+    release.set()
+    _wait_save_done(qtbot, window)
+
+    # The new session's flags are untouched by the stale completion...
+    assert window.image_files[0].dirty is True
+    assert window._project_dir is None  # ...and its bookkeeping never ran
+    # ...while the worker's writes stayed internally consistent on disk.
+    manifest = load_project(default / "manifest.json")
+    assert len(manifest["pages"]) == 3
+
+
+@pytest.mark.gui
+def test_async_save_failure_keeps_flags_and_cleans_stray(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Worker-phase OSError: the T-05-12 critical copy fires, ZERO dirty
+    flags are cleared (the session stays fully recoverable), and the stray
+    self-created default folder is removed."""
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    _dirty_page_idx(window, 0)
+    _dirty_page_idx(window, 1)
+
+    def _boom(*a, **k):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(
+        "manga_ai_studio.core.project_io.save_project_incremental", _boom
+    )
+    default = chapter / "chapter.mas-project"
+    _stub_dir_dialog(monkeypatch, default)
+    criticals = _capture_critical(monkeypatch)
+
+    saved = window._save_project(force_as=True)
+    _wait_save_done(qtbot, window)
+
+    assert saved is True  # dispatch succeeded; the FAILURE arrived async
+    assert criticals
+    assert criticals[0][0] == "Couldn't save 'chapter'."
+    assert (
+        criticals[0][1]
+        == "Check that the folder is writable and see the log for details."
+    )
+    assert not default.exists()  # WR-01 stray-folder cleanup honored
+    assert window._session_dirty()  # ALL flags intact (T-05-12 contract)
+    assert window.image_files[0].dirty and window.image_files[1].dirty
