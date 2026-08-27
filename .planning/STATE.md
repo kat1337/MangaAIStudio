@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-27 — Completed quick task 260826-u9m: Show Original (P) references the verified original on disk after reopen; page displays fully redefine preview state (cross-page baseline bleed fixed); full suite 1169 passed
+Last activity: 2026-08-27 — Completed quick task 260826-vhh: auto-fit growth plateau removed (fills the box past ~88px), outline/glow/shadow UI ranges raised to the model's 256px bound, saves now incremental (dirty/missing pages only) + fully async off the GUI thread (race-safe flag clearing); full suite 1184 passed (1 pre-existing flake: test_no_ghost_after_undo_and_scroll)
 
 ## Performance Metrics
 
@@ -389,6 +389,7 @@ None yet.
 | 260826-09m | Canvas text clipping fix: two-pass measured-surface render in TypesetOverlayItem — full glyphs for any font (Mango regression-tested); D-01 placement preserved | 2026-08-26 | 5f14ce5 | [260826-09m-fix-canvas-text-clipping-for-fonts-whose](./quick/260826-09m-fix-canvas-text-clipping-for-fonts-whose/)
 | 260826-1by | Fix cross-session plane bleed: retire _last_page_index on session swap, dims guard on outgoing plane persistence, unpack ValueError backstop (no more repeated page-switch crashes / dead boxes) | 2026-08-26 | e05a71b | [260826-1by-fix-cross-session-plane-bleed-on-page-se](./quick/260826-1by-fix-cross-session-plane-bleed-on-page-se/)
 | 260826-u9m | Show Original (P) now references the verified original ON DISK after reopen (D-06 pixels decoded lazily + seeded via new set_image_from_numpy_page seam — also fixes cross-page baseline bleed; unverified/dims-mismatch falls back to in-memory) | 2026-08-27 | 1915859 | [260826-u9m-fix-show-original-p-key-to-reference-ori](./quick/260826-u9m-fix-show-original-p-key-to-reference-ori/)
+| 260826-vhh | Caps unbinned for BIG SFX text: auto-fit grows until actual fit (was stalling ~88px via iteration bound), outline/glow/shadow spins raised to the model's 256px bound; saves incremental (dirty/missing .mas pages only) + async off the GUI thread (immutable snapshot, per-page edit serials, session-generation bail, T-05-12 failure contract kept) | 2026-08-27 | 41efbd1 | [260826-vhh-remove-font-effect-size-caps-fix-freezin](./quick/260826-vhh-remove-font-effect-size-caps-fix-freezin/)
 
 ## Deferred Items
 
