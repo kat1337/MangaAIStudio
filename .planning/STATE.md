@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-26 — Completed quick task 260826-09m: two-pass measured render in TypesetOverlayItem — no straight-edge glyph clipping for overshooting fonts (Mango); placement offsets derive from the measured bbox; full suite 1159 passed
+Last activity: 2026-08-26 — Completed quick task 260826-1by: cross-session plane bleed fixed — wrong-page plane persistence blocked, corrupt plane blobs degrade instead of crashing; full suite 1161 passed (1 pre-existing flake)
 
 ## Performance Metrics
 
@@ -387,6 +387,7 @@ None yet.
 | 260825-uzv | Fix dead rotation handle: view-level press dispatch now recognizes RotationHandle — drag-to-rotate arms and commits | 2026-08-25 | 36cbd30 | [260825-uzv-fix-rotation-handle-dead-canvas-view-lev](./quick/260825-uzv-fix-rotation-handle-dead-canvas-view-lev/)
 | 260825-wfy | Rotation drag UX: delta-based preview (fixes double rotation + release snap), rotation-aware boundingRect (fixes straight-edge clipping), font-size cap 200→1024 | 2026-08-25 | bd0c238 | [260825-wfy-fix-rotation-drag-ux-double-rotation-pre](./quick/260825-wfy-fix-rotation-drag-ux-double-rotation-pre/)
 | 260826-09m | Canvas text clipping fix: two-pass measured-surface render in TypesetOverlayItem — full glyphs for any font (Mango regression-tested); D-01 placement preserved | 2026-08-26 | 5f14ce5 | [260826-09m-fix-canvas-text-clipping-for-fonts-whose](./quick/260826-09m-fix-canvas-text-clipping-for-fonts-whose/)
+| 260826-1by | Fix cross-session plane bleed: retire _last_page_index on session swap, dims guard on outgoing plane persistence, unpack ValueError backstop (no more repeated page-switch crashes / dead boxes) | 2026-08-26 | e05a71b | [260826-1by-fix-cross-session-plane-bleed-on-page-se](./quick/260826-1by-fix-cross-session-plane-bleed-on-page-se/)
 
 ## Deferred Items
 
