@@ -11,16 +11,21 @@ no-glow instead of OOMing (T-07-07).
 Pixels are asserted with color-distance tolerance (antialiasing blurs the
 exact ink edges) — never exact equality at edges.
 
-Mechanism note: the plan's Task-2 letter prescribes ``QPainterPath.addText``
-+ ``strokePath`` for the outline; that API crashes the pinned Python 3.14.2
-/ PySide6 6.10.1 stack (fast-fail 0xC0000409 — the exact 07-01 deviation),
-so the outline rides the proven ``QTextCharFormat.setTextOutline`` path
-(horizontal: the layout document; vertical: per-char documents) — same
-LOOK, locked by the pixel assertions below.
+Mechanism note (quick-260827-0id): the outline is an OUTWARD ring around
+the glyphs — a solid outline-color silhouette dilated by the FULL outline
+width painted UNDER the pure fill, never a stroke riding the glyph edge
+(the legacy ``QTextCharFormat.setTextOutline`` centered stroke put half the
+band INSIDE the letterforms — an inline, not an outline, once widths grew
+to SFX scale). The plan's original ``QPainterPath.addText`` +
+``strokePath`` prescription still crashes the pinned Python 3.14.2 /
+PySide6 6.10.1 stack (fast-fail 0xC0000409 — the exact 07-01 deviation),
+so both passes ride the proven QTextDocument glyph mechanism. The
+outward-ring semantics are locked by the pixel probes below.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -114,6 +119,22 @@ def _count_mask(arr: np.ndarray, mask: np.ndarray) -> int:
     return int(np.count_nonzero(mask[:h, :w]))
 
 
+def _eroded_mask(mask: np.ndarray, k: int) -> np.ndarray:
+    """A bool mask eroded by ``k`` px on every side — pure-numpy shift-min.
+
+    The minimum over all (2k+1)^2 shifted views of the mask (a pixel
+    survives only when its whole k-neighborhood is set). Implemented with
+    ``np.pad`` + windowed ANDs — NO scipy (not a project dependency).
+    """
+    h, w = mask.shape
+    padded = np.pad(mask, k, mode="constant", constant_values=False)
+    out = np.ones_like(mask)
+    for dy in range(2 * k + 1):
+        for dx in range(2 * k + 1):
+            out &= padded[dy : dy + h, dx : dx + w]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — outline ring, horizontal
 # ---------------------------------------------------------------------------
@@ -148,9 +169,9 @@ def test_effects_outline_ring_horizontal(qapp) -> None:
     assert _count(img_plain, _OUTLINE, 60) == 0, "width 0 must render NO outline pixels"
 
     # The ring SURROUNDS the glyph: outline pixels exist above/below/left/right
-    # of the fill bbox (a ring, not a blob). The setTextOutline pen straddles
-    # the ink edge (outer half blended under the fill's AA rim), so the
-    # regions straddle the bbox edge rather than sitting strictly outside it.
+    # of the fill bbox (a ring, not a blob). The probe regions straddle the
+    # bbox edge by the AA rim so the assertion holds against the ring's
+    # blended boundary on either mechanism.
     x0, y0, x1, y1 = _fill_bbox(img_plain)
     assert (
         _count(_region(img_ring, x0, y0 - 2, x1, y0 + 1), _OUTLINE, 60) > 0
@@ -385,3 +406,99 @@ def test_effects_vertical_composition(qapp) -> None:
         "the vertical path must render the shadow at +dx/+dy"
     )
     assert _count(img, _FILL, 30) > 20, "the vertical fill must render"
+
+
+# ---------------------------------------------------------------------------
+# Tests 7-9 — OUTWARD ring semantics (quick-260827-0id): the visible outline
+# band is width_px DEEP OUTSIDE the plain-fill bbox and the glyph interior
+# stays PURE fill at any width (the two-pass silhouette-under-fill contract;
+# the legacy centered stroke rendered half the band INSIDE the letterforms —
+# an inline, and let stacked neighbors chew each other's fill).
+# ---------------------------------------------------------------------------
+
+
+def _outline_probe_style() -> TextStyle:
+    """The pinned W=8 probe style shared by the outward-ring tests."""
+    return TextStyle(
+        font_size_px=64.0,
+        auto_fit=False,
+        color="#e8e8ea",  # pinned probe fill
+        outline={"enabled": True, "color": "#0b0b0e", "width_px": 8.0},
+    )
+
+
+def _assert_interior_pure(img_plain: np.ndarray, img_outlined: np.ndarray) -> None:
+    """No outline-colored pixel deeper than ~2px inside the plain-fill body.
+
+    Erodes the plain-fill mask by 3 px (covering the legacy 4 px inner-eat
+    minus the 1 px AA fringe) and asserts ZERO outline-colored pixels remain
+    in the strict interior — at ANY outline width.
+    """
+    eroded = _eroded_mask(_near(img_plain, _FILL, 30), 3)
+    contamination = eroded & _near(img_outlined, _OUTLINE, 60)
+    n = int(np.count_nonzero(contamination))
+    assert n == 0, (
+        "outline color must never sit deeper than the AA rim inside the "
+        f"glyph interior ({n} contaminated px)"
+    )
+
+
+@pytest.mark.unit
+def test_outline_ring_extends_outward_horizontal(qapp) -> None:
+    """Width-8 outline: the [ceil(0.6*W)+1 .. floor(0.9*W)] band past each
+    cardinal side of the plain-fill bbox holds outline-colored pixels.
+
+    The band is the discriminator: the legacy centered stroke reached only
+    ~W/2 = 4 px out (+ <=1 px AA), so the 6..7 px band was EMPTY; the
+    outward ring reaches the full W = 8 px, so the band fills in. Offsets
+    derive from W = float(outline["width_px"]) — 6..7 is the W=8 instance.
+    """
+    rect = QRectF(0, 0, 200, 140)
+    style = _outline_probe_style()
+    img_outlined = _render("I", style, rect)
+    img_plain = _render(
+        "I", replace(style, outline={**style.outline, "enabled": False}), rect
+    )
+    x0, y0, x1, y1 = _fill_bbox(img_plain)
+    w = float(style.outline["width_px"])
+    lo = math.ceil(0.6 * w) + 1  # 6 for W=8 — beyond the legacy ~W/2 (+AA) reach
+    hi = math.floor(0.9 * w)  # 7 for W=8 — still inside the full-W outward ring
+    assert lo <= hi, "probe window degenerate for this width"
+    above = _region(img_outlined, x0, y0 - hi, x1, y0 - lo + 1)
+    below = _region(img_outlined, x0, y1 + lo, x1, y1 + hi + 1)
+    left = _region(img_outlined, x0 - hi, y0, x0 - lo + 1, y1)
+    right = _region(img_outlined, x1 + lo, y0, x1 + hi + 1, y1)
+    assert _count(above, _OUTLINE, 60) > 0, "ring must reach ~W px ABOVE the glyph"
+    assert _count(below, _OUTLINE, 60) > 0, "ring must reach ~W px BELOW the glyph"
+    assert _count(left, _OUTLINE, 60) > 0, "ring must reach ~W px LEFT of the glyph"
+    assert _count(right, _OUTLINE, 60) > 0, "ring must reach ~W px RIGHT of the glyph"
+
+
+@pytest.mark.unit
+def test_outline_never_eats_glyph_interior(qapp) -> None:
+    """Horizontal word "AAA": the glyph interior stays PURE fill — the
+    global whole-document coverage of the interior-purity contract."""
+    rect = QRectF(0, 0, 240, 140)
+    style = _outline_probe_style()
+    img_outlined = _render("AAA", style, rect)
+    img_plain = _render(
+        "AAA", replace(style, outline={**style.outline, "enabled": False}), rect
+    )
+    _assert_interior_pure(img_plain, img_outlined)
+
+
+@pytest.mark.unit
+def test_outline_vertical_stack_keeps_neighbor_fill_pure(qapp) -> None:
+    """Vertical stack "あA": ALL silhouettes paint before ANY fill — the
+    ring of the lower glyph can never chew the fill of the glyph above it
+    (locks the global silhouette-then-fill ordering forever)."""
+    rect = QRectF(0, 0, 160, 220)
+    style = _outline_probe_style()
+    img_outlined = _render("あA", style, rect, vertical=True)
+    img_plain = _render(
+        "あA",
+        replace(style, outline={**style.outline, "enabled": False}),
+        rect,
+        vertical=True,
+    )
+    _assert_interior_pure(img_plain, img_outlined)
