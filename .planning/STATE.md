@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-27 — Direct changes 3bd4768 (negative Spacing H/V) + 3f3b875 (default outline color -> white); full suite 1188 passed
+Last activity: 2026-08-27 — Direct changes 3bd4768 (negative Spacing H/V) + 3f3b875 (default outline color -> white) + ba9ac07 (vertical roman text stacks ONE column — never tategaki-wraps; CJK legacy wrap kept); typeset suites green, full-run box-test flakes pre-existing
 
 ## Performance Metrics
 
