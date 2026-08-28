@@ -105,6 +105,70 @@ def test_align_v_shifts_ink_rect(qapp) -> None:
 
 
 # ---------------------------------------------------------------------------
+# align_h="justify" (quick-260828-nrz) — newspaper-style flush lines
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_align_h_justify_stretches_lines_flush(qapp) -> None:
+    """align_h="justify" (manual size, the natural-wrap path) stretches every
+    line except the last flush to BOTH inner edges — normal text-editor
+    justification. The last line keeps its natural width; the ink stays
+    inside the inner rect and the block reports no overflow."""
+    rect = QRectF(0, 0, 200, 100)
+    inner_w, _ = _inner(200, 100)
+    style = TextStyle(font_size_px=12.0, auto_fit=False, align_h="justify")
+    result = layout("hello world " * 8, style, rect, vertical=False)
+    assert len(result.line_rects) >= 3, "the probe text must wrap into >= 3 lines"
+    for line_rect in result.line_rects[:-1]:
+        assert line_rect.left() == pytest.approx(0.0, abs=2.0), (
+            "justified lines start flush at the left inner edge"
+        )
+        assert line_rect.width() >= inner_w - 2.0, (
+            "every non-final line stretches flush to both inner edges"
+        )
+    assert result.line_rects[-1].width() < inner_w, (
+        "the last line keeps its natural alignment (never stretched)"
+    )
+    assert result.ink.left() >= -0.5 and result.ink.right() <= inner_w + 0.5, (
+        "the justified ink stays inside the inner rect"
+    )
+    assert result.overflow is False
+
+
+@pytest.mark.unit
+def test_align_h_justify_single_line_natural(qapp) -> None:
+    """A single-line justified block renders as today: the only line IS the
+    last line, so nothing is stretched."""
+    rect = QRectF(0, 0, 200, 100)
+    result = layout(
+        "hello world",
+        TextStyle(font_size_px=12.0, auto_fit=False, align_h="justify"),
+        rect,
+        vertical=False,
+    )
+    assert len(result.line_rects) == 1
+    assert result.line_rects[0].width() < _inner(200, 100)[0]
+    assert result.overflow is False
+
+
+@pytest.mark.unit
+def test_align_h_justify_overflow_reports_honestly(qapp) -> None:
+    """A justified block too tall for the box still reports overflow True
+    (the justify fit degrades to height-only — locked approach-A decision)."""
+    rect = QRectF(0, 0, 100, 30)
+    result = layout(
+        "Big text here",
+        TextStyle(font_size_px=40.0, auto_fit=False, align_h="justify"),
+        rect,
+        vertical=False,
+    )
+    _, inner_h = _inner(100, 30)
+    assert result.overflow is True
+    assert result.ink.height() > inner_h
+
+
+# ---------------------------------------------------------------------------
 # Manual size vs Auto-fit (D-15)
 # ---------------------------------------------------------------------------
 
@@ -495,6 +559,54 @@ def test_vertical_centering_and_alignment(qapp) -> None:
     assert bottom[0]["y"] == pytest.approx(inner_h - block_h, abs=1.5)
     assert middle[0]["y"] == pytest.approx((inner_h - block_h) / 2.0, abs=1.5)
     assert top[0]["y"] < middle[0]["y"] < bottom[0]["y"]
+
+
+# ---------------------------------------------------------------------------
+# Vertical justify (quick-260828-nrz) — column distribution across the width
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_justify_distributes_columns(qapp) -> None:
+    """align_h="justify" on a vertical (tategaki) box distributes >= 2
+    columns across the FULL inner width (the inter-column gaps absorb the
+    slack: first column flush right, last column flush left); a single
+    justify column falls back to the exact center behavior."""
+    inner_w, inner_h = 96.0, 96.0
+    justify = TextStyle(font_size_px=14.0, auto_fit=False, align_h="justify")
+    # 12 CJK chars at 14 px wrap into exactly 2 columns of 6 (6 x 14 = 84
+    # fits inner_h; the 7th char exceeds it). Uniform chars -> every column
+    # is one char wide, so char edges == column edges.
+    placements = layout_vertical("あ" * 12, justify, inner_w, inner_h)
+    col_xs = sorted({round(p["x"], 3) for p in placements})
+    assert len(col_xs) == 2, "12 CJK chars at 14 px must wrap into exactly 2 columns"
+    rightmost = max(p["x"] + p["w"] for p in placements)
+    leftmost = min(p["x"] for p in placements)
+    assert rightmost == pytest.approx(inner_w, abs=0.5), (
+        "the first (rightmost) column reaches the inner right edge"
+    )
+    assert leftmost == pytest.approx(0.0, abs=0.5), (
+        "the last (leftmost) column reaches the inner left edge"
+    )
+    # Sanity: the same text centered does NOT reach either edge (the justify
+    # distribution is a real change, not the natural block width).
+    center = layout_vertical(
+        "あ" * 12,
+        TextStyle(font_size_px=14.0, auto_fit=False, align_h="center"),
+        inner_w,
+        inner_h,
+    )
+    assert max(p["x"] + p["w"] for p in center) < inner_w - 2.0
+    # A single justify column is byte-identical to center (fallback).
+    single_j = layout_vertical("あ", justify, inner_w, inner_h)
+    single_c = layout_vertical(
+        "あ",
+        TextStyle(font_size_px=14.0, auto_fit=False, align_h="center"),
+        inner_w,
+        inner_h,
+    )
+    assert len(single_j) == 1
+    assert single_j[0]["x"] == pytest.approx(single_c[0]["x"], abs=0.5)
 
 
 # ---------------------------------------------------------------------------

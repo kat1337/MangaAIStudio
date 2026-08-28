@@ -74,6 +74,9 @@ def test_to_dict_from_dict_round_trip_preserves_every_field() -> None:
     )
     restored = TextStyle.from_dict(s.to_dict())
     assert restored == s
+    # quick-260828-nrz: "justify" round-trips through the D-07 projection.
+    justified = TextStyle(align_h="justify")
+    assert TextStyle.from_dict(justified.to_dict()) == justified
 
 
 @pytest.mark.unit
@@ -194,6 +197,8 @@ def test_align_values_validated() -> None:
     """align_h/align_v accept the documented values; anything else -> defaults."""
     assert TextStyle.from_dict({"align_h": "left"}).align_h == "left"
     assert TextStyle.from_dict({"align_h": "right"}).align_h == "right"
+    # quick-260828-nrz: "justify" is the fourth accepted horizontal value.
+    assert TextStyle.from_dict({"align_h": "justify"}).align_h == "justify"
     assert TextStyle.from_dict({"align_h": "diagonal"}).align_h == "center"
     assert TextStyle.from_dict({"align_v": "bottom"}).align_v == "bottom"
     assert TextStyle.from_dict({"align_v": 7}).align_v == "middle"
