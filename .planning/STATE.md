@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-27 — Direct changes 3bd4768 (negative Spacing H/V) + 3f3b875 (default outline color -> white) + ba9ac07 (vertical roman text stacks ONE column — never tategaki-wraps; CJK legacy wrap kept); typeset suites green, full-run box-test flakes pre-existing
+Last activity: 2026-08-28 — Completed quick task 260828-k4q: Batch menu "Export Typeset Pages…" — modal page picker (all checked by default, Select All/None), per-page bake+write on one Worker with progress/Cancel, sidecar naming via default_typeset_path (D-22 cleaned/ rule); full suite 1205 passed
 
 ## Performance Metrics
 
@@ -391,6 +391,7 @@ None yet.
 | 260826-u9m | Show Original (P) now references the verified original ON DISK after reopen (D-06 pixels decoded lazily + seeded via new set_image_from_numpy_page seam — also fixes cross-page baseline bleed; unverified/dims-mismatch falls back to in-memory) | 2026-08-27 | 1915859 | [260826-u9m-fix-show-original-p-key-to-reference-ori](./quick/260826-u9m-fix-show-original-p-key-to-reference-ori/)
 | 260826-vhh | Caps unbinned for BIG SFX text: auto-fit grows until actual fit (was stalling ~88px via iteration bound), outline/glow/shadow spins raised to the model's 256px bound; saves incremental (dirty/missing .mas pages only) + async off the GUI thread (immutable snapshot, per-page edit serials, session-generation bail, T-05-12 failure contract kept) | 2026-08-27 | 41efbd1 | [260826-vhh-remove-font-effect-size-caps-fix-freezin](./quick/260826-vhh-remove-font-effect-size-caps-fix-freezin/)
 | 260827-0id | Outline renders OUTWARD (manga-SFX semantics): two-pass solid silhouette (2× pen width) under the fill replaces Qt's centered setTextOutline stroke that chewed into glyphs; effect_padding reserves full width; single paint path keeps canvas/vertical/rotation/glow-shadow/bake/export in parity | 2026-08-27 | 5d83655 | [260827-0id-outline-renders-inline-grows-into-glyphs](./quick/260827-0id-outline-renders-inline-grows-into-glyphs/)
+| 260828-k4q | Batch menu "Export Typeset Pages…": PageSelectionDialog (all-checked page picker, Select All/None, Export gated at ≥1), TypesetPage + batch_export_typeset core loop (abort-at-top, per-page failure isolation, (percent,name) progress), dispatch mirrors the batch-OCR template — flush seam, .copy()-detached pixel projection, default_typeset_path sidecars, Worker + batch surface (progress bar/Cancel/failure-count copy) | 2026-08-28 | 724152e | [260828-k4q-batch-menu-export-typeset-pages-with-per](./quick/260828-k4q-batch-menu-export-typeset-pages-with-per/)
 
 ## Deferred Items
 
