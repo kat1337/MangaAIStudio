@@ -160,6 +160,11 @@ def test_styling_section_present(qtbot) -> None:
     assert panel.color_swatch.width() == 24 and panel.color_swatch.height() == 24
     assert isinstance(panel.align_combo, QComboBox)
     assert isinstance(panel.align_v_combo, QComboBox)
+    # quick-260828-nrz: the Align combo offers Justify as the fourth option;
+    # the legacy indices (0=Left, 1=Center, 2=Right) are unchanged.
+    assert [
+        panel.align_combo.itemText(i) for i in range(panel.align_combo.count())
+    ] == ["Left", "Center", "Right", "Justify"]
     for key in ("outline", "glow", "shadow"):
         assert isinstance(panel._effect_checks[key], QCheckBox)
         assert isinstance(panel._effect_swatches[key], QToolButton)
@@ -276,6 +281,38 @@ def test_style_commit_signal_fires(qtbot) -> None:
     assert fired["effect"] == [
         ("outline", {"enabled": True, "color": "#ffffff", "value": 2})
     ]
+
+
+# ===========================================================================
+# quick-260828-nrz — the Align combo's fourth option: Justify
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_align_justify_load_and_commit(qtbot) -> None:
+    """A style with align_h="justify" loads as the plain "Justify" display
+    (never the Mixed sentinel), and selecting Justify commits the model value
+    through style_align_changed with the untouched axis as its real value."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    panel.load_box(_pagebox_with_style(align_h="justify"))
+    assert panel.align_combo.currentText() == "Justify"
+    assert panel._loaded_style_align_h == "Justify"
+
+    # Selecting Justify (index 3 — the legacy 0..2 order is untouched)
+    # commits the model value; align_v stays at its loaded "middle".
+    panel.align_combo.setCurrentIndex(3)
+    assert fired["align"] == [("justify", "middle")]
+
+    # WR-01: re-selecting the loaded value is a no-op.
+    panel.load_box(_pagebox_with_style(align_h="justify"))
+    panel.align_combo.setCurrentIndex(3)
+    assert fired["align"] == [("justify", "middle")]
 
 
 # ===========================================================================
@@ -584,7 +621,7 @@ def test_mixed_align_keeps_real_items_and_maps_sentinel(qtbot) -> None:
 
     assert [
         panel.align_combo.itemText(i) for i in range(panel.align_combo.count())
-    ] == ["Mixed", "Left", "Center", "Right"]
+    ] == ["Mixed", "Left", "Center", "Right", "Justify"]
     assert panel.align_combo.currentText() == "Mixed"
     assert [
         panel.align_v_combo.itemText(i) for i in range(panel.align_v_combo.count())
@@ -598,7 +635,7 @@ def test_mixed_align_keeps_real_items_and_maps_sentinel(qtbot) -> None:
     ])
     assert [
         panel.align_combo.itemText(i) for i in range(panel.align_combo.count())
-    ] == ["Left", "Center", "Right"]
+    ] == ["Left", "Center", "Right", "Justify"]
     assert panel.align_combo.currentText() == "Center"
     assert [
         panel.align_v_combo.itemText(i) for i in range(panel.align_v_combo.count())
@@ -664,7 +701,7 @@ def test_align_sentinel_repick_after_commit_no_op(qtbot) -> None:
     # notes item 0 persists after the reload) and the user re-picks it — the
     # commit translates to (None, None) and must NOT fire.
     panel._select_combo(
-        panel.align_combo, ["Mixed", "Left", "Center", "Right"], "Mixed"
+        panel.align_combo, ["Mixed", "Left", "Center", "Right", "Justify"], "Mixed"
     )
     panel._emit_style_align_if_changed(
         lambda h, v: fired["align"].append((h, v))
