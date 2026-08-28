@@ -18,7 +18,9 @@ from PySide6.QtCore import QRectF  # noqa: E402
 
 from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
 from manga_ai_studio.gui.text_renderer import (  # noqa: E402
+    _vertical_placements,
     char_rotates,
+    is_roman_text,
     layout,
     layout_vertical,
 )
@@ -276,6 +278,45 @@ def test_vertical_classification(qapp) -> None:
     # The space (0x20) is NOT halfwidth ASCII (0x21..0x7E) — stays upright.
     assert char_rotates(" ") is False
     assert char_rotates("") is False
+
+
+# ---------------------------------------------------------------------------
+# Test 1b — roman text never column-wraps (single-column stacking)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_vertical_roman_text_single_column(qapp) -> None:
+    """A Latin translation must stack ONE letter per line down a SINGLE
+    column — never wrap into side-by-side right-to-left columns ("verti"
+    beside "cal" is gibberish). CJK text keeps the legacy wrap."""
+    style = TextStyle(font_size_px=20.0, auto_fit=False)
+    inner_w, inner_h = 60.0, 80.0  # far too short for 8 stacked letters
+    _, ncols, block_w, block_h = _vertical_placements(
+        "vertical", style, inner_w, inner_h, 20.0
+    )
+    assert ncols == 1, f"roman text wrapped into {ncols} columns"
+    placements = layout_vertical("vertical", style, inner_w, inner_h)
+    assert len(placements) == 8
+    # Centered within the ONE column: every x sits inside the block width.
+    x_lo = min(p["x"] for p in placements)
+    x_hi = max(p["x"] for p in placements)
+    assert x_hi - x_lo <= block_w + 1e-6
+    # Top-to-bottom in text order, letters upright.
+    ys = [p["y"] for p in placements]
+    assert ys == sorted(ys)
+    assert all(p["rotate"] is False for p in placements)
+    # CJK still wraps (the legacy tategaki behavior is not regressed).
+    _, n_cjk, _, _ = _vertical_placements(
+        "あ" * 12, TextStyle(font_size_px=20.0, auto_fit=False),
+        inner_w, inner_h, 20.0,
+    )
+    assert n_cjk > 1
+    # Classifier: punctuation/numerals ride the roman rule; any CJK/kana
+    # char flips the run back to wrappable.
+    assert is_roman_text("vertical! 100%") is True
+    assert is_roman_text("縦書き") is False
+    assert is_roman_text("vert 縦") is False
 
 
 # ---------------------------------------------------------------------------

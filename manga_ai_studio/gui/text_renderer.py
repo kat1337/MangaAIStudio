@@ -172,6 +172,24 @@ def char_rotates(ch: str) -> bool:
     return ch in _ASCII_ROTATE or ch in _ROTATE_EXTRA
 
 
+# CJK Radicals Supplement (0x2E80) is the first vertical-script block; kana
+# (0x3040+), CJK punctuation (0x3000+), ideographs and hangul all sit above
+# it. Everything below (ASCII/Latin-1, general punctuation, Cyrillic...) is
+# "roman" text for the single-column rule.
+_VERTICAL_SCRIPT_THRESHOLD = 0x2E80
+
+
+def is_roman_text(text: str) -> bool:
+    """True iff the run carries NO vertical-script (CJK/kana/hangul) chars.
+
+    A Latin translation stacked one letter per line is readable; the SAME
+    run wrapped across tategaki columns (right-to-left) is gibberish — so
+    roman text never column-wraps (single column, auto-fit shrinks to fit,
+    honest overflow past the 5 px floor), while CJK keeps legacy wrapping.
+    """
+    return not any(ord(ch) >= _VERTICAL_SCRIPT_THRESHOLD for ch in text)
+
+
 # ---------------------------------------------------------------------------
 # Effect allocation bounds (D-14 / T-07-07 — the BallonsTranslator
 # EffectRasterAllocationError policy: an oversized effect surface degrades
@@ -487,7 +505,9 @@ def _vertical_placements(
     - Chars stack top-to-bottom; the per-char advance is the box HEIGHT
       (Latin: measured along its height, not its width; CJK: its width
       equals the height — square).
-    - A column wraps when the next char would exceed ``inner_h``.
+    - A column wraps when the next char would exceed ``inner_h`` — EXCEPT
+      roman text (no CJK/kana/hangul: ``is_roman_text``), which never
+      wraps; a translation must read down ONE column.
     - Column width = the max horizontal ink extent in the column (upright:
       ``w``; rotated: ``h`` — a rotated glyph's horizontal extent is its
       natural height) — the 1 em basis.
@@ -515,6 +535,12 @@ def _vertical_placements(
     if not chars:
         return [], 0, 0.0, 0.0
 
+    # Roman text (no CJK/kana/hangul) never column-wraps: "vertical" must
+    # read v-e-r-t-i-c-a-l down ONE column, never "verti" beside "cal".
+    # The auto-fit loop shrinks the single column to fit; a manual size
+    # overflows honestly. CJK keeps the legacy wrap.
+    single_column = is_roman_text(text)
+
     # Group into columns (top-to-bottom, wrap at inner_h).
     columns: list[list[dict]] = []
     cur: list[dict] = []
@@ -525,7 +551,7 @@ def _vertical_placements(
         h = br.height()  # the ink height (CJK squares the advance; Latin is taller)
         rot = char_rotates(ch)
         extent = h if rot else w  # horizontal ink extent in the column
-        if cur and col_y + h > inner_h + _EPS:
+        if cur and col_y + h > inner_h + _EPS and not single_column:
             columns.append(cur)
             cur = []
             col_y = 0.0
