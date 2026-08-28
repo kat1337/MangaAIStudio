@@ -30,8 +30,14 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PIL import Image as PILImage  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QMessageBox,
+)
 
+import manga_ai_studio.gui.main_window as main_window_module  # noqa: E402
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core import ocr_export  # noqa: E402
 from manga_ai_studio.core.box_model import DETECTED, PageBox  # noqa: E402
@@ -110,6 +116,27 @@ def _stub_save_dialog(monkeypatch, return_path: str, captured: list) -> None:
         return (return_path, "OCR JSON (*_ocr.json)")
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", _fake_get_save_file_name)
+
+
+def _stub_page_dialog(monkeypatch, selected: list[int], captured: list | None = None):
+    """Replace main_window.PageSelectionDialog with a fake collector whose
+    exec() accepts and selected_indices() returns a fixed list (the modal is
+    the ONLY stub — the real Worker + real batch loop run; the QFileDialog
+    stubbing discipline). Optionally records the names passed in."""
+
+    class _FakePageDialog:
+        def __init__(self, parent=None, page_names=()):  # noqa: ARG002
+            self.page_names = list(page_names)
+            if captured is not None:
+                captured.append(list(page_names))
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_indices(self):
+            return list(selected)
+
+    monkeypatch.setattr(main_window_module, "PageSelectionDialog", _FakePageDialog)
 
 
 # ===========================================================================
@@ -557,5 +584,219 @@ def test_batch_export_gating_and_progress(qtbot, tmp_path) -> None:
 
     qtbot.waitUntil(lambda: window._op_running is False, timeout=5000)
     assert window.action_batch_export_ocr.isEnabled() is True, (
+        "the batch action must re-enable after the batch finishes"
+    )
+
+
+# ===========================================================================
+# quick-260828-k4q Task 3 — Batch Export Typeset Pages…: modal picker + Worker
+# dispatch + progress/Cancel/failure surface (real Worker + real
+# batch_export_typeset; only the MODAL is stubbed)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_batch_typeset_writes_checked_pages(qtbot, tmp_path, monkeypatch) -> None:
+    """Export writes ONLY the checked pages: indices [0, 2] on a 3-page
+    session -> page_01/page_03 sidecars exist beside their sources,
+    page_02_typeset.png does NOT; the success copy flashes the ok count."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+    captured: list = []
+    _stub_page_dialog(monkeypatch, selected=[0, 2], captured=captured)
+
+    window.action_batch_export_typeset.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+
+    # The picker received the file-order page names.
+    assert captured == [["page_01.png", "page_02.png", "page_03.png"]]
+    assert (folder / "page_01_typeset.png").is_file(), "checked page 1 exports"
+    assert (folder / "page_03_typeset.png").is_file(), "checked page 3 exports"
+    assert not (folder / "page_02_typeset.png").exists(), (
+        "the UNCHECKED page must not be written"
+    )
+    status = window.status_bar_left.text()
+    assert "Exported typeset pages for 2 page(s)." in status
+    assert "failed" not in status
+
+
+@pytest.mark.gui
+def test_batch_typeset_default_targets(qtbot, tmp_path, monkeypatch) -> None:
+    """D-22 mirror (D-03): a pristine page's sidecar lands beside the source;
+    a geometry-altered page's lands in cleaned/."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=2)
+    window.image_files[1].geometry_altered = True  # page 2 -> cleaned/
+    _stub_page_dialog(monkeypatch, selected=[0, 1])
+
+    window.action_batch_export_typeset.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+
+    assert (folder / "page_01_typeset.png").is_file(), (
+        "pristine page -> {stem}_typeset.png beside the source"
+    )
+    assert (folder / "cleaned" / "page_02_typeset.png").is_file(), (
+        "altered page -> cleaned/{stem}_typeset.png"
+    )
+
+
+@pytest.mark.gui
+def test_batch_typeset_flushes_canvas_boxes(qtbot, tmp_path, monkeypatch) -> None:
+    """Flush seam + D-01 parity: a box seeded on the CURRENT page's canvas is
+    baked into page_01_typeset.png (pixels differ from the plain source),
+    while the boxless pages 2/3 bake to their plain source pixels."""
+    import numpy as np
+
+    from manga_ai_studio.core.text_style import TextStyle
+
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3, size=64)
+    # A box with a FIXED visible style (10px fill, outline off) so the baked
+    # glyph pixels are observable (the test_typeset_export_action probe).
+    payload = TextBlock(
+        [2, 2, 62, 22],
+        lines=[[[2, 2], [62, 2], [62, 22], [2, 22]]],
+        text="Hi",
+        vertical=False,
+        translation="Hi",
+    )
+    style = TextStyle(
+        font_size_px=10.0,
+        auto_fit=False,
+        align_h="left",
+        align_v="top",
+        color="#e8e8ea",
+        outline={"enabled": False, "color": "#0b0b0e", "width_px": 2.0},
+    )
+    pagebox = PageBox(box=Box(2, 2, 62, 22), origin=DETECTED, payload=payload, style=style)
+    window._suppress_boxes_push = True
+    try:
+        window.canvas.set_boxes([pagebox], [])
+    finally:
+        window._suppress_boxes_push = False
+
+    _stub_page_dialog(monkeypatch, selected=[0, 1, 2])
+    window.action_batch_export_typeset.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+
+    baked_1 = np.asarray(
+        PILImage.open(folder / "page_01_typeset.png").convert("RGB")
+    )
+    source_1 = np.asarray(PILImage.open(folder / "page_01.png").convert("RGB"))
+    assert baked_1.shape == source_1.shape
+    assert (baked_1 != source_1).any(), (
+        "the current page's canvas text must be baked (flush seam before "
+        "projection)"
+    )
+    for name in ("page_02", "page_03"):
+        source = np.asarray(PILImage.open(folder / f"{name}.png").convert("RGB"))
+        baked = np.asarray(
+            PILImage.open(folder / f"{name}_typeset.png").convert("RGB")
+        )
+        assert (baked == source).all(), f"{name} has no boxes -> plain pixels"
+
+
+@pytest.mark.gui
+def test_batch_typeset_mixed_failure_count(qtbot, tmp_path, monkeypatch) -> None:
+    """A page whose sidecar target is blocked fails in isolation: the
+    completion copy carries the failure count, the other pages still write,
+    and no modal opens."""
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+    # Sabotage page 1's sidecar target: a DIRECTORY where the PNG would land
+    # (save_image_optimized raises an OSError -> the REAL per-page isolation
+    # path; pages 2 + 3 are unaffected).
+    (folder / "page_01_typeset.png").mkdir()
+    _stub_page_dialog(monkeypatch, selected=[0, 1, 2])
+
+    window.action_batch_export_typeset.trigger()
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+
+    assert (folder / "page_02_typeset.png").is_file()
+    assert (folder / "page_03_typeset.png").is_file()
+    status = window.status_bar_left.text()
+    assert "Exported typeset pages for 2 page(s)." in status
+    assert "1 page(s) failed \u2014 see the log." in status
+
+
+@pytest.mark.gui
+def test_batch_typeset_cancel(qtbot, tmp_path, monkeypatch) -> None:
+    """Cancel mid-batch: page 1 finishes (no half-written sidecar), pages
+    2/3 never start (abort at loop top), "Cancelled" status renders, and the
+    editor navigation re-enables."""
+    import threading
+
+    from manga_ai_studio.gui import text_renderer as text_renderer_module
+
+    window, folder = _load_folder_session(qtbot, tmp_path, n_pages=3)
+
+    # Hold the worker INSIDE page 1's bake until the test releases it (the
+    # loop resolves bake_typeset_page lazily per call, so monkeypatching the
+    # text_renderer attribute intercepts the real loop).
+    bake_started = threading.Event()
+    release = threading.Event()
+    real_bake = text_renderer_module.bake_typeset_page
+
+    def _blocking_bake(page_np, boxes):
+        bake_started.set()
+        release.wait(timeout=10)
+        return real_bake(page_np, boxes)
+
+    monkeypatch.setattr(text_renderer_module, "bake_typeset_page", _blocking_bake)
+    _stub_page_dialog(monkeypatch, selected=[0, 1, 2])
+
+    window.action_batch_export_typeset.trigger()
+    qtbot.waitUntil(bake_started.is_set, timeout=5000)
+    window._cancel_batch()  # emits batch_abort_requested -> the Worker flag
+    release.set()  # page 1's bake completes and writes for real
+    qtbot.waitUntil(lambda: window._batch_active is False, timeout=5000)
+
+    # Partial work: page 1 wrote; pages 2/3 never started.
+    assert (folder / "page_01_typeset.png").is_file()
+    assert not (folder / "page_02_typeset.png").exists()
+    assert not (folder / "page_03_typeset.png").exists()
+    # Bug B pattern: the stale per-page progress text is gone; "Cancelled".
+    assert "Cancelled" in window.status_bar_left.text()
+    assert "Exporting typeset pages" not in window.status_bar_left.text()
+    assert window._op_running is False and window._batch_active is False
+    assert window.file_table.isEnabled(), "editor navigation re-enabled"
+
+
+@pytest.mark.gui
+def test_batch_typeset_gating(qtbot, tmp_path, monkeypatch) -> None:
+    """The typeset batch action is enabled exactly when the OCR batch export
+    is (folder open; disabled with no pages); while a batch holds it
+    disables; the progress handler renders {done}/{total} and the
+    determinate bar advances; it re-enables after."""
+    window = _make_window(qtbot, tmp_path)
+    assert window.action_batch_export_typeset.isEnabled() is False, (
+        "no folder open -> action must be disabled"
+    )
+    assert window.action_batch_export_ocr.isEnabled() is False
+
+    folder = tmp_path / "chapter"
+    _write_pages(folder, n_pages=3)
+    window._load_folder(folder)
+    QApplication.processEvents()
+    assert window.action_batch_export_typeset.isEnabled() is True
+    assert window.action_batch_export_ocr.isEnabled() is True, (
+        "identical gating to the OCR batch export"
+    )
+
+    _stub_page_dialog(monkeypatch, selected=[0, 1, 2])
+    window.action_batch_export_typeset.trigger()
+    # Synchronous at dispatch: the batch is live -> the action re-disables
+    # (the _batch_active gate), mirroring the OCR gating test.
+    assert window.action_batch_export_typeset.isEnabled() is False
+    assert window.action_batch_export_ocr.isEnabled() is False
+
+    # The progress handler renders the {done}/{total} copy + the determinate
+    # bar advances (invoked directly — the queued worker signal is racy to
+    # capture, the test_gui_batch.py precedent).
+    window._batch_typeset_total = 3
+    window._on_batch_typeset_progress((33, "page_02.png"))
+    status = window.status_bar_left.text()
+    assert "Exporting typeset pages\u2026" in status
+    assert "1/3" in status and "page_02.png" in status
+    assert window.progress_bar.value() == 33
+
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+    assert window.action_batch_export_typeset.isEnabled() is True, (
         "the batch action must re-enable after the batch finishes"
     )
