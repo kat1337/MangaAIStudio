@@ -938,3 +938,176 @@ def test_toggle_text_overlay_applies_to_new_boxes(qtbot) -> None:
     item = canvas._box_items[0]
     item.refresh_text_overlay()
     assert item._text_overlay.isVisible() is False
+
+
+# ---------------------------------------------------------------------------
+# quick-260828-l3l tests — Restore tool (paint the Show Original baseline)
+# ---------------------------------------------------------------------------
+
+
+def _canvas_with_baseline(qtbot, size: int = 100) -> EditorCanvas:
+    """Canvas displaying image A (white) with the baseline seeded to A.
+
+    ``set_image_from_numpy`` on the white ``set_image`` display captures the
+    PRE-overwrite pixels as ``_original_image_numpy`` (the capture-when-None
+    gate) — so the baseline equals image A while the display stays A.
+    """
+    canvas = _canvas_with_image(qtbot, size)
+    white = np.full((size, size, 3), 255, dtype=np.uint8)
+    canvas.set_image_from_numpy(white)  # baseline := A (white)
+    return canvas
+
+
+def _mutate_patch(
+    canvas: EditorCanvas, x: int, y: int, w: int, h: int, value: int = 77
+) -> None:
+    """Composite a solid-``value`` patch B over the display via the bbox path."""
+    h_img, w_img = canvas.get_image_numpy().shape[:2]
+    b_img = np.full((h_img, w_img, 3), 255, dtype=np.uint8)
+    b_img[y : y + h, x : x + w] = value
+    canvas.set_image_from_numpy(b_img, bbox=(x, y, w, h))
+
+
+def _restore_drag(canvas: EditorCanvas, x0: float, y0: float, x1: float, y1: float) -> None:
+    """Press-move-release a Restore stroke from (x0, y0) to (x1, y1)."""
+    canvas.mousePressEvent(_press(canvas, x0, y0))
+    canvas.mouseMoveEvent(_move(canvas, x1, y1))
+    canvas.mouseReleaseEvent(_release(canvas, x1, y1))
+
+
+@pytest.mark.gui
+def test_restore_stamps_original_pixels(qtbot) -> None:
+    """A Restore drag composites the baseline (A) inside the brush radius.
+
+    The mutated patch (B) is restored to A only where the stroke passed;
+    unstroked mutated pixels keep B. The baseline is never rebaselined
+    (D-14 guard).
+    """
+    canvas = _canvas_with_baseline(qtbot, 100)
+    # Mutate a patch to B (77) — the "mangled inpaint result".
+    _mutate_patch(canvas, 30, 40, 40, 20)
+    arr = canvas.get_image_numpy()
+    assert np.all(arr[40:60, 30:70] == 77)
+
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)  # radius 5 — drag covers y in [45, 55]
+    _restore_drag(canvas, 40, 50, 60, 50)
+
+    arr = canvas.get_image_numpy()
+    # Stroked points: restored to baseline A (white).
+    assert np.all(arr[50, 35:66] == 255)
+    # Unstroked mutated points: still B.
+    assert np.all(arr[42, 32:38] == 77)
+    # D-14: the baseline slot is untouched by the stroke.
+    assert canvas._original_image_numpy is not None
+    assert np.all(canvas._original_image_numpy == 255)
+
+
+@pytest.mark.gui
+def test_restore_click_restores_dot(qtbot) -> None:
+    """A press+release with NO move still restores (the dot) and commits."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 30, 40, 40, 20)
+
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+    emitted: list = []
+    canvas.restore_committed.connect(emitted.append)
+
+    canvas.mousePressEvent(_press(canvas, 50, 50))
+    canvas.mouseReleaseEvent(_release(canvas, 50, 50))
+    QApplication.processEvents()
+
+    arr = canvas.get_image_numpy()
+    assert np.all(arr[50, 46:55] == 255)  # the dot
+    assert np.all(arr[41, 50] == 77)  # outside the dot: still B
+    # The dot commits exactly one payload.
+    assert len(emitted) == 1
+    payload = emitted[0]
+    assert payload["pre_patch"].shape == (payload["h"], payload["w"], 3)
+
+
+@pytest.mark.gui
+def test_restore_no_baseline_is_noop(qtbot) -> None:
+    """Without a baseline a Restore stroke is a silent no-op: no emission,
+    ``_is_painting`` stays False, display unchanged."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    canvas._original_image_numpy = None
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+
+    emitted: list = []
+    canvas.restore_committed.connect(emitted.append)
+    before = canvas.get_image_numpy()
+
+    _restore_drag(canvas, 20, 20, 80, 20)
+    QApplication.processEvents()
+
+    assert emitted == []
+    assert canvas._is_painting is False
+    assert np.array_equal(canvas.get_image_numpy(), before)
+
+
+@pytest.mark.gui
+def test_restore_suppressed_during_show_original(qtbot) -> None:
+    """A press during the P-preview (Show Original) is suppressed — the
+    working image is untouched (no force-exit stroke on the compare view)."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 30, 40, 40, 20)
+
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+    canvas.show_original(True)
+    assert canvas._showing_original is True
+
+    emitted: list = []
+    canvas.restore_committed.connect(emitted.append)
+    _restore_drag(canvas, 40, 50, 60, 50)
+    QApplication.processEvents()
+
+    assert emitted == []
+    assert canvas._is_painting is False
+    # Back on the working side: the patch survived — nothing was painted.
+    canvas.show_original(False)
+    arr = canvas.get_image_numpy()
+    assert np.all(arr[40:60, 30:70] == 77)
+
+
+@pytest.mark.gui
+def test_restore_cursor_is_green(qtbot) -> None:
+    """The Restore brush cursor shows with the green #5fd068 palette."""
+    canvas = _canvas_with_image(qtbot, 100)
+    canvas.set_tool(ToolMode.RESTORE)
+    assert canvas.cursor_item.isVisible()
+    assert canvas.cursor_item.pen().color() == QColor(95, 208, 104, 200)
+    assert canvas.cursor_item.brush().color() == QColor(95, 208, 104, 60)
+
+
+@pytest.mark.gui
+def test_restore_emits_once_per_stroke(qtbot) -> None:
+    """One drag emits EXACTLY ONE restore_committed whose bbox covers the
+    drag path and whose pre_patch is the detached (h, w, 3) pre-stroke slice."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    # Patch covers the whole upcoming stroke bbox so pre_patch is uniform B.
+    _mutate_patch(canvas, 10, 30, 80, 40)
+
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+
+    emitted: list = []
+    canvas.restore_committed.connect(emitted.append)
+    _restore_drag(canvas, 20, 50, 80, 50)
+    QApplication.processEvents()
+
+    assert len(emitted) == 1
+    p = emitted[0]
+    # The bbox covers the drag path (brush radius margin included).
+    assert p["x"] <= 20 - 5
+    assert p["x"] + p["w"] >= 80 + 5
+    assert p["y"] <= 50 - 5
+    assert p["y"] + p["h"] >= 50 + 5
+    # pre_patch shape + detachment (payload-aliasing discipline).
+    assert p["pre_patch"].shape == (p["h"], p["w"], 3)
+    assert np.all(p["pre_patch"] == 77)  # the pre-stroke (mangled) state
+    p["pre_patch"][:] = 0  # mutating the payload must not corrupt the canvas
+    assert np.all(canvas.get_image_numpy()[50, 45:56] == 255)

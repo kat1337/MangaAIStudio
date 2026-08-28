@@ -99,8 +99,17 @@ ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
 # spots under boxes); with Alt, today's box interaction runs (D-15). CROP is
 # deliberately NOT here (D-17 — the Crop tool keeps today's box behavior) and
 # neither is MOVE/Pan.
+# quick-260828-l3l: RESTORE joins the set — under it, box interaction becomes
+# Alt-gated like the brush family (D-15) and the brush-circle cursor shows.
+# RESTORE is NOT an eraser variant: `_effective_eraser` stays untouched.
 PAINT_TOOLS = frozenset(
-    {ToolMode.BRUSH, ToolMode.RECTANGLE, ToolMode.LASSO, ToolMode.ERASER}
+    {
+        ToolMode.BRUSH,
+        ToolMode.RECTANGLE,
+        ToolMode.LASSO,
+        ToolMode.ERASER,
+        ToolMode.RESTORE,
+    }
 )
 
 # Phase 3 box-layer geometry (UI-SPEC §Z-order + §Spacing exceptions). The box
@@ -218,6 +227,17 @@ class EditorCanvas(QGraphicsView):
     # and runs the crop apply path. The tool STAYS active after emission (the
     # user may crop again; switching tools is the exit).
     crop_committed = Signal(object)
+    # quick-260828-l3l: emitted ONCE per completed Restore stroke (mouse
+    # release). Carries a dict with integer ``x``, ``y``, ``w``, ``h`` (the
+    # stroke bbox, clamped to image dims, at least 1x1) and ``pre_patch`` —
+    # the pre-stroke image sliced to that bbox and ``.copy()``-detached
+    # (payload-aliasing discipline: no view into the live canvas buffer may
+    # cross a Qt signal, tests/test_payload_aliasing.py). The MainWindow
+    # handler mirrors the inpaint write-back order: bbox display refresh,
+    # current_image sync, session-dirty, history.push_image_action — so
+    # Ctrl+Z reverts the whole stroke via the existing bbox-patch image
+    # stack with zero new history code.
+    restore_committed = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -441,6 +461,15 @@ class EditorCanvas(QGraphicsView):
         self._original_image_numpy: np.ndarray | None = None
         self._inpainted_qimage: QImage | None = None
         self._showing_original = False
+        # quick-260828-l3l Restore-stroke state — all pixel work on the IMAGE,
+        # no mask planes: ``_restore_pre`` is the detached pre-stroke snapshot
+        # (the undo patch source), ``_restore_work`` is the per-stroke working
+        # array the baseline discs are stamped into (and the display is built
+        # from), ``_restore_bbox`` accumulates the stroke bbox as an inclusive
+        # [x0, y0, x1, y1) int quad. All three are cleared at stroke end.
+        self._restore_pre: np.ndarray | None = None
+        self._restore_work: np.ndarray | None = None
+        self._restore_bbox: list[int] | None = None
         # Cursor follows the pointer even without a held button.
         self.setMouseTracking(True)
         self._update_cursor_visuals()
@@ -1223,7 +1252,14 @@ class EditorCanvas(QGraphicsView):
         self.cursor_item.setVisible(visible)
         if not visible:
             return
-        if self._effective_eraser():
+        # quick-260828-l3l: RESTORE gets its own green circle (the inpaint
+        # palette's #5fd068) BEFORE the eraser/paint color pick — the color
+        # distinguishes "this brush paints the ORIGINAL back" from the mask
+        # brush/eraser circles. Same rect math as the other branches.
+        if self.current_tool == ToolMode.RESTORE:
+            pen = QPen(QColor(95, 208, 104, 200), 1)
+            brush = QBrush(QColor(95, 208, 104, 60))
+        elif self._effective_eraser():
             pen = QPen(QColor(0, 212, 255, 200), 1)
             brush = QBrush(QColor(0, 212, 255, 60))
         else:
@@ -1721,6 +1757,29 @@ class EditorCanvas(QGraphicsView):
 
     def _begin_paint(self, event) -> None:
         """Start a stroke/rect/lasso on left-press (UI-SPEC surface 6)."""
+        # --- quick-260828-l3l: RESTORE press gate + stroke bootstrap. All
+        # pixel work (no mask planes). The gate is a SILENT no-op on failure:
+        # ``_is_painting`` stays False so moves/releases fall through to the
+        # base class and no restore_committed is ever emitted.
+        if self.current_tool == ToolMode.RESTORE:
+            if not self._restore_gate_ok():
+                return
+            self._is_painting = True
+            start = self._scene_pos(event)
+            self._start_pt = start
+            self._last_pt = start
+            # Detached pre-stroke snapshot: the undo ``pre_patch`` is sliced
+            # from this copy at stroke end (Pitfall-2 discipline).
+            self._restore_pre = self.get_image_numpy()
+            if self._restore_pre is None:
+                self._is_painting = False
+                return
+            self._restore_work = self._restore_pre.copy()
+            self._restore_bbox = None
+            # A press alone restores a dot (stamps the disc immediately).
+            self._restore_stamp(start)
+            self._refresh_restore_display()
+            return
         self._is_painting = True
         start = self._scene_pos(event)
         self._start_pt = start
@@ -1738,8 +1797,142 @@ class EditorCanvas(QGraphicsView):
             self._dual_write_stroke(start, start, eraser)
             self.update_mask_display()
 
+    def _restore_gate_ok(self) -> bool:
+        """Return True iff a Restore stroke may start (quick-260828-l3l).
+
+        Requires a baseline (``_original_image_numpy`` seeded — the D-06
+        per-page slot), no active Show Original preview, and matching dims
+        between the baseline and the displayed image. DECISION (documented in
+        the plan): a press while the P-preview (``_showing_original``) is
+        active is SUPPRESSED, not force-exited — force-exiting would fire an
+        accidental stroke on the same click the user used to leave the
+        compare view, and painting onto the hidden working image mid-preview
+        would be invisible feedback.
+        """
+        baseline = self._original_image_numpy
+        if baseline is None or self._showing_original:
+            return False
+        pix = self.image_item.pixmap()
+        if pix.isNull():
+            return False
+        return baseline.shape[:2] == (pix.height(), pix.width())
+
+    def _restore_stamp(self, curr: QPointF) -> None:
+        """Stamp a baseline disc of radius ``brush_size / 2`` at ``curr``.
+
+        Copies the disc region from ``_original_image_numpy`` into the
+        per-stroke working array through a boolean circular mask (pure numpy
+        — no PIL, no QImage painting). The integer disc bbox is clipped to
+        the image dims and grows the stroke bbox accumulator.
+        """
+        baseline = self._original_image_numpy
+        work = self._restore_work
+        if baseline is None or work is None:
+            return
+        h, w = work.shape[:2]
+        cx = int(round(curr.x()))
+        cy = int(round(curr.y()))
+        r = self.brush_size / 2.0
+        x0 = max(0, int(math.floor(cx - r)))
+        y0 = max(0, int(math.floor(cy - r)))
+        x1 = min(w, int(math.ceil(cx + r)) + 1)
+        y1 = min(h, int(math.ceil(cy + r)) + 1)
+        if x0 >= x1 or y0 >= y1:
+            return
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        disc = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+        region = work[y0:y1, x0:x1]
+        region[disc] = baseline[y0:y1, x0:x1][disc]
+        # Grow the stroke bbox accumulator ([x0, y0, x1, y1) int quad).
+        if self._restore_bbox is None:
+            self._restore_bbox = [x0, y0, x1, y1]
+        else:
+            acc = self._restore_bbox
+            acc[0] = min(acc[0], x0)
+            acc[1] = min(acc[1], y0)
+            acc[2] = max(acc[2], x1)
+            acc[3] = max(acc[3], y1)
+
+    def _refresh_restore_display(self) -> None:
+        """Rebuild the image-layer pixmap from the restore working array.
+
+        PERF CHOICE (T-l3l-03, accepted): a full-frame numpy->QImage per move
+        event at page scale (~1500x2000, ~3MP) is acceptable and keeps the
+        code on ONE display path. This deliberately does NOT route through
+        ``set_image_from_numpy``/``_set_image_from_numpy`` per move — that
+        path mutates ``_inpainted_qimage`` / baseline-capture state (the
+        capture-when-None gate) and would poison the P-preview claim
+        mid-stroke. The MainWindow commit handler does use the bbox display
+        refresh ONCE per stroke (post-commit) so the P-preview side stays
+        coherent. The ``.copy()`` detaches the QImage from the working-array
+        buffer before storage (RESEARCH Pitfall 2).
+        """
+        arr = self._restore_work
+        if arr is None:
+            return
+        h, w = arr.shape[:2]
+        qimg = QImage(arr.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        qimg = qimg.copy()
+        self.image_item.setPixmap(QPixmap.fromImage(qimg))
+
+    def _finish_restore_stroke(self) -> None:
+        """Finalize a Restore stroke: display, bbox payload, one emission.
+
+        Computes the stroke bbox (clamped to image dims, at least 1x1), slices
+        the pre-stroke snapshot to it (``.copy()``-detached), emits
+        ``restore_committed`` ONCE per stroke, and clears the stroke state. A
+        press+release with no move still commits (the dot stamped at press).
+        """
+        pre = self._restore_pre
+        acc = self._restore_bbox
+        self._refresh_restore_display()
+        self._restore_pre = None
+        self._restore_work = None
+        self._restore_bbox = None
+        if pre is None or acc is None:
+            return
+        h, w = pre.shape[:2]
+        x0 = max(0, min(int(acc[0]), w - 1))
+        y0 = max(0, min(int(acc[1]), h - 1))
+        bw = max(1, min(int(acc[2]), w) - x0)
+        bh = max(1, min(int(acc[3]), h) - y0)
+        self.restore_committed.emit(
+            {
+                "x": int(x0),
+                "y": int(y0),
+                "w": int(bw),
+                "h": int(bh),
+                "pre_patch": pre[y0 : y0 + bh, x0 : x0 + bw].copy(),
+            }
+        )
+
     def _advance_paint(self, curr: QPointF) -> None:
         """Advance the in-progress stroke/preview (called on mouseMove)."""
+        # --- quick-260828-l3l: RESTORE advance — interpolate along the
+        # segment from _last_pt to curr at step max(1.0, brush_size / 4)
+        # scene px (mirrors the continuous RoundCap coverage of
+        # paint_mask_stroke at 4x-sub-brush spacing so fast strokes stay
+        # gapless), stamping at each interpolated point plus the endpoint.
+        if self.current_tool == ToolMode.RESTORE:
+            last = self._last_pt
+            dx = curr.x() - last.x()
+            dy = curr.y() - last.y()
+            dist = math.hypot(dx, dy)
+            if dist <= 0.0:
+                self._restore_stamp(curr)
+            else:
+                step = max(1.0, self.brush_size / 4.0)
+                n_steps = max(1, int(dist / step))
+                for i in range(1, n_steps + 1):
+                    t = min(1.0, (i * step) / dist)
+                    self._restore_stamp(
+                        QPointF(last.x() + dx * t, last.y() + dy * t)
+                    )
+                # Endpoint stamp (RoundCap coverage at the release end).
+                self._restore_stamp(curr)
+            self._last_pt = curr
+            self._refresh_restore_display()
+            return
         eraser = self._effective_eraser()
         if self.current_tool in (ToolMode.BRUSH, ToolMode.ERASER):
             paint_mask_stroke(self._mask, self._last_pt, curr, self.brush_size, eraser)
@@ -1756,6 +1949,15 @@ class EditorCanvas(QGraphicsView):
 
     def _end_paint(self, event) -> None:
         """Commit the stroke on left-release (emits mask_modified ONCE)."""
+        # --- quick-260828-l3l: RESTORE release — finalize the display,
+        # emit restore_committed ONCE (bbox-patch payload for the MainWindow
+        # write-back), clear stroke state. Deliberately NOT the mask commit
+        # path below: restore never touches the mask planes, so no
+        # recompose_mask and no mask_modified emission (no mask-undo entry).
+        if self.current_tool == ToolMode.RESTORE:
+            self._is_painting = False
+            self._finish_restore_stroke()
+            return
         curr = self._scene_pos(event)
         eraser = self._effective_eraser()
         if self.current_tool == ToolMode.RECTANGLE:
