@@ -392,3 +392,101 @@ def batch_export_ocr(pages: list, progress_callback=None, abort_flag=None) -> di
             continue
 
     return {"ok": total - len(failed), "failed": failed, "total": total}
+
+
+@dataclass
+class TypesetPage:
+    """The batch-loop input shape for :func:`batch_export_typeset`.
+
+    Mirrors :class:`ExportPage`'s model-free projection discipline (the
+    exporter stays pure stdlib; the GUI builds these). ``image`` is the
+    DETACHED ``(H, W, 3)`` uint8 RGB page pixels or ``None`` (a checked page
+    with no resolvable source is reported as a failure, never silently
+    skipped) — the annotation is a never-evaluated string (PEP 563, the
+    module-top ``from __future__ import annotations``), numpy is deliberately
+    NOT imported. ``boxes`` is the live ``PageBox`` list passed read-only
+    across the thread boundary (the 05-08 precedent); ``dest`` is the
+    PRE-COMPUTED ``default_typeset_path`` sidecar so the loop stays
+    placement-free.
+    """
+
+    path: Path
+    image: np.ndarray | None  # string annotation — numpy NOT imported (PEP 563)
+    boxes: list
+    dest: Path
+
+
+def batch_export_typeset(items: list, progress_callback=None, abort_flag=None) -> dict:
+    """Bake + write every checked page's ``{stem}_typeset.png`` in one
+    interruptible batch (quick-260828-k4q).
+
+    A structural mirror of :func:`batch_export_ocr`'s contract: abort
+    checked at the loop TOP ONLY, per-page progress emitted once per page,
+    per-page failures isolated and reported, summary returned as
+    ``{"ok", "failed", "total"}``.
+
+    ``progress_callback`` / ``abort_flag`` are auto-injected by ``Worker``
+    (worker_thread.py:103-140) — they MUST stay the last two kwargs with
+    ``None`` defaults. The ``Abort``/``bake_typeset_page``/
+    ``save_image_optimized`` imports are lazy (inside this function, never
+    at module top) so the module-top import graph stays Qt/numpy-free while
+    preserving the exact ``worker_thread`` exception identity — a
+    locally-defined ``Abort`` subclass would surface cancel as an error.
+
+    The bake is off-thread-safe by construction: ``bake_typeset_page`` paints
+    EXCLUSIVELY on its own detached QImage copy (the one Qt paint device
+    legal off the GUI thread) and returns a detached numpy array — no
+    QPixmap, no live-object reads.
+
+    Logging discipline (T-05-05): only page names + error strings are
+    logged, never OCR/translation text (log-injection defense, T-K4Q-02).
+
+    Args:
+        items: ``TypesetPage`` objects (path, image, boxes, dest).
+        progress_callback: Optional callable/signal with ``.emit((percent,
+            page_name))`` — called once per page at the loop top.
+        abort_flag: Optional ``SharableFlag``-like object with ``.get()``.
+
+    Returns:
+        ``{"ok": int, "failed": list[tuple[Path, str]], "total": int}``.
+
+    Raises:
+        Abort: when the flag is set at a loop-top check.
+    """
+    # Lazy imports (never at module top): worker_thread.py imports
+    # PySide6.QtCore at module top, text_renderer needs a QPainter surface,
+    # image_io pulls numpy/PIL — importing here keeps this core module's
+    # module-top graph stdlib-only.
+    from manga_ai_studio.core.image_io import save_image_optimized
+    from manga_ai_studio.gui.text_renderer import bake_typeset_page
+    from manga_ai_studio.gui.worker_thread import Abort
+
+    failed: list[tuple[Path, str]] = []
+    total = len(items)
+
+    for i, page in enumerate(items):
+        # D-09/Pitfall-4 shape: abort check at the loop TOP ONLY. A cancel
+        # lands strictly between pages; a page already started runs to
+        # completion, so no {stem}_typeset.png is ever half-written.
+        if abort_flag is not None and abort_flag.get():
+            raise Abort()
+
+        # D-10 shape: per-page progress (percent, page_name).
+        if progress_callback is not None:
+            percent = int(i / total * 100) if total else 0
+            progress_callback.emit((percent, page.path.name))
+
+        # D-04: per-page failure non-fatal.
+        try:
+            if page.image is None:
+                # A checked page with no pixels is a REPORTED failure, never
+                # a silent skip.
+                raise ValueError("no image source")
+            baked = bake_typeset_page(page.image, page.boxes)
+            save_image_optimized(baked, page.dest, original=page.path)
+        except Exception as exc:  # D-04: per-page failure non-fatal
+            logger.error(f"Batch typeset export: page {page.path.name} failed: {exc}")
+            failed.append((page.path, str(exc)))
+            continue
+
+    return {"ok": total - len(failed), "failed": failed, "total": total}

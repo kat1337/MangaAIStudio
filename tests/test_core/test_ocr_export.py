@@ -20,23 +20,30 @@ from __future__ import annotations
 import json
 
 import pytest
-from panelcleaner.comic_text_detector.utils.textblock import TextBlock
-from panelcleaner.structures import Box
 
-from manga_ai_studio.core.box_model import DETECTED, USER, PageBox
-from manga_ai_studio.core.ocr_export import (
+pytest.importorskip("PySide6")
+
+import numpy as np  # noqa: E402
+from panelcleaner.comic_text_detector.utils.textblock import TextBlock  # noqa: E402
+from panelcleaner.structures import Box  # noqa: E402
+
+from manga_ai_studio.core.box_model import DETECTED, USER, PageBox  # noqa: E402
+from manga_ai_studio.core.ocr_export import (  # noqa: E402
     OCR_JSON_VERSION,
     ExportPage,
+    TypesetPage,
     batch_export_ocr,
+    batch_export_typeset,
     build_page_ocr_json,
     default_ocr_json_path,
+    default_typeset_path,
     line_box,
     ocr_json_target_dir,
     page_ocr_json_dumps,
     split_text_onto_lines,
     write_page_ocr_json,
 )
-from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.core.text_style import TextStyle  # noqa: E402
 
 
 def _two_line_payload(
@@ -483,3 +490,128 @@ def test_batch_progress_emits(tmp_path: Path) -> None:
     assert emitted[0] == (0, "page1.png")  # first emit has the first page's name
     assert emitted[1] == (33, "page2.png")
     assert emitted[2] == (66, "page3.png")
+
+
+# ---------------------------------------------------------------------------
+# quick-260828-k4q Task 2: TypesetPage + batch_export_typeset
+# (the real loop called directly — no Worker; bake needs Qt, hence the
+# module-level importorskip guard above)
+# ---------------------------------------------------------------------------
+
+
+def _typeset_items(tmp_path: Path, count: int = 3, size: int = 16) -> list:
+    """``count`` pristine ``TypesetPage``s with real page pixels + no boxes.
+
+    A zero-box bake is an identity composite — placement/pixels come from the
+    page itself, which is all these tests need to observe on disk.
+    """
+    items = []
+    for i in range(count):
+        page_path = tmp_path / f"page{i + 1}.png"
+        items.append(
+            TypesetPage(
+                path=page_path,
+                image=np.full((size, size, 3), (30 * i + 10, 80, 120), dtype=np.uint8),
+                boxes=[],
+                dest=default_typeset_path(page_path, geometry_altered=False),
+            )
+        )
+    return items
+
+
+@pytest.mark.unit
+def test_batch_export_typeset_writes_all_pages(tmp_path: Path) -> None:
+    """3 real-baked items -> 3 ``{stem}_typeset.png`` sidecars at the
+    ``default_typeset_path`` locations; the ``{"ok", "failed", "total"}``
+    contract shape comes back exact."""
+    items = _typeset_items(tmp_path, count=3)
+
+    summary = batch_export_typeset(items)
+
+    assert summary == {"ok": 3, "failed": [], "total": 3}
+    for item in items:
+        assert item.dest.is_file(), f"{item.dest.name} must be written"
+        assert item.dest.name == f"{item.path.stem}_typeset.png"
+
+
+@pytest.mark.unit
+def test_batch_export_typeset_none_image_is_failure(tmp_path: Path) -> None:
+    """A ``None``-image page lands in ``failed`` with (path, message); the
+    other two pages still write (per-page failure isolation, D-04)."""
+    items = _typeset_items(tmp_path, count=3)
+    items[1].image = None
+
+    summary = batch_export_typeset(items)
+
+    assert summary["ok"] == 2
+    assert summary["total"] == 3
+    assert len(summary["failed"]) == 1
+    failed_path, message = summary["failed"][0]
+    assert failed_path == items[1].path
+    assert "no image source" in message
+    assert items[0].dest.is_file()
+    assert items[2].dest.is_file()
+    assert not items[1].dest.exists(), "the failed page writes nothing"
+
+
+@pytest.mark.unit
+def test_batch_export_typeset_save_conflict_is_failure(tmp_path: Path) -> None:
+    """A pre-existing DIRECTORY at one ``dest`` -> the OSError lands in
+    ``failed`` and ok counts the rest (conflicting-filesystem-state
+    injection — never a faked loop)."""
+    items = _typeset_items(tmp_path, count=3)
+    items[1].dest.mkdir(parents=True)  # a directory where the sidecar lands
+
+    summary = batch_export_typeset(items)
+
+    assert summary["ok"] == 2
+    assert len(summary["failed"]) == 1
+    failed_path, message = summary["failed"][0]
+    assert failed_path == items[1].path
+    assert isinstance(message, str) and message
+    assert items[0].dest.is_file()
+    assert items[2].dest.is_file()
+
+
+@pytest.mark.unit
+def test_batch_export_typeset_progress_shape(tmp_path: Path) -> None:
+    """D-10 shape: one (percent, page_name) emit per page at the loop top.
+
+    percent = ``int(i / total * 100)`` — the batch_export_ocr formula (the
+    existing test_batch_progress_emits asserts 0/33/66 for 3 items); the
+    plan-prose (50, 100) pair contradicted its own pinned formula.
+    """
+    items = _typeset_items(tmp_path, count=3)
+
+    class _Recorder:
+        """Signal-shaped progress recorder (mirrors the batch_ocr tests)."""
+
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        def emit(self, payload) -> None:
+            self.calls.append(payload)
+
+    recorder = _Recorder()
+    summary = batch_export_typeset(items, progress_callback=recorder)
+    assert summary["ok"] == 3
+    assert recorder.calls == [
+        (0, "page1.png"),
+        (33, "page2.png"),
+        (66, "page3.png"),
+    ]
+
+
+@pytest.mark.unit
+def test_batch_export_typeset_abort_exact_exception(tmp_path: Path) -> None:
+    """A set ``SharableFlag`` raises the EXACT ``worker_thread.Abort`` at the
+    loop top BEFORE any file is written (no sidecars exist after)."""
+    from manga_ai_studio.gui.worker_thread import Abort, SharableFlag
+
+    items = _typeset_items(tmp_path / "fresh", count=3)
+
+    with pytest.raises(Abort):
+        batch_export_typeset(items, abort_flag=SharableFlag(True))
+
+    for item in items:
+        assert not item.dest.exists(), "abort at loop top writes nothing"
