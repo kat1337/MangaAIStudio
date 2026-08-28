@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-28 — Completed quick task 260828-k4q: Batch menu "Export Typeset Pages…" — modal page picker (all checked by default, Select All/None), per-page bake+write on one Worker with progress/Cancel, sidecar naming via default_typeset_path (D-22 cleaned/ rule); full suite 1205 passed
+Last activity: 2026-08-28 — Completed quick task 260828-l3l: Restore tool (7th strip tool, shortcut O) — drag to paint the original page's pixels back over mangled inpaints; interpolated disc stamps from the D-06 baseline, per-stroke push_image_action undo + current_image sync + dirty (mirrors the inpaint write-back), no D-14 rebaseline, suppressed during P-preview; full suite 1214 passed (1 pre-existing env-level flake)
 
 ## Performance Metrics
 
@@ -392,6 +392,7 @@ None yet.
 | 260826-vhh | Caps unbinned for BIG SFX text: auto-fit grows until actual fit (was stalling ~88px via iteration bound), outline/glow/shadow spins raised to the model's 256px bound; saves incremental (dirty/missing .mas pages only) + async off the GUI thread (immutable snapshot, per-page edit serials, session-generation bail, T-05-12 failure contract kept) | 2026-08-27 | 41efbd1 | [260826-vhh-remove-font-effect-size-caps-fix-freezin](./quick/260826-vhh-remove-font-effect-size-caps-fix-freezin/)
 | 260827-0id | Outline renders OUTWARD (manga-SFX semantics): two-pass solid silhouette (2× pen width) under the fill replaces Qt's centered setTextOutline stroke that chewed into glyphs; effect_padding reserves full width; single paint path keeps canvas/vertical/rotation/glow-shadow/bake/export in parity | 2026-08-27 | 5d83655 | [260827-0id-outline-renders-inline-grows-into-glyphs](./quick/260827-0id-outline-renders-inline-grows-into-glyphs/)
 | 260828-k4q | Batch menu "Export Typeset Pages…": PageSelectionDialog (all-checked page picker, Select All/None, Export gated at ≥1), TypesetPage + batch_export_typeset core loop (abort-at-top, per-page failure isolation, (percent,name) progress), dispatch mirrors the batch-OCR template — flush seam, .copy()-detached pixel projection, default_typeset_path sidecars, Worker + batch surface (progress bar/Cancel/failure-count copy) | 2026-08-28 | 724152e | [260828-k4q-batch-menu-export-typeset-pages-with-per](./quick/260828-k4q-batch-menu-export-typeset-pages-with-per/)
+| 260828-l3l | Restore tool: drag paints the ORIGINAL page's pixels back (fix mangled inpaints) — ToolMode.RESTORE, disc stamps interpolated along the stroke from the D-06 baseline slot, green cursor, shared brush size; per-stroke undo via push_image_action + current_image sync + dirty (inpaint-contract mirror), no rebaseline, suppressed during P-preview; strip button + O shortcut | 2026-08-28 | d367169 | [260828-l3l-restore-eraser-tool-paint-original-pixel](./quick/260828-l3l-restore-eraser-tool-paint-original-pixel/)
 
 ## Deferred Items
 
