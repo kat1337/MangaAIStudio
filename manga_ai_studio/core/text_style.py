@@ -69,7 +69,7 @@ CHAR_SPACING_MIN = -64.0
 LINE_SPACING_MIN = -256.0
 EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
 
-_ALIGN_H_VALUES = ("left", "center", "right")
+_ALIGN_H_VALUES = ("left", "center", "right", "justify")
 _ALIGN_V_VALUES = ("top", "middle", "bottom")
 
 
@@ -154,7 +154,8 @@ class TextStyle:
             ``False`` renders at exactly ``font_size_px`` (may overflow).
         color: The opaque glyph fill (D-01 — user-chosen fills MAY be
             saturated; the documented Phase 7 exception).
-        align_h: "left" | "center" | "right".
+        align_h: "left" | "center" | "right" | "justify" (quick-260828-nrz:
+            justify = normal text-editor justification in the renderer).
         align_v: "top" | "middle" | "bottom".
         vertical: Render tategaki (D-11/D-13). The 07-01 horizontal renderer
             consumes it (plan 07-03 adds the vertical layout path).
