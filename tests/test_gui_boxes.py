@@ -5213,13 +5213,14 @@ def test_edited_box_not_reocred_on_redetect(qtbot, tmp_path, monkeypatch) -> Non
 @pytest.mark.gui
 def test_cursor_hidden_for_move_and_crop_visible_for_paint_tools(qtbot) -> None:
     """Guards 2+3 (cursor): set_tool across ALL six ToolModes — cursor_item
-    visibility matches membership in {BRUSH, RECTANGLE, LASSO, ERASER}."""
+    visibility matches membership in {BRUSH, RECTANGLE, LASSO, ERASER, RESTORE}."""
     canvas = _canvas_with_image_and_boxes(qtbot)
     paint_tools = {
         ToolMode.BRUSH,
         ToolMode.RECTANGLE,
         ToolMode.LASSO,
         ToolMode.ERASER,
+        ToolMode.RESTORE,  # the 7th tool (quick-260828-l3l) shows the circle
     }
     for tool in ToolMode:
         canvas.set_tool(tool)

@@ -23,12 +23,13 @@ import pytest
 pytest.importorskip("PySide6")
 
 import numpy as np  # noqa: E402
-from PySide6.QtCore import QPointF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QPixmap  # noqa: E402
+from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPixmap  # noqa: E402
 
 from manga_ai_studio.config.profile_manager import ProfileManager  # noqa: E402
 from manga_ai_studio.core.history_manager import HistoryManager  # noqa: E402
 from manga_ai_studio.core.mask_editor import (  # noqa: E402
+    ToolMode,
     paint_mask_stroke,
 )
 from manga_ai_studio.gui.canvas import EditorCanvas  # noqa: E402
@@ -1096,3 +1097,119 @@ def test_undo_returns_single_element_list() -> None:
     assert kind == "mask"
     assert value is not None
 
+
+
+# ---------------------------------------------------------------------------
+# quick-260828-l3l: Restore stroke -> undo/dirty/current_image write-back
+# ---------------------------------------------------------------------------
+
+
+def _restore_drag(canvas: EditorCanvas, x0: float, y0: float, x1: float, y1: float) -> None:
+    """Press-move-release a Restore stroke from (x0, y0) to (x1, y1).
+
+    Viewport coords are mapped from the desired scene point (QGraphicsView
+    centers the scene — the same discipline as test_gui_canvas._press).
+    """
+    from PySide6.QtCore import QEvent, QPointF as _QPointF
+    from PySide6.QtGui import QMouseEvent as _QMouseEvent
+
+    def _press(sx: float, sy: float) -> _QMouseEvent:
+        vp = canvas.mapFromScene(_QPointF(sx, sy))
+        return _QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            _QPointF(vp),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    def _move(sx: float, sy: float) -> _QMouseEvent:
+        vp = canvas.mapFromScene(_QPointF(sx, sy))
+        return _QMouseEvent(
+            QEvent.Type.MouseMove,
+            _QPointF(vp),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    def _release(sx: float, sy: float) -> _QMouseEvent:
+        vp = canvas.mapFromScene(_QPointF(sx, sy))
+        return _QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            _QPointF(vp),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+    canvas.mousePressEvent(_press(x0, y0))
+    canvas.mouseMoveEvent(_move(x1, y1))
+    canvas.mouseReleaseEvent(_release(x1, y1))
+
+
+@pytest.mark.gui
+def test_restore_stroke_undoes_syncs_current_image_and_dirty(qtbot, tmp_path) -> None:
+    """A Restore stroke on a MainWindow: exactly ONE bbox-patch image-undo
+    entry, current_image synced to the post-stroke display, session dirty
+    (title *), Ctrl+Z reverts the stroke, and `_original_image_numpy` is
+    UNCHANGED (D-14 regression guard). No mask-undo entry is pushed either —
+    restore never touches the mask planes."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=32)
+    canvas = window.canvas
+    idx = window._current_page_index()
+    assert idx is not None
+
+    # Seed the baseline (same setup as Task 1's stamps test): the D-06 slot
+    # captures the displayed pixels via the capture-when-None gate.
+    white = np.full((32, 32, 3), 255, dtype=np.uint8)
+    canvas.set_image_from_numpy(white)
+    baseline_before = canvas._original_image_numpy
+    assert baseline_before is not None
+    assert not window.windowTitle().endswith("*")  # clean before the stroke
+
+    # Simulate a mangled inpaint: patch the display region to 50.
+    current = canvas.get_image_numpy()
+    current[10:20, 10:20] = 50
+    canvas.set_image_from_numpy(current, bbox=(10, 10, 10, 10))
+    pre_display = canvas.get_image_numpy()
+
+    # A real mouse-event Restore stroke over the patch (brush 8 -> r=4).
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(8)
+    _restore_drag(canvas, 12, 15, 18, 15)
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.processEvents()
+
+    # Pixels: stroked region back to the baseline (255); unstroked mutated
+    # pixels keep 50 (row 10 is outside the disc bbox entirely).
+    post = canvas.get_image_numpy()
+    assert np.all(post[15, 11:20] == 255)
+    assert np.all(post[10, 12:18] == 50)
+
+    # (b) current_image equals the post-stroke display (navigation/save embed).
+    assert window.image_files[idx].current_image is not None
+    assert np.array_equal(window.image_files[idx].current_image, post)
+
+    # (c) the session is dirty (title carries the * suffix).
+    assert window.windowTitle().endswith("*")
+
+    # Zero mask-undo entries from the stroke (restore is pure pixel work).
+    assert not window.history.can_undo_mask()
+
+    # (a) exactly one image-undo entry whose patch is the pre-stroke region.
+    assert window.history.can_undo_image()
+    x, y, patch = window.history.pop_image_undo(post)
+    h_p, w_p = patch.shape[:2]
+    assert np.array_equal(patch, pre_display[y : y + h_p, x : x + w_p])
+    assert not window.history.can_undo_image()
+
+    # (d) applying the popped patch restores the pre-stroke pixels.
+    canvas.apply_undo_image(x, y, patch)
+    restored = canvas.get_image_numpy()
+    assert np.array_equal(restored, pre_display)
+
+    # D-14: the stroke never rebaselined the Show Original baseline.
+    assert np.array_equal(canvas._original_image_numpy, baseline_before)

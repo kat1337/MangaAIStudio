@@ -45,14 +45,23 @@ def _transparent_mask(size: int = 100) -> QImage:
 
 
 @pytest.mark.unit
-def test_tool_mode_has_six_members() -> None:
-    """ToolMode exposes MOVE/BRUSH/RECTANGLE/LASSO/ERASER/CROP.
+def test_tool_mode_has_seven_members() -> None:
+    """ToolMode exposes MOVE/BRUSH/RECTANGLE/LASSO/ERASER/RESTORE/CROP.
 
-    Crop is the 6th tool (D-11, plan 05-07) — the Phase 3 "no 6th tool"
-    stance is superseded by D-11.
+    Crop is the 6th tool (D-11, plan 05-07); Restore is the 7th
+    (quick-260828-l3l) — the Phase 3 "no 6th tool" stance is superseded
+    by D-11.
     """
     names = {m.name for m in ToolMode}
-    assert names == {"MOVE", "BRUSH", "RECTANGLE", "LASSO", "ERASER", "CROP"}
+    assert names == {
+        "MOVE",
+        "BRUSH",
+        "RECTANGLE",
+        "LASSO",
+        "ERASER",
+        "RESTORE",
+        "CROP",
+    }
 
 
 @pytest.mark.unit

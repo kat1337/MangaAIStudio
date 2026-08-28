@@ -219,6 +219,7 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
         ToolMode.RECTANGLE,
         ToolMode.LASSO,
         ToolMode.ERASER,
+        ToolMode.RESTORE,  # the 7th tool (quick-260828-l3l), before Crop
         ToolMode.CROP,
     ]
 

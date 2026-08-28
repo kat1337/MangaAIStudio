@@ -1078,6 +1078,25 @@ class MainWindow(QMainWindow):
             lambda: self.set_active_tool(ToolMode.CROP)
         )
 
+        # The 7th tool (quick-260828-l3l): Restore — same wiring as the other
+        # tool actions (setData(ToolMode) + set_active_tool via lambda; the
+        # strip button mirrors this standalone checkable action, and
+        # set_active_tool's sync loop keeps the strip and window in sync —
+        # WR-02: the window actions are NOT members of the strip's exclusive
+        # group). Tooltip matches the strip copy. Shortcut O is installed as
+        # a window-level QShortcut in _wire_tool_actions (free letter per the
+        # window shortcut audit; O = Original).
+        self.action_tool_restore = QAction("Restore", self)
+        self.action_tool_restore.setCheckable(True)
+        self.action_tool_restore.setData(ToolMode.RESTORE)
+        self.action_tool_restore.setToolTip(
+            "Restore tool (O) — paints the original page pixels to undo"
+            " inpaint damage; hold Alt to select or move a box."
+        )
+        self.action_tool_restore.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.RESTORE)
+        )
+
         # Cancel Batch (D-09) — plan 04: emits batch_abort_requested, which the
         # running Worker.abort consumes (worker_thread.py abort_signal wiring).
         # Disabled unless a batch is running (refreshed in _refresh_action_states).
@@ -1149,6 +1168,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_rectangle)
         tools_menu.addAction(self.action_tool_lasso)
         tools_menu.addAction(self.action_tool_eraser)
+        tools_menu.addAction(self.action_tool_restore)
         tools_menu.addAction(self.action_tool_crop)
         tools_menu.addSeparator()
         # NOTE (plan 09-03, D-09): the Image section — the Rotate ▸ submenu
@@ -1351,19 +1371,25 @@ class MainWindow(QMainWindow):
             self.action_tool_rectangle,
             self.action_tool_lasso,
             self.action_tool_eraser,
+            self.action_tool_restore,
             self.action_tool_crop,
         ):
             act.setEnabled(page_open)
-        # Plan 09-01: the strip's own six actions mirror the same page-open
+        # Plan 09-01: the strip's own actions mirror the same page-open
         # gating (Move always enabled as the no-op-safe default) — the strip's
         # Detect/Inpaint buttons need nothing here (they mirror the window
         # actions via setDefaultAction and are gated above).
+        # quick-260828-l3l: Restore is page-open gated like the sibling brush
+        # tools, NOT baseline-gated — the baseline may legitimately exist
+        # before any inpaint, and the canvas press gate keeps a
+        # missing-baseline stroke a safe no-op.
         self.tools_strip.action_move.setEnabled(True)
         for act in (
             self.tools_strip.action_brush,
             self.tools_strip.action_rectangle,
             self.tools_strip.action_lasso,
             self.tools_strip.action_eraser,
+            self.tools_strip.action_restore,
             self.tools_strip.action_crop,
         ):
             act.setEnabled(page_open)
@@ -1759,6 +1785,55 @@ class MainWindow(QMainWindow):
         x2 = max(x + 1, min(w_img, math.floor(scene_rect.right())))
         y2 = max(y + 1, min(h_img, math.floor(scene_rect.bottom())))
         self._apply_crop(x, y, x2 - x, y2 - y)
+
+    # ---------------------------------------------------- restore (quick-260828-l3l)
+    def _on_restore_committed(self, payload) -> None:
+        """canvas.restore_committed -> per-stroke write-back (D-14 safe).
+
+        Mirrors ``_on_inpaint_finished``'s order EXACTLY so the committed
+        stroke reaches every surface the inpaint result reaches:
+
+        (a) unpack x, y, w, h, pre_patch (payload fields are already
+            clamped ints + a detached copy from the canvas);
+        (b) read the post-stroke composite;
+        (c) ``set_image_from_numpy(composite, bbox=...)`` refreshes
+            ``_inpainted_qimage``/display over the mutated region so the
+            P-preview side stays coherent. This NEVER overwrites the
+            existing baseline — the capture is gated on None inside the
+            canvas — so D-14 holds with no extra code: restore strokes
+            never rebaseline ``canvas._original_image_numpy``;
+        (d) write ``image_files[idx].current_image`` for the open page
+            (index guarded like the inpaint handler) so navigation and
+            save embed the post-stroke image;
+        (e) mark the session dirty (title * suffix);
+        (f) push the bbox-shaped pre-stroke patch so the existing Ctrl+Z
+            image-undo (pop_image_undo + apply_undo_image) reverts the
+            whole stroke with zero new history code.
+
+        No bare except here (WR-05 discipline): a push failure is a
+        programming error and must propagate.
+        """
+        x = int(payload["x"])
+        y = int(payload["y"])
+        w = int(payload["w"])
+        h = int(payload["h"])
+        pre_patch = payload["pre_patch"]
+
+        composite = self.canvas.get_image_numpy()
+        if composite is None:
+            return
+        self.canvas.set_image_from_numpy(composite, bbox=(x, y, w, h))
+
+        idx = self._current_page_index()
+        if idx is not None and 0 <= idx < len(self.image_files):
+            composite = self.canvas.get_image_numpy()
+            if composite is not None:
+                self.image_files[idx].current_image = composite
+
+        self._set_session_dirty()
+
+        if self.history is not None:
+            self.history.push_image_action(x, y, pre_patch)
 
     def _apply_crop(self, x: int, y: int, w: int, h: int) -> None:
         """Apply a crop end-to-end (image + mask slice, drop/clip boxes).
@@ -3578,6 +3653,10 @@ class MainWindow(QMainWindow):
         # Plan 05-07: the canvas Crop tool's Enter-apply signal funnels into
         # the shared crop apply path (_apply_crop -> _apply_geometry_op).
         self.canvas.crop_committed.connect(self._on_crop_committed)
+        # quick-260828-l3l: a finished Restore stroke funnels into the
+        # per-stroke write-back (bbox display refresh -> current_image sync ->
+        # session dirty -> history push — the _on_inpaint_finished order).
+        self.canvas.restore_committed.connect(self._on_restore_committed)
         # Default brush size so the canvas and panel agree on startup.
         self.canvas.set_brush_size(DEFAULT_BRUSH_SIZE)
 
@@ -3591,13 +3670,15 @@ class MainWindow(QMainWindow):
         # widget doesn't consume them first). Reimplemented patterned after
         # MangaCleaner_GPU main_window.py:160-163 (D-12 reference-only).
         # G = Crop, the 6th tool (D-11, plan 05-07; free letter per the
-        # UI-SPEC shortcut audit).
+        # UI-SPEC shortcut audit). O = Restore, the 7th tool
+        # (quick-260828-l3l; O = Original — free letter per the same audit).
         for key, tool in (
             ("V", ToolMode.MOVE),
             ("B", ToolMode.BRUSH),
             ("R", ToolMode.RECTANGLE),
             ("L", ToolMode.LASSO),
             ("E", ToolMode.ERASER),
+            ("O", ToolMode.RESTORE),
             ("G", ToolMode.CROP),
         ):
             shortcut = QShortcut(QKeySequence(key), self)
@@ -5061,6 +5142,7 @@ class MainWindow(QMainWindow):
             self.action_tool_rectangle,
             self.action_tool_lasso,
             self.action_tool_eraser,
+            self.action_tool_restore,
             self.action_tool_crop,
         ):
             was = act.blockSignals(True)

@@ -537,11 +537,13 @@ def test_main_window_tool_shortcuts(qtbot, tmp_path) -> None:
     # Move is enabled (no-op safe) and the painting tools are disabled.
     assert window.action_tool_move.isEnabled()
     assert window.action_tool_brush.isEnabled() is False  # no page yet
+    assert window.action_tool_restore.isEnabled() is False  # no page yet
 
-    # B/R/L/E/V shortcuts are registered on the window.
+    # B/R/L/E/O/V shortcuts are registered on the window (O = Restore,
+    # quick-260828-l3l).
     shortcuts = window.findChildren(QShortcut)
     keys = {s.key().toString().upper() for s in shortcuts}
-    for key in ("B", "R", "L", "E", "V"):
+    for key in ("B", "R", "L", "E", "O", "V"):
         assert key in keys, f"missing tool shortcut {key}"
 
 

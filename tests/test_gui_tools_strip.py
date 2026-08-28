@@ -2,10 +2,10 @@
 
 The strip is a vertical icon-only column embedded in the central widget,
 positioned BETWEEN the Pages dock and the canvas (D-05: left→right window
-order is Pages | strip | canvas | side panel). It holds exactly 8 buttons
+order is Pages | strip | canvas | side panel). It holds exactly 9 buttons
 top→bottom per D-04: Move/Pan (V), Brush (B), Rectangle (R), Lasso (L),
-Eraser (E), Crop (G), then a visual divider, then Detect Text (D) and
-Inpaint (C).
+Eraser (E), Restore (O, quick-260828-l3l), Crop (G), then a visual divider,
+then Detect Text (D) and Inpaint (C).
 
 Contract guarded here (06 D-10 / WR-02): strip tool buttons are exclusive,
 exactly ONE ``tool_changed`` emission fires per selection from every entry
@@ -75,14 +75,14 @@ def test_strip_sits_between_pages_dock_and_canvas(qtbot, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D-04 membership: 8 buttons, exclusive group of exactly 6 tool actions
+# D-04 membership: 9 buttons, exclusive group of exactly 7 tool actions
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.gui
 def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
-    """8 buttons total; the exclusive group holds EXACTLY the strip's own six
-    tool actions (window action_tool_* stay standalone)."""
+    """9 buttons total; the exclusive group holds EXACTLY the strip's own
+    seven tool actions (window action_tool_* stay standalone)."""
     window = _window(qtbot, tmp_path)
     strip = window.tools_strip
 
@@ -92,10 +92,10 @@ def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
         # QToolBar auto-creates an internal extension-popup button — not ours.
         if b.objectName() != "qt_toolbar_ext_button"
     ]
-    assert len(buttons) == 8
+    assert len(buttons) == 9
 
     actions = strip.tool_group.actions()
-    assert len(actions) == 6
+    assert len(actions) == 7
     assert strip.tool_group.isExclusive()
     for act in actions:
         assert act.isCheckable()
@@ -106,6 +106,7 @@ def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
         ToolMode.RECTANGLE,
         ToolMode.LASSO,
         ToolMode.ERASER,
+        ToolMode.RESTORE,
         ToolMode.CROP,
     }
     assert {act.data() for act in actions} == expected_modes
@@ -147,8 +148,8 @@ def test_strip_divider_between_crop_and_detect(qtbot, tmp_path) -> None:
     before = [a.defaultWidget() for a in acts[:sep_idx]]
     after = [a.defaultWidget() for a in acts[sep_idx + 1 :]]
 
-    # Six tool buttons above the divider...
-    assert len(before) == 6
+    # Six tool buttons above the divider... (+ Restore, quick-260828-l3l: 7)
+    assert len(before) == 7
     tool_buttons = [
         b
         for b in before
@@ -234,6 +235,7 @@ _ICON_NAMES = [
     "rectangle",
     "lasso",
     "eraser",
+    "restore",
     "crop",
     "detect-text",
     "inpaint",
@@ -342,3 +344,86 @@ def test_strip_icon_assets_art_direction(tmp_path) -> None:
         assert 'viewBox="0 0 24 24"' in text, name
         assert "#e8e8ea" in text, name
         assert 'fill="none"' in text, name
+
+
+# ---------------------------------------------------------------------------
+# quick-260828-l3l: Restore (the 7th tool) on the strip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_strip_has_restore_action_carrying_toolmode(qtbot, tmp_path) -> None:
+    """The strip exposes action_restore carrying ToolMode.RESTORE, member of
+    the exclusive group, and the group holds EXACTLY seven actions."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    assert strip.action_restore.data() == ToolMode.RESTORE
+    assert strip.action_restore.actionGroup() is strip.tool_group
+    assert strip.action_restore.isCheckable()
+    assert len(strip.tool_group.actions()) == 7
+    # Restore sits after Eraser, before Crop (destructive/geometry last).
+    order = [strip._action_to_tool[a] for a in strip.tool_group.actions()]
+    assert order.index(ToolMode.RESTORE) == order.index(ToolMode.ERASER) + 1
+    assert order.index(ToolMode.CROP) == order.index(ToolMode.RESTORE) + 1
+    # The tooltip carries the O shortcut + the brush-family Alt clause.
+    assert "(O)" in strip.action_restore.toolTip()
+    assert "Alt" in strip.action_restore.toolTip()
+
+
+@pytest.mark.gui
+def test_set_active_tool_restore_checks_strip_and_emits(qtbot, tmp_path) -> None:
+    """Selecting Restore (the user toggled path) checks the restore action,
+    emits tool_changed with RESTORE exactly once, and drives the canvas +
+    window action through set_active_tool; a programmatic set_active_tool
+    emits ZERO additional signals (WR-02)."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    emitted: list = []
+    strip.tool_changed.connect(emitted.append)
+
+    # User path: checking the strip action emits EXACTLY once.
+    strip.action_restore.setChecked(True)
+    QApplication.processEvents()
+
+    assert strip.active_tool() == ToolMode.RESTORE
+    assert strip.action_restore.isChecked()
+    assert strip.action_brush.isChecked() is False  # exclusivity
+    assert window.canvas.current_tool == ToolMode.RESTORE
+    assert window.action_tool_restore.isChecked()
+    assert emitted == [ToolMode.RESTORE]
+
+    # Programmatic path: syncs everywhere but emits NOTHING.
+    window.set_active_tool(ToolMode.BRUSH)
+    QApplication.processEvents()
+    assert strip.active_tool() == ToolMode.BRUSH
+    assert strip.action_restore.isChecked() is False
+    assert window.action_tool_restore.isChecked() is False
+    assert emitted == [ToolMode.RESTORE]
+
+
+@pytest.mark.gui
+def test_restore_button_follows_page_open_gating(qtbot, tmp_path) -> None:
+    """The restore strip button + window action are disabled without a page
+    and enabled once a page is open (page-open gating like the brush tools —
+    NOT baseline-gated; a missing baseline is a canvas-level safe no-op)."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    # No page open yet.
+    assert strip.action_restore.isEnabled() is False
+    assert window.action_tool_restore.isEnabled() is False
+
+    # Open a page.
+    img_path = tmp_path / "page.png"
+    from PySide6.QtGui import QColor, QImage
+
+    img = QImage(32, 32, QImage.Format.Format_RGB32)
+    img.fill(QColor(255, 255, 255))
+    img.save(str(img_path))
+    window._open_single_image(img_path)
+    window._refresh_action_states()
+
+    assert strip.action_restore.isEnabled() is True
+    assert window.action_tool_restore.isEnabled() is True

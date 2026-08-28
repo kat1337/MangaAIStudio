@@ -47,6 +47,7 @@ _TOOL_ICONS: dict[ToolMode, str] = {
     ToolMode.RECTANGLE: "rectangle",
     ToolMode.LASSO: "lasso",
     ToolMode.ERASER: "eraser",
+    ToolMode.RESTORE: "restore",
     ToolMode.CROP: "crop",
 }
 
@@ -153,6 +154,14 @@ class ToolsStrip(QToolBar):
             " move a box.",
             ToolMode.ERASER,
         )
+        # quick-260828-l3l: Restore (the 7th tool) — sits after Eraser, before
+        # Crop, so the destructive/canvas-geometry tools stay last in the row.
+        self.action_restore = self._make_tool_action(
+            "Restore",
+            "Restore tool (O) — paints the original page pixels to undo"
+            " inpaint damage; hold Alt to select or move a box.",
+            ToolMode.RESTORE,
+        )
         # Crop tooltip per UI-SPEC §Copywriting (inherited Phase 5 copy).
         self.action_crop = self._make_tool_action(
             "Crop",
@@ -168,6 +177,7 @@ class ToolsStrip(QToolBar):
             self.action_rectangle: ToolMode.RECTANGLE,
             self.action_lasso: ToolMode.LASSO,
             self.action_eraser: ToolMode.ERASER,
+            self.action_restore: ToolMode.RESTORE,
             self.action_crop: ToolMode.CROP,
         }
         # Connect each action's toggled signal so tool_changed fires whether
@@ -187,6 +197,7 @@ class ToolsStrip(QToolBar):
             self.action_rectangle,
             self.action_lasso,
             self.action_eraser,
+            self.action_restore,
             self.action_crop,
         ):
             btn = QToolButton(self)
