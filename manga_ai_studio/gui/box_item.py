@@ -662,10 +662,12 @@ class TypesetOverlayItem(QGraphicsItem):
         text clears the cache (nothing renders).
 
         Plan 07-05 (D-14): the pixmap pads the ink by the renderer's FULL
-        effect padding (``effect_padding`` — outline half-width + glow/
+        effect padding (``effect_padding`` — outline width + glow/
         shadow radii + offsets) so enabled effect halos never clip on the
         canvas (the 07-03 handoff: the bake never clips, the canvas now
-        matches it — D-01 canvas ≡ bake).
+        matches it — D-01 canvas ≡ bake). quick-260827-0id: the outline
+        term is the FULL ``width_px`` — the ring reaches that far outside
+        the ink.
 
         quick-260826-09m: the surface is now sized by MEASUREMENT, not
         analytically — pass 1 paints into an oversized scratch exactly as

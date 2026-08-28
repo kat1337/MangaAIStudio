@@ -279,9 +279,11 @@ def test_effects_shadow_offset(qapp) -> None:
 
 @pytest.mark.unit
 def test_effects_padding(qapp) -> None:
-    """effect_padding(style) = outline half-width + max(glow radius, shadow
+    """effect_padding(style) = outline width + max(glow radius, shadow
     radius) + |max offset|; the paint output extends beyond the glyph bbox
-    by roughly the padding margin (halos are not clipped)."""
+    by roughly the padding margin (halos are not clipped). The outline term
+    is the FULL width_px (quick-260827-0id): the ring reaches that far
+    outside the ink."""
     style = TextStyle(
         font_size_px=24.0,
         auto_fit=False,
@@ -297,8 +299,8 @@ def test_effects_padding(qapp) -> None:
             "opacity": 1.0,
         },
     )
-    assert effect_padding(style) == pytest.approx(1.0 + 6.0 + 2.0), (
-        "padding = outline half-width (1) + max radius (6) + |max offset| (2)"
+    assert effect_padding(style) == pytest.approx(2.0 + 6.0 + 2.0), (
+        "padding = full outline width (2) + max radius (6) + |max offset| (2)"
     )
     # The paint output extends beyond the glyph bbox by the expected margin:
     # with a glow-only style (no shadow interference), red glow pixels exist

@@ -11,16 +11,22 @@ Mechanism notes (verified by probe on the pinned Python 3.14.2 / PySide6
 6.10.1 stack):
 
 - Text layout uses ``QTextDocument`` (plain-text only — ASVS V5: no
-  rich-text rendering of OCR/translation content) with a merged
-  ``QTextCharFormat``: the opaque fill rides the foreground brush (D-01) and
-  the outline rides ``setTextOutline`` (Phase 4 Pattern 3 — the single clean
-  API for outlined glyphs). The plan's alternative outline mechanism
-  (``QPainterPath.addText`` + ``strokePath``) crashes the interpreter on
-  this stack (fast-fail 0xC0000409, probed), and ``QTextLayout``'s line
-  machinery access-violates before a forced document layout — the
-  QTextDocument path is the production-proven Phase 4 mechanism; the
-  UI-SPEC locks the LOOK (opaque fill + outline at the styled width/color),
-  not the mechanism.
+  rich-text rendering of OCR/translation content). The outline is a
+  TWO-PASS under-fill (quick-260827-0id): pass 1 paints the whole run as a
+  solid outline-color SILHOUETTE dilated by the FULL outline width
+  (a doubled-width round-join stroke over an outline-color fill — the
+  Minkowski dilation of the glyphs), pass 2 repaints the fill-only
+  document on top. The visible ring is ``width_px`` deep OUTWARD of the
+  glyphs and interiors stay pure fill (the legacy ``setTextOutline``
+  centered stroke put half the band INSIDE the letterforms — an inline at
+  SFX widths — and let stacked vertical neighbors chew each other's fill;
+  the global silhouette-before-fill ordering in ``_paint_fill_pass`` closes
+  both). ``QPainterPath.addText`` + ``strokePath`` remains disqualified on
+  this stack (fast-fail 0xC0000409, probed), as does ``QTextLayout``'s
+  line machinery before a forced document layout — the QTextDocument glyph
+  mechanism is the production-proven one; the UI-SPEC locks the LOOK
+  (opaque fill + outward ring at the styled width/color), not the
+  mechanism.
 - The document layout is FORCED via ``documentLayout().documentSize()``
   before any block-layout reads (reading ``lineAt()`` on an un-laid-out
   block access-violates on this stack).
@@ -178,16 +184,20 @@ _EFFECT_MAX_PIXELS = 64_000_000  # planner-pinned pixel budget
 def effect_padding(style: TextStyle) -> float:
     """The halo/shadow/outline margin around the ink (RESEARCH Pattern 3).
 
-    ``outline half-width + max(glow radius, shadow radius) + |max offset|``
-    — only enabled effects contribute (skipped effects add nothing). Callers
-    (the canvas overlay's bounding rect in plan 07-05, the effect surface
-    sizing here) expand the ink by this on every side so neither the canvas
-    nor the bake clips the halo (Pitfall 2 guard).
+    ``outline width + max(glow radius, shadow radius) + |max offset|`` —
+    only enabled effects contribute (skipped effects add nothing). The
+    outline term is the FULL ``width_px`` (quick-260827-0id): the rendered
+    ring now reaches ``width_px`` OUTSIDE the ink (two-pass silhouette-
+    under-fill), so measurement must reserve the whole width. Callers (the
+    canvas overlay's measured-crop window in box_item.TypesetOverlayItem,
+    the effect surface sizing here) expand the ink by this on every side so
+    neither the canvas nor the bake clips the halo (Pitfall 2 guard) — ONE
+    shared function keeps the measurement == render contract for both.
     """
     pad = 0.0
     outline = style.outline if isinstance(style.outline, dict) else {}
     if outline.get("enabled", True):
-        pad += float(outline.get("width_px", 0.0) or 0.0) / 2.0
+        pad += float(outline.get("width_px", 0.0) or 0.0)
     radii: list[float] = []
     offsets: list[float] = []
     glow = style.glow if isinstance(style.glow, dict) else {}
@@ -339,12 +349,15 @@ def _build_document(
 ) -> QTextDocument:
     """Lay out ``text`` as a PLAIN document at ``size_px`` wrapped per ``wrap``.
 
-    The merged ``QTextCharFormat`` carries the opaque fill (D-01) and the
-    outline pen (Pattern 3). ``wrap`` defaults to the legacy greedy engine
-    mode so any caller that has not adopted the owned line breaker keeps its
-    behavior; ``layout()`` passes ``NoWrap`` for pre-broken lines
-    (quick-260822-wvf). The document layout is FORCED before returning
-    so the caller's block-layout reads are safe on this stack.
+    FILL-CANONICAL (quick-260827-0id): the merged ``QTextCharFormat``
+    carries ONLY the opaque fill (D-01) — the outline is painted by the
+    separate ``_paint_outline_pass`` silhouette UNDER this document, so the
+    document is the pure fill pass verbatim. ``wrap`` defaults to the
+    legacy greedy engine mode so any caller that has not adopted the owned
+    line breaker keeps its behavior; ``layout()`` passes ``NoWrap`` for
+    pre-broken lines (quick-260822-wvf). The document layout is FORCED
+    before returning so the caller's block-layout reads are safe on this
+    stack.
     """
     doc = QTextDocument()
     doc.setPlainText(text)  # ASVS V5: PLAIN text only — no rich-text injection
@@ -359,9 +372,6 @@ def _build_document(
     fmt = QTextCharFormat()
     fmt.setFont(font)
     fmt.setForeground(QBrush(fill))
-    pen = _outline_pen(style)
-    if pen is not None:
-        fmt.setTextOutline(pen)
     cursor = QTextCursor(doc)
     cursor.select(QTextCursor.SelectionType.Document)
     cursor.mergeCharFormat(fmt)
@@ -879,19 +889,21 @@ def _normalize_rotation(deg) -> float:
 
 
 def paint(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
-    """Draw ``result`` through ``painter`` — effect passes, then fill+outline.
+    """Draw ``result`` through ``painter`` — effect passes, then the
+    silhouette-then-fill composite.
 
     Shared by the canvas overlay and the bake (D-01, ONE code path): the
     glow + drop-shadow silhouette passes (D-14) composite BEHIND the glyphs
-    (``CompositionMode_DestinationOver``) and the fill/outline pass draws on
-    top. Horizontal: the laid-out document at ``result.origin`` (engine wrap
-    + alignment; the merged char format carries the opaque fill and the
-    outline). Vertical: the per-char placements (upright or rotated 90 deg —
-    never the whole block, D-11) drawn through per-char plain documents
-    with the same merged format. No clip is ever installed (UI-SPEC A6 —
-    overflow renders unclipped on both the canvas and the bake). Effects
-    are skipped when disabled (the default); an oversized effect surface
-    degrades to no-glow with a loguru warning (T-07-07), never an OOM.
+    (``CompositionMode_DestinationOver``) and the outline silhouette +
+    fill composite draws on top (``_paint_fill_pass`` — the outline ring
+    extends strictly OUTWARD, quick-260827-0id). Horizontal: the laid-out
+    document at ``result.origin`` (engine wrap + alignment). Vertical: the
+    per-char placements (upright or rotated 90 deg — never the whole block,
+    D-11) drawn through per-char plain documents. No clip is ever installed
+    (UI-SPEC A6 — overflow renders unclipped on both the canvas and the
+    bake). Effects are skipped when disabled (the default); an oversized
+    effect surface degrades to no-glow with a loguru warning (T-07-07),
+    never an OOM.
 
     quick-260824-viq (b): when the style carries a rotation, the WHOLE draw
     (effects + glyphs) rotates about ``result.box_center`` as ONE transform
@@ -913,33 +925,106 @@ def paint(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
 
 
 def _paint_fill_pass(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
-    """The fill + outline pass only (no effects) — horizontal or vertical.
+    """The ordered composite: outline SILHOUETTE first, then the pure fill.
 
-    Also used by the effect silhouette builder, so the halo/shadow shape is
-    exactly the glyph shape the main pass draws (D-01: one shared path).
+    quick-260827-0id: the outline pass paints the whole run as an
+    outline-color silhouette dilated by the full width BEFORE any fill
+    pixel is drawn, so a ring can never chew a neighboring glyph's fill
+    (vertical stacks included) and the interior stays pure fill. The
+    document itself is fill-canonical (``_build_document`` sets no outline),
+    so the fill draw below is the plain glyph verbatim. Zero-cost when the
+    outline is disabled/zero (``_paint_outline_pass`` short-circuits on the
+    ``None`` pen before any cloning). Also used by the effect silhouette
+    builder, so the halo/shadow shape is exactly the composited glyph shape
+    the main pass draws — outline ring included (D-01: one shared path).
     """
+    _paint_outline_pass(painter, result, style)
     if result.vertical_placements:
-        _paint_vertical(painter, result, style)
+        _paint_vertical(
+            painter, result, style, _valid_color(style.color, "#000000"), None
+        )
     else:
         result.document.drawContents(painter)
 
 
-def _paint_vertical(painter: QPainter, result: LayoutResult, style: TextStyle) -> None:
-    """Per-char vertical painting (D-11).
+def _paint_outline_pass(
+    painter: QPainter, result: LayoutResult, style: TextStyle
+) -> None:
+    """The outline-color SILHOUETTE pass (quick-260827-0id) — the outward ring.
+
+    Paints the whole run as a solid outline-color silhouette dilated by the
+    FULL outline width: the silhouette document carries the outline color as
+    its fill plus a DOUBLED-width round cap/join stroke — stroke centered on
+    the glyph boundary at width 2W reaches W outside and W inside, and the
+    inside half is covered again by the later fill pass, so the visible band
+    is exactly W deep OUTWARD (a true Minkowski dilation of the glyphs).
+
+    ``None`` pen (outline disabled or width 0) returns immediately — zero
+    extra passes, no added pixels, byte-identical to the legacy disabled
+    path. Horizontal: a ``_formatted_clone`` of the laid-out document (all
+    layout state rides along untouched). Vertical: the per-char variant
+    documents driven once with (outline color, silhouette pen).
+    """
+    pen = _outline_pen(style)
+    if pen is None:
+        return
+    silhouette_pen = QPen(
+        pen.color(),
+        2.0 * pen.widthF(),
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+        Qt.PenJoinStyle.RoundJoin,
+    )
+    if result.vertical_placements:
+        _paint_vertical(painter, result, style, pen.color(), silhouette_pen)
+    else:
+        clone = _formatted_clone(result.document, pen.color(), silhouette_pen)
+        clone.drawContents(painter)
+
+
+def _formatted_clone(
+    document: QTextDocument, fill: QColor, pen: QPen
+) -> QTextDocument:
+    """A ``QTextDocument.clone()`` with ONLY foreground + text outline merged.
+
+    The clone preserves ALL layout state (alignment, wrap, block margins,
+    textWidth); the Document-selection ``mergeCharFormat`` sets ONLY
+    ``setForeground`` + ``setTextOutline``, so fonts/alignment/wrap ride
+    along untouched and the clone re-wraps identically — the outline is
+    decorative, not part of the metrics.
+    """
+    clone = document.clone()
+    fmt = QTextCharFormat()
+    fmt.setForeground(QBrush(fill))
+    fmt.setTextOutline(pen)
+    cursor = QTextCursor(clone)
+    cursor.select(QTextCursor.SelectionType.Document)
+    cursor.mergeCharFormat(fmt)
+    return clone
+
+
+def _paint_vertical(
+    painter: QPainter,
+    result: LayoutResult,
+    style: TextStyle,
+    fill_color: QColor,
+    pen: QPen | None,
+) -> None:
+    """Per-char vertical painting (D-11), parameterized per pass.
 
     Each placement's glyph is drawn centered in its box; classified runs
     rotate 90 deg clockwise around the box center (per-RUN rotation — the
-    W3C mixed orientation; never the whole block). The fill and outline
-    ride ONE merged ``QTextCharFormat`` on a per-char PLAIN document — the
-    proven Phase 4 mechanism (``QPainterPath.addText``/``QTextLayout``
+    W3C mixed orientation; never the whole block). Driven TWICE by the
+    composite in ``_paint_fill_pass`` (quick-260827-0id): once with the
+    outline color + doubled silhouette pen (the silhouette pass), once with
+    the style fill and no pen (the fill pass) — the per-char PLAIN document
+    is the proven glyph mechanism (``QPainterPath.addText``/``QTextLayout``
     glyph paths crash this Python 3.14.2 / PySide6 6.10.1 stack — see the
-    module docstring and the 07-01 deviation note).
+    module docstring).
     """
     font = _style_font(style, result.used_font_size_px)
-    fill = _valid_color(style.color, "#000000")
-    pen = _outline_pen(style)
     for p in result.vertical_placements:
-        doc = _char_document(p["char"], font, fill, pen)
+        doc = _char_document(p["char"], font, fill_color, pen)
         ntr = _doc_ink_rect(doc)
         if ntr.isNull():
             continue
@@ -955,8 +1040,10 @@ def _paint_vertical(painter: QPainter, result: LayoutResult, style: TextStyle) -
 def _char_document(char: str, font: QFont, fill: QColor, pen: QPen | None) -> QTextDocument:
     """A single-char PLAIN document with the merged fill/outline format.
 
-    The vertical per-char paint path (the layout is forced before returning
-    so the ink-rect read is stack-safe).
+    The generic variant-document factory the paint passes drive (the
+    vertical path builds one per placement per pass); ``pen=None`` renders
+    the fill-only variant. The layout is forced before returning so the
+    ink-rect read is stack-safe.
     """
     doc = QTextDocument()
     doc.setPlainText(char)  # ASVS V5: plain text only — no rich-text injection
@@ -1034,8 +1121,10 @@ def _draw_effects(painter: QPainter, result: LayoutResult, style: TextStyle) -> 
         )
         return
 
-    # 1) The glyph silhouette: the fill pass rendered into the surface
-    #    (transparent background) — the SAME code path as the main paint.
+    # 1) The glyph silhouette: the fill pass (outline silhouette + fill
+    #    composite — the ring included, quick-260827-0id) rendered into the
+    #    surface (transparent background) — the SAME code path as the main
+    #    paint; effect_padding reserves the full outline width for it.
     surface_painter = QPainter(surface)
     surface_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     surface_painter.translate(-rect.left(), -rect.top())
