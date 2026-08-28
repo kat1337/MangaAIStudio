@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-27 — Completed quick task 260827-0id: outline now grows OUTWARD (two-pass silhouette-under-fill paint, was Qt's centered setTextOutline stroke eating into glyphs); effect_padding reserves full outline width; canvas/vertical/rotation/glow/export all share the one paint path; full suite 1188 passed
+Last activity: 2026-08-27 — Direct (non-quick) change 3bd4768: Spacing H/V now allow negative values (tighten below the natural glyph gap; TextStyle clamps mirrored -64..64 / -256..256; negative line gap via LineDistanceHeight since the layout clamps negative topMargin) — full suite 1188 passed
 
 ## Performance Metrics
 
