@@ -509,24 +509,27 @@ class InspectorPanel(QWidget):
         # separation and vertical line/column separation, riding
         # style.char_spacing_px / style.line_spacing_px through the SHARED
         # renderer (measurement == render). The ranges match the TextStyle
-        # V5 clamps (0..64 / 0..256) so the UI can never produce a value the
-        # model would clamp differently.
+        # V5 clamps (-64..64 / -256..256 — negatives TIGHTEN, letting the
+        # letters sit closer than the font's natural advance) so the UI can
+        # never produce a value the model would clamp differently.
         self.char_spacing_spin = QSpinBox()
-        self.char_spacing_spin.setRange(0, 64)
+        self.char_spacing_spin.setRange(-64, 64)
         self.char_spacing_spin.setSuffix(" px")
         self.char_spacing_spin.setValue(0)
         self.char_spacing_spin.setToolTip(
             "Extra horizontal gap between characters."
+            " Negative values pull them closer together."
         )
         form.addRow("Spacing H", self.char_spacing_spin)
 
         self.line_spacing_spin = QSpinBox()
-        self.line_spacing_spin.setRange(0, 256)
+        self.line_spacing_spin.setRange(-256, 256)
         self.line_spacing_spin.setSuffix(" px")
         self.line_spacing_spin.setValue(0)
         self.line_spacing_spin.setToolTip(
             "Extra vertical gap between lines (or between stacked "
-            "characters in vertical text)."
+            "characters in vertical text). Negative values pull "
+            "them closer together."
         )
         form.addRow("Spacing V", self.line_spacing_spin)
 

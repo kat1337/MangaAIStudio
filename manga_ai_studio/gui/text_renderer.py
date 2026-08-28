@@ -295,18 +295,20 @@ def current_focus_text(pb) -> str:
 def _style_font(style: TextStyle, size_px: float) -> QFont:
     """The style's font at ``size_px`` scene px (pixel-accurate for WYSIWYG).
 
-    quick-260824-viq: when ``char_spacing_px`` > 0 the font carries
+    quick-260824-viq: when ``char_spacing_px`` != 0 the font carries
     ``QFont.AbsoluteSpacing`` letter spacing so MEASUREMENT
     (``_break_lines_for``'s ``QFontMetricsF.horizontalAdvance``) and RENDER
     (the document's char format) share ONE construction — no divergence
-    window between where lines break and where glyphs draw.
+    window between where lines break and where glyphs draw. Negative values
+    (spacing may TIGHTEN) ride the same channel —
+    AbsoluteSpacing accepts negative pixel gaps natively.
     """
     font = QFont(style.font_family)
     font.setBold(style.bold)
     font.setItalic(style.italic)
     font.setPixelSize(max(1, int(round(size_px))))
     char_spacing = float(getattr(style, "char_spacing_px", 0.0) or 0.0)
-    if char_spacing > 0.0:
+    if char_spacing != 0.0:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, char_spacing)
     return font
 
@@ -381,12 +383,31 @@ def _build_document(
     # the gaps and the overflow check + auto-fit loop account for them with
     # zero extra logic. The existing block format is COPIED and merged (only
     # the top margin changes) — never replaced wholesale.
+    #
+    # Negative line_spacing (tightening — letters/lines closer than the
+    # font's natural gap) CANNOT ride the margin: QTextDocumentLayout clamps
+    # negative block margins to zero (probe-verified). LineDistanceHeight IS
+    # honored additively (negative pulls the following lines up), and
+    # documentSize() accounts for it — so measurement, align_v centering and
+    # the auto-fit predicate all stay on the same page. Positive values keep
+    # the legacy margin path byte-for-byte.
     line_spacing = float(getattr(style, "line_spacing_px", 0.0) or 0.0)
     if line_spacing > 0.0:
         block = doc.firstBlock().next()  # skip the first block
         while block.isValid():
             bf = QTextBlockFormat(block.blockFormat())
             bf.setTopMargin(line_spacing)
+            block_cursor = QTextCursor(block)
+            block_cursor.setBlockFormat(bf)
+            block = block.next()
+    elif line_spacing < 0.0:
+        # Tightening branch — see the comment above (LineDistanceHeight is
+        # the only mechanism the layout actually honors for negative gaps).
+        _LINE_DISTANCE_HEIGHT = 4  # QTextBlockFormat.LineHeightTypes
+        block = doc.firstBlock().next()  # skip the first block
+        while block.isValid():
+            bf = QTextBlockFormat(block.blockFormat())
+            bf.setLineHeight(line_spacing, _LINE_DISTANCE_HEIGHT)
             block_cursor = QTextCursor(block)
             block_cursor.setBlockFormat(bf)
             block = block.next()

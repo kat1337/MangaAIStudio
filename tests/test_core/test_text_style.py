@@ -368,16 +368,20 @@ def test_v5_clamps_rotation_deg() -> None:
 
 @pytest.mark.unit
 def test_v5_clamp_char_and_line_spacing_px() -> None:
-    """char_spacing_px clamps into 0..64; line_spacing_px into 0..256;
-    non-numeric falls back to the default, never raises (V5 — T-VIQ-01)."""
+    """char_spacing_px clamps into -64..64; line_spacing_px into -256..256
+    (negatives TIGHTEN — spacing below the font's natural gap is the point
+    of the controls); non-numeric falls back to the default, never raises
+    (V5 — T-VIQ-01)."""
     assert TextStyle.from_dict({"char_spacing_px": 100}).char_spacing_px == 64.0
-    assert TextStyle.from_dict({"char_spacing_px": -5}).char_spacing_px == 0.0
+    assert TextStyle.from_dict({"char_spacing_px": -5}).char_spacing_px == -5.0
+    assert TextStyle.from_dict({"char_spacing_px": -999}).char_spacing_px == -64.0
     assert TextStyle.from_dict({"char_spacing_px": 8.5}).char_spacing_px == 8.5
     assert TextStyle.from_dict({"char_spacing_px": "wide"}).char_spacing_px == 0.0
     assert TextStyle.from_dict({"char_spacing_px": False}).char_spacing_px == 0.0
 
     assert TextStyle.from_dict({"line_spacing_px": 999}).line_spacing_px == 256.0
-    assert TextStyle.from_dict({"line_spacing_px": -1}).line_spacing_px == 0.0
+    assert TextStyle.from_dict({"line_spacing_px": -1}).line_spacing_px == -1.0
+    assert TextStyle.from_dict({"line_spacing_px": -999}).line_spacing_px == -256.0
     assert TextStyle.from_dict({"line_spacing_px": 20.25}).line_spacing_px == 20.25
     assert TextStyle.from_dict({"line_spacing_px": "tall"}).line_spacing_px == 0.0
     assert TextStyle.from_dict({"line_spacing_px": None}).line_spacing_px == 0.0

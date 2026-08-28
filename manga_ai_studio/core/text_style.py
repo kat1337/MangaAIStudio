@@ -17,7 +17,8 @@ governs.
 Serialization (``to_dict`` / ``from_dict``) is the SINGLE spelling shared by
 the persistence writers (D-07 — one dict builder under test). ``from_dict``
 is the V5 input boundary: every numeric is type-checked and clamped
-(font size 1..1024, effect widths/radii 0..256, opacity 0..1), non-numeric
+(font size 1..1024, effect widths/radii 0..256, opacity 0..1,
+spacing H -64..64 / V -256..256 — negatives tighten), non-numeric
 values fall back to defaults WITHOUT raising, unknown keys are ignored, and
 ``None``/missing input returns the defaults (Pitfall 8 backward compat — old
 files carry no style block).
@@ -52,8 +53,10 @@ _OPACITY_MAX = 1.0
 
 # quick-260824-viq bounds: free-angle text rotation is clamped to a full
 # half-turn in either direction; character spacing and line/column spacing
-# are non-negative gaps with generous ceilings (a larger value is garbage,
-# not intent). quick-260826-vhh promotes the effect geometry bound into the
+# allow NEGATIVE values (tightening — the point of the controls is letting
+# letters sit closer than the font's natural advance), down to mirrored
+# generous floors with the same non-garbage ceilings as before.
+# quick-260826-vhh promotes the effect geometry bound into the
 # same PUBLIC block (one shared symbol, no private duplicate): the Inspector
 # spins read ``EFFECT_GEOM_MAX`` directly so the UI range == the model clamp
 # by construction. Generous sanity ceiling like its neighbors — a big SFX
@@ -61,6 +64,8 @@ _OPACITY_MAX = 1.0
 ROTATION_MAX = 180.0
 CHAR_SPACING_MAX = 64.0
 LINE_SPACING_MAX = 256.0
+CHAR_SPACING_MIN = -64.0
+LINE_SPACING_MIN = -256.0
 EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
 
 _ALIGN_H_VALUES = ("left", "center", "right")
@@ -259,10 +264,10 @@ class TextStyle:
                 d.get("rotation_deg"), -ROTATION_MAX, ROTATION_MAX, 0.0
             ),
             char_spacing_px=_clamp_float(
-                d.get("char_spacing_px"), 0.0, CHAR_SPACING_MAX, 0.0
+                d.get("char_spacing_px"), CHAR_SPACING_MIN, CHAR_SPACING_MAX, 0.0
             ),
             line_spacing_px=_clamp_float(
-                d.get("line_spacing_px"), 0.0, LINE_SPACING_MAX, 0.0
+                d.get("line_spacing_px"), LINE_SPACING_MIN, LINE_SPACING_MAX, 0.0
             ),
             outline=_coerce_effect(d.get("outline"), DEFAULT_OUTLINE),
             glow=_coerce_effect(d.get("glow"), DEFAULT_GLOW),
