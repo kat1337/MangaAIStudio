@@ -8,9 +8,10 @@ undo snapshots never alias the live style (RESEARCH Pitfall 8/1).
 
 Defaults are the Phase 4 overlay look made opaque, with a black-text
 default (quick task 260822-347): Liberation Sans, Auto-fit on,
-``#000000`` opaque fill, outline DISABLED by default (the stroke's
-``#0b0b0e`` color / 2px width are retained as the enable-time defaults),
-glow and shadow OFF, center/middle alignment, horizontal.
+``#000000`` opaque fill, outline DISABLED by default (black text over
+manga artwork is the dominant case, so the enable-time stroke defaults
+to WHITE — ``#ffffff`` — at 2px width), glow and shadow OFF,
+center/middle alignment, horizontal.
 ``font_size_px=None`` means Auto (D-15) — the 04-09 fit-in-box machinery
 governs.
 
@@ -35,7 +36,7 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 DEFAULT_FONT_FAMILY = "Liberation Sans"
 DEFAULT_COLOR = "#000000"
-DEFAULT_OUTLINE = {"enabled": False, "color": "#0b0b0e", "width_px": 2.0}
+DEFAULT_OUTLINE = {"enabled": False, "color": "#ffffff", "width_px": 2.0}
 DEFAULT_GLOW = {"enabled": False, "color": "#e8e8ea", "radius_px": 4.0, "opacity": 0.8}
 DEFAULT_SHADOW = {
     "enabled": False,

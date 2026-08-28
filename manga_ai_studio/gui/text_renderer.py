@@ -334,7 +334,7 @@ def _outline_pen(style: TextStyle) -> QPen | None:
     if width <= 0.0:
         return None
     return QPen(
-        _valid_color(str(outline.get("color", "#0b0b0e")), "#0b0b0e"),
+        _valid_color(str(outline.get("color", "#ffffff")), "#ffffff"),
         width,
         Qt.PenStyle.SolidLine,
         Qt.PenCapStyle.RoundCap,

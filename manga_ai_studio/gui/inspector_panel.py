@@ -217,7 +217,7 @@ _FONT_STYLE_NAME = {
 # the effect-row loop below). Colors = the semantic defaults. Used when a
 # MIXED row's user interaction needs a real value where the sentinel sat
 # (Pitfall 7 — a commit always carries real values).
-_EFFECT_DEFAULT_COLORS = {"outline": "#0b0b0e", "glow": "#e8e8ea", "shadow": "#000000"}
+_EFFECT_DEFAULT_COLORS = {"outline": "#ffffff", "glow": "#e8e8ea", "shadow": "#000000"}
 _EFFECT_DEFAULT_VALUES = {"outline": 2, "glow": 4, "shadow": 2}
 
 
@@ -604,7 +604,7 @@ class InspectorPanel(QWidget):
         self._loaded_style_align_h = "Center"
         self._loaded_style_align_v = "Middle"
         self._loaded_effects: dict = {
-            "outline": {"enabled": True, "color": "#0b0b0e", "value": 2},
+            "outline": {"enabled": True, "color": "#ffffff", "value": 2},
             "glow": {"enabled": False, "color": "#e8e8ea", "value": 4},
             "shadow": {"enabled": False, "color": "#000000", "value": 2},
         }

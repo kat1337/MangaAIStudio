@@ -258,9 +258,10 @@ def test_style_commit_signal_fires(qtbot) -> None:
     panel.align_combo.setCurrentIndex(0)  # Left
     assert fired["align"] == [("left", "middle")]
     # The default style now ships outline DISABLED (quick task 260822-347),
-    # so checking it ON is the real-change toggle.
+    # so checking it ON is the real-change toggle. The enable-time default
+    # color is WHITE (black text + white stroke is the dominant manga case).
     panel._effect_checks["outline"].setChecked(True)
-    assert fired["effect"] == [("outline", {"enabled": True, "color": "#0b0b0e", "value": 2})]
+    assert fired["effect"] == [("outline", {"enabled": True, "color": "#ffffff", "value": 2})]
     # ---- WR-01 no-op focus cycles: no NEW emissions.
     panel.align_combo.setCurrentIndex(0)  # unchanged
     panel.size_spin.editingFinished.emit()  # unchanged value
@@ -273,7 +274,7 @@ def test_style_commit_signal_fires(qtbot) -> None:
     assert fired["color"] == ["#112233"]
     assert fired["align"] == [("left", "middle")]
     assert fired["effect"] == [
-        ("outline", {"enabled": True, "color": "#0b0b0e", "value": 2})
+        ("outline", {"enabled": True, "color": "#ffffff", "value": 2})
     ]
 
 

@@ -45,7 +45,7 @@ def test_defaults_match_ui_spec_a1() -> None:
     assert s.align_h == "center"
     assert s.align_v == "middle"
     assert s.vertical is False
-    assert s.outline == {"enabled": False, "color": "#0b0b0e", "width_px": 2.0}
+    assert s.outline == {"enabled": False, "color": "#ffffff", "width_px": 2.0}
     assert s.glow == {"enabled": False, "color": "#e8e8ea", "radius_px": 4.0, "opacity": 0.8}
     assert s.shadow == {"enabled": False, "color": "#000000", "radius_px": 4.0, "dx": 2.0, "dy": 2.0, "opacity": 0.6}
 
@@ -186,7 +186,7 @@ def test_wrong_effect_key_shape_falls_back_to_defaults() -> None:
     s2 = TextStyle.from_dict({"outline": {"width_px": 5.0}})
     assert s2.outline["width_px"] == 5.0
     assert s2.outline["enabled"] is False
-    assert s2.outline["color"] == "#0b0b0e"
+    assert s2.outline["color"] == "#ffffff"
 
 
 @pytest.mark.unit
