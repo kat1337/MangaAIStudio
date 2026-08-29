@@ -197,9 +197,8 @@ _INPAINT_DISPLAY = {None: "Auto", "fill": "Fill", "always": "Inpaint", "never": 
 _INPAINT_ITEMS = ["Auto", "Fill", "Inpaint", "Never"]
 
 # Align display strings <-> TextStyle model values (UI-SPEC §33: the combos
-# show Left/Center/Right/Justify (quick-260828-nrz adds Justify) and
-# Top/Middle/Bottom; the model stores lowercase).
-_ALIGN_H_DISPLAY = {"left": "Left", "center": "Center", "right": "Right", "justify": "Justify"}
+# show Left/Center/Right and Top/Middle/Bottom; the model stores lowercase).
+_ALIGN_H_DISPLAY = {"left": "Left", "center": "Center", "right": "Right"}
 _ALIGN_V_DISPLAY = {"top": "Top", "middle": "Middle", "bottom": "Bottom"}
 _ALIGN_H_TO_MODEL = {v: k for k, v in _ALIGN_H_DISPLAY.items()}
 _ALIGN_V_TO_MODEL = {v: k for k, v in _ALIGN_V_DISPLAY.items()}
@@ -545,7 +544,7 @@ class InspectorPanel(QWidget):
         # Align / Align V — H and V alignment combos (one signal pair:
         # style_align_changed(h, v); model values, UI-SPEC §33).
         self.align_combo = QComboBox()
-        self.align_combo.addItems(["Left", "Center", "Right", "Justify"])
+        self.align_combo.addItems(["Left", "Center", "Right"])
         form.addRow("Align", self.align_combo)
         self.align_v_combo = QComboBox()
         self.align_v_combo.addItems(["Top", "Middle", "Bottom"])
@@ -875,14 +874,12 @@ class InspectorPanel(QWidget):
         if len(aligns_h) == 1:
             display = _ALIGN_H_DISPLAY.get(next(iter(aligns_h)), "Center")
             self._select_combo(
-                self.align_combo, ["Left", "Center", "Right", "Justify"], display
+                self.align_combo, ["Left", "Center", "Right"], display
             )
             self._loaded_style_align_h = display
         else:
             self._select_combo(
-                self.align_combo,
-                ["Mixed", "Left", "Center", "Right", "Justify"],
-                "Mixed",
+                self.align_combo, ["Mixed", "Left", "Center", "Right"], "Mixed"
             )
             self._loaded_style_align_h = "Mixed"
         if len(aligns_v) == 1:
@@ -1001,9 +998,7 @@ class InspectorPanel(QWidget):
 
         align_h = _ALIGN_H_DISPLAY.get(style.align_h, "Center")
         align_v = _ALIGN_V_DISPLAY.get(style.align_v, "Middle")
-        self._select_combo(
-            self.align_combo, ["Left", "Center", "Right", "Justify"], align_h
-        )
+        self._select_combo(self.align_combo, ["Left", "Center", "Right"], align_h)
         self._loaded_style_align_h = align_h
         self._select_combo(self.align_v_combo, ["Top", "Middle", "Bottom"], align_v)
         self._loaded_style_align_v = align_v

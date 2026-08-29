@@ -116,7 +116,6 @@ _ALIGN_H_TO_QT = {
     "left": Qt.AlignmentFlag.AlignLeft,
     "center": Qt.AlignmentFlag.AlignHCenter,
     "right": Qt.AlignmentFlag.AlignRight,
-    "justify": Qt.AlignmentFlag.AlignJustify,
 }
 
 # ---------------------------------------------------------------------------
@@ -570,25 +569,12 @@ def _vertical_placements(
         )
     )
 
-    if style.align_h == "justify" and len(columns) >= 2:
-        # justify (quick-260828-nrz): distribute the columns across the FULL
-        # inner width by stretching the inter-column gaps — each gap absorbs
-        # an equal share of the slack. dx_block = 0 and block_w = inner_w,
-        # which also keeps the width-overflow flag honest (a stretched block
-        # exactly fills the inner width, never exceeds it). A single justify
-        # column falls through to the existing center branch unchanged.
-        block_gap = char_gap + (inner_w - block_w) / (len(columns) - 1)
-        block_w = float(inner_w)
+    if style.align_h == "left":
         dx_block = 0.0
-    elif style.align_h == "left":
-        dx_block = 0.0
-        block_gap = char_gap
     elif style.align_h == "right":
         dx_block = inner_w - block_w
-        block_gap = char_gap
-    else:  # center (the default — and the single-column justify fallback)
+    else:  # center (the default)
         dx_block = (inner_w - block_w) / 2.0
-        block_gap = char_gap
 
     if style.align_v == "top":
         dy_block = 0.0
@@ -601,7 +587,7 @@ def _vertical_placements(
     x = dx_block + block_w  # the block's RIGHT edge — columns flow leftward
     for col_idx, (col, cw) in enumerate(zip(columns, col_widths)):
         if col_idx > 0:
-            x -= block_gap  # the gap between adjacent columns (justify stretches it)
+            x -= char_gap  # the gap between adjacent columns
         x -= cw
         y = dy_block
         for c in col:
@@ -759,32 +745,20 @@ def layout(
     manual = style.font_size_px is not None and not style.auto_fit
     if manual:
         size = min(_FONT_SIZE_MAX, max(_FONT_SIZE_MIN, float(style.font_size_px)))
-        if style.align_h == "justify":
-            # justify (quick-260828-nrz) rides Qt's NATIVE natural wrap: the
-            # owned breaker's NoWrap pre-breaking would defeat AlignJustify
-            # (a pre-broken block has nothing left to stretch — every line
-            # would be a "last line"). The RAW text goes into the document at
-            # its default WrapAtWordBoundaryOrAnywhere mode so Qt justifies
-            # every line except the last. The doc measured here IS the doc
-            # returned in LayoutResult.document — measurement == render, zero
-            # parity work.
-            doc = _build_document(text, style, size, inner_w)
-        else:
-            # Owned line breaks (quick-260822-wvf): pre-broken \n lines in a
-            # NoWrap document — no contraction fragments, glued punctuation,
-            # or one-word orphans. The overflow check stays honest (vertical
-            # only): AUTHOR INTENT wins at the chosen size — the split_latin
-            # flag is deliberately ignored here (quick-260823-hge), but the
-            # lines still carry proper pyphen hyphenation when a word had to
-            # break.
-            lines, _split_latin = _break_lines_for(text, style, size, inner_w)
-            doc = _build_document(
-                "\n".join(lines),
-                style,
-                size,
-                inner_w,
-                wrap=QTextOption.WrapMode.NoWrap,
-            )
+        # Owned line breaks (quick-260822-wvf): pre-broken \n lines in a
+        # NoWrap document — no contraction fragments, glued punctuation, or
+        # one-word orphans. The overflow check stays honest (vertical only):
+        # AUTHOR INTENT wins at the chosen size — the split_latin flag is
+        # deliberately ignored here (quick-260823-hge), but the lines still
+        # carry proper pyphen hyphenation when a word had to break.
+        lines, _split_latin = _break_lines_for(text, style, size, inner_w)
+        doc = _build_document(
+            "\n".join(lines),
+            style,
+            size,
+            inner_w,
+            wrap=QTextOption.WrapMode.NoWrap,
+        )
         overflow = doc.size().height() > inner_h + _EPS
     else:
         # Auto-fit (D-15 / G-07-4): box-adaptive base + [10,28] clamp as the
@@ -810,25 +784,16 @@ def layout(
             # Floor check at the loop TOP — no iteration renders below it.
             if target <= _OVERLAY_FIT_FLOOR_PX:
                 break
-            if style.align_h == "justify":
-                # justify (quick-260828-nrz): the candidate doc is built from
-                # the RAW text at the default natural wrap (Qt justifies every
-                # non-final line). There is no owned-breaker Latin-split
-                # signal on this path, so the fit predicate degrades to
-                # HEIGHT-ONLY — the locked approach-A decision.
-                split_latin = False
-                candidate = _build_document(text, style, target, inner_w)
-            else:
-                # Owned line breaks re-computed per candidate size (the same
-                # rounded pixel size the candidate document renders with).
-                lines, split_latin = _break_lines_for(text, style, target, inner_w)
-                candidate = _build_document(
-                    "\n".join(lines),
-                    style,
-                    target,
-                    inner_w,
-                    wrap=QTextOption.WrapMode.NoWrap,
-                )
+            # Owned line breaks re-computed per candidate size (the same
+            # rounded pixel size the candidate document renders with).
+            lines, split_latin = _break_lines_for(text, style, target, inner_w)
+            candidate = _build_document(
+                "\n".join(lines),
+                style,
+                target,
+                inner_w,
+                wrap=QTextOption.WrapMode.NoWrap,
+            )
             # Fit predicate (quick-260823-hge ordering fix): a candidate is
             # only a fit when its height fits AND its break did not have to
             # split a Latin word — a split layout at an oversized font is a
