@@ -304,12 +304,14 @@ def test_align_justify_load_and_commit(qtbot) -> None:
     assert panel.align_combo.currentText() == "Justify"
     assert panel._loaded_style_align_h == "Justify"
 
-    # Selecting Justify (index 3 — the legacy 0..2 order is untouched)
-    # commits the model value; align_v stays at its loaded "middle".
-    panel.align_combo.setCurrentIndex(3)
+    # Selecting Justify from ANOTHER loaded value (index change required —
+    # mirroring the Left-commit pattern above) commits the model value;
+    # align_v stays at its loaded "middle".
+    panel.load_box(_pagebox_with_style())  # center -> index 1
+    panel.align_combo.setCurrentIndex(3)  # Justify
     assert fired["align"] == [("justify", "middle")]
 
-    # WR-01: re-selecting the loaded value is a no-op.
+    # WR-01: re-selecting the loaded value (no index change) is a no-op.
     panel.load_box(_pagebox_with_style(align_h="justify"))
     panel.align_combo.setCurrentIndex(3)
     assert fired["align"] == [("justify", "middle")]
