@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-28 — Completed quick task 260828-l3l: Restore tool (7th strip tool, shortcut O) — drag to paint the original page's pixels back over mangled inpaints; interpolated disc stamps from the D-06 baseline, per-stroke push_image_action undo + current_image sync + dirty (mirrors the inpaint write-back), no D-14 rebaseline, suppressed during P-preview; full suite 1214 passed (1 pre-existing env-level flake)
+Last activity: 2026-08-28 — Completed quick task 260828-nrz: Justify alignment — horizontal via natural-wrap AlignJustify (breaker bypassed in justify mode), vertical distributes columns across inner_w; Inspector combo Left/Center/Right/Justify; full suite 1220 passed
 
 ## Performance Metrics
 
@@ -393,6 +393,7 @@ None yet.
 | 260827-0id | Outline renders OUTWARD (manga-SFX semantics): two-pass solid silhouette (2× pen width) under the fill replaces Qt's centered setTextOutline stroke that chewed into glyphs; effect_padding reserves full width; single paint path keeps canvas/vertical/rotation/glow-shadow/bake/export in parity | 2026-08-27 | 5d83655 | [260827-0id-outline-renders-inline-grows-into-glyphs](./quick/260827-0id-outline-renders-inline-grows-into-glyphs/)
 | 260828-k4q | Batch menu "Export Typeset Pages…": PageSelectionDialog (all-checked page picker, Select All/None, Export gated at ≥1), TypesetPage + batch_export_typeset core loop (abort-at-top, per-page failure isolation, (percent,name) progress), dispatch mirrors the batch-OCR template — flush seam, .copy()-detached pixel projection, default_typeset_path sidecars, Worker + batch surface (progress bar/Cancel/failure-count copy) | 2026-08-28 | 724152e | [260828-k4q-batch-menu-export-typeset-pages-with-per](./quick/260828-k4q-batch-menu-export-typeset-pages-with-per/)
 | 260828-l3l | Restore tool: drag paints the ORIGINAL page's pixels back (fix mangled inpaints) — ToolMode.RESTORE, disc stamps interpolated along the stroke from the D-06 baseline slot, green cursor, shared brush size; per-stroke undo via push_image_action + current_image sync + dirty (inpaint-contract mirror), no rebaseline, suppressed during P-preview; strip button + O shortcut | 2026-08-28 | d367169 | [260828-l3l-restore-eraser-tool-paint-original-pixel](./quick/260828-l3l-restore-eraser-tool-paint-original-pixel/)
+| 260828-nrz | Justify alignment: model value + renderer (horizontal = natural-wrap AlignJustify, owned breaker bypassed in justify mode, fit degrades to height-only; vertical = inter-column gap distribution across inner_w, single column = center fallback); Inspector combo Left/Center/Right/Justify with round-trip + Mixed support | 2026-08-28 | 39fe8fe | [260828-nrz-alignment-add-justify-alongside-left-cen](./quick/260828-nrz-alignment-add-justify-alongside-left-cen/)
 
 ## Deferred Items
 
