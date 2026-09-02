@@ -138,12 +138,19 @@ def test_main_window_has_ocr_grab_window_action(qtbot, tmp_path) -> None:
     assert action in tools_menu.actions()
 
     # Triggering it drives set_active_tool: the strip and the window action
-    # follow (this test runs BEFORE Task 3 exists — no session logic needed).
+    # follow. (Post-Task-3 the selection also starts a grab session — the
+    # switch back to MOVE at the end closes it.)
     action.trigger()
     QApplication.processEvents()
     assert window.tools_strip.active_tool() == ToolMode.OCR_GRAB
     assert action.isChecked()
     assert window.canvas.current_tool == ToolMode.OCR_GRAB
+
+    # Switch away: the session tears down (panel hidden, overlay closed).
+    window.set_active_tool(ToolMode.MOVE)
+    QApplication.processEvents()
+    assert window.ocr_grab_panel.isVisible() is False
+    assert window._ocr_grab_overlay is None
 
 
 @pytest.mark.gui
@@ -165,6 +172,12 @@ def test_s_shortcut_activates_ocr_grab(qtbot, tmp_path) -> None:
     assert window.canvas.current_tool == ToolMode.OCR_GRAB
     assert window.tools_strip.active_tool() == ToolMode.OCR_GRAB
     assert window.action_tool_ocr_grab.isChecked()
+
+    # Session teardown on switch-away (post-Task-3 the shortcut starts a
+    # live grab session).
+    window.set_active_tool(ToolMode.MOVE)
+    QApplication.processEvents()
+    assert window._ocr_grab_overlay is None
 
 
 @pytest.mark.gui
@@ -521,3 +534,253 @@ def test_panel_capture_button_emits_capture_requested(qtbot) -> None:
 
     panel.findChild(QPushButton).click()
     assert fired == [True]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: MainWindow wiring — clipboard, dispatch, lifecycle, errors
+# ---------------------------------------------------------------------------
+
+
+def _clear_clipboard(text: str) -> None:
+    from PySide6.QtGui import QGuiApplication
+
+    QGuiApplication.clipboard().setText(text)
+
+
+def _clipboard_text() -> str:
+    from PySide6.QtGui import QGuiApplication
+
+    return QGuiApplication.clipboard().text()
+
+
+@pytest.mark.gui
+def test_grab_finished_copies_to_clipboard_and_history(qtbot, tmp_path) -> None:
+    """A successful result copies the text to the OS clipboard, prepends it
+    to the history panel, and flashes a copied status. The history click
+    path re-copies through the window handler."""
+    window = _window(qtbot, tmp_path)
+    _clear_clipboard("sentinel")
+
+    window._on_ocr_grab_finished({"text": "テスト", "source": "screen_grab"})
+
+    assert _clipboard_text() == "テスト"
+    assert window.ocr_grab_panel.entries()[0] == "テスト"
+    assert "copied" in window.status_bar_left.text().lower()
+
+    # Empty/whitespace text: NO clipboard write, NO history entry.
+    window._on_ocr_grab_finished({"text": "  \n ", "source": "screen_grab"})
+    assert _clipboard_text() == "テスト"
+    assert window.ocr_grab_panel.entries() == ["テスト"]
+    assert "no text recognized" in window.status_bar_left.text().lower()
+
+
+@pytest.mark.gui
+def test_grab_history_click_recopies_older_entry(qtbot, tmp_path) -> None:
+    """Two entries in the panel; activating the OLDER one re-copies the
+    older text to the clipboard (add_entry prepends — most recent first)."""
+    window = _window(qtbot, tmp_path)
+    window.ocr_grab_panel.add_entry("older text")
+    window.ocr_grab_panel.add_entry("newer text")  # prepended -> index 0
+    _clear_clipboard("sentinel")
+
+    lst = window.ocr_grab_panel.findChild(QListWidget)
+    assert lst.item(0).data(Qt.ItemDataRole.UserRole) == "newer text"
+    lst.itemClicked.emit(lst.item(1))  # index 1 = the older entry
+
+    assert _clipboard_text() == "older text"
+    assert "copied from history" in window.status_bar_left.text().lower()
+
+
+@pytest.mark.gui
+def test_grab_dispatch_end_to_end_with_stubs(qtbot, tmp_path, monkeypatch) -> None:
+    """Full dispatch path with the model + grab + OS clipboard stubbed:
+    region selection grabs (stub), converts, runs the (stubbed) Worker OCR
+    off-thread, copies to the clipboard, records history, and clears
+    _op_running. The clipboard is a recorder stub — rapid access to the REAL
+    OS clipboard from an async test transiently starves on Windows
+    ("Unable to obtain clipboard"); the synchronous clipboard behavior is
+    covered by the handler/recopy tests against the real clipboard."""
+    import manga_ai_studio.gui.main_window as mw_module
+
+    class _FakeClipboard:
+        def __init__(self) -> None:
+            self._text = ""
+
+        def setText(self, text: str) -> None:
+            self._text = text
+
+        def text(self) -> str:
+            return self._text
+
+    class _FakeGuiApp:
+        _clip = _FakeClipboard()
+
+        @classmethod
+        def clipboard(cls) -> _FakeClipboard:
+            return cls._clip
+
+    window = _window(qtbot, tmp_path)
+    # No overlay during selection — the dispatch test drives the handler
+    # directly.
+    monkeypatch.setattr(MainWindow, "_start_ocr_grab_session", lambda self: None)
+    monkeypatch.setattr(
+        MainWindow,
+        "_run_ocr_grab_task",
+        lambda self, region_arr, model, progress_callback=None, abort_flag=None: {
+            "text": "スクリーン",
+            "source": "screen_grab",
+        },
+    )
+    synthetic = QImage(4, 4, QImage.Format.Format_RGB888)
+    synthetic.fill(QColor(200, 200, 200))
+    # The call site resolves the names in the main_window namespace (a
+    # module-level `from ... import` — patch THERE, the module attr too for
+    # belt and suspenders).
+    monkeypatch.setattr(
+        mw_module, "grab_screen_region", lambda screen, rect: synthetic
+    )
+    monkeypatch.setattr(mw_module, "QGuiApplication", _FakeGuiApp)
+    import manga_ai_studio.gui.ocr_grab as og_module
+
+    monkeypatch.setattr(
+        og_module, "grab_screen_region", lambda screen, rect: synthetic
+    )
+
+    window.set_active_tool(ToolMode.OCR_GRAB)
+    window._on_grab_region_selected(QRect(10, 10, 120, 40))
+
+    # Wait on the IN-PROCESS conditions: finished-driven cleanup, the
+    # clipboard write, and the history entry are all deterministic under the
+    # event loop.
+    qtbot.waitUntil(lambda: window._op_running is False, timeout=10000)
+    assert _FakeGuiApp._clip.text() == "スクリーン"
+    assert window.ocr_grab_panel.entries()[0] == "スクリーン"
+
+
+@pytest.mark.gui
+def test_grab_region_selected_closes_overlay_before_grab(qtbot, tmp_path, monkeypatch) -> None:
+    """The overlay is closed (and the reference cleared) BEFORE the grab —
+    it can never appear in its own capture; a degenerate rect skips the
+    grab entirely with a status hint."""
+    import manga_ai_studio.gui.main_window as mw_module
+
+    window = _window(qtbot, tmp_path)
+    grabbed: list = []
+
+    class _FakeOverlay:
+        def close(self) -> None:
+            grabbed.append("closed")
+
+    window._ocr_grab_overlay = _FakeOverlay()
+    monkeypatch.setattr(
+        mw_module,
+        "grab_screen_region",
+        lambda screen, rect: grabbed.append(rect) or QImage(),
+    )
+
+    # Degenerate rect: hint, NO grab, overlay still closed first.
+    window._on_grab_region_selected(QRect(5, 5, 0, 0))
+    assert grabbed == ["closed"]
+    assert "drag a rectangle" in window.status_bar_left.text().lower()
+
+    # Valid rect: grab happens AFTER the close.
+    grabbed.clear()
+    window._ocr_grab_overlay = _FakeOverlay()
+    window._on_grab_region_selected(QRect(5, 5, 30, 10))
+    assert grabbed[0] == "closed"  # close strictly before grab
+    assert window._ocr_grab_overlay is None
+
+
+@pytest.mark.gui
+def test_grab_session_lifecycle(qtbot, tmp_path) -> None:
+    """Selecting OCR Grab shows the panel + arms a live overlay; switching
+    away hides the panel + closes the overlay; re-selecting starts a NEW
+    overlay instance (the old one closed) — one session at a time."""
+    window = _window(qtbot, tmp_path)
+
+    window.set_active_tool(ToolMode.OCR_GRAB)
+    QApplication.processEvents()
+    assert window.ocr_grab_panel.isVisible()
+    overlay1 = window._ocr_grab_overlay
+    assert overlay1 is not None
+    assert overlay1.isVisible()
+
+    window.set_active_tool(ToolMode.MOVE)
+    QApplication.processEvents()
+    assert window.ocr_grab_panel.isVisible() is False
+    assert window._ocr_grab_overlay is None
+    assert overlay1.isVisible() is False
+
+    # Re-selection starts a NEW overlay (the re-trigger path).
+    window.set_active_tool(ToolMode.OCR_GRAB)
+    QApplication.processEvents()
+    overlay2 = window._ocr_grab_overlay
+    assert overlay2 is not None
+    assert overlay2 is not overlay1
+    assert overlay1.isVisible() is False
+    assert overlay2.isVisible()
+
+    # Teardown for qtbot hygiene.
+    window.set_active_tool(ToolMode.MOVE)
+    QApplication.processEvents()
+    assert window._ocr_grab_overlay is None
+
+
+@pytest.mark.gui
+def test_grab_dispatch_skipped_while_op_running(qtbot, tmp_path, monkeypatch) -> None:
+    """The _op_running gate skips the dispatch with a status note (no worker
+    pileup — the T-4-14 pattern) and never overwrites the clipboard."""
+    window = _window(qtbot, tmp_path)
+    window._op_running = True
+    _clear_clipboard("sentinel")
+
+    window._on_grab_region_selected(QRect(10, 10, 120, 40))
+
+    assert _clipboard_text() == "sentinel"
+    assert window._op_running is True
+    assert "another operation" in window.status_bar_left.text().lower()
+
+
+@pytest.mark.gui
+def test_grab_error_path_shows_chip_and_cleanup(qtbot, tmp_path) -> None:
+    """_on_ocr_grab_error logs + shows the error chip (no crash, no modal);
+    the finished-driven cleanup clears _op_running afterwards."""
+    import sys
+
+    from manga_ai_studio.gui.worker_thread import WorkerError
+
+    window = _window(qtbot, tmp_path)
+    window.show()  # the error chip is a status-bar child — needs a shown window
+    QApplication.processEvents()
+    window._op_running = True
+    try:
+        raise RuntimeError("model exploded")
+    except RuntimeError:
+        worker_error = WorkerError(*sys.exc_info())
+
+    window._on_ocr_grab_error(worker_error)
+    assert window.error_chip.isVisible()
+    assert window.error_chip.text() == "Screen OCR error"
+
+    window._on_ocr_grab_cleanup((None, {}))
+    assert window._op_running is False
+    assert window.progress_bar.isVisible() is False
+
+
+@pytest.mark.gui
+def test_grab_capture_button_starts_new_session(qtbot, tmp_path) -> None:
+    """The panel's New capture button goes through the window handler and
+    re-arms a NEW overlay (one session at a time)."""
+    window = _window(qtbot, tmp_path)
+    window.set_active_tool(ToolMode.OCR_GRAB)
+    QApplication.processEvents()
+    overlay1 = window._ocr_grab_overlay
+
+    window.ocr_grab_panel.capture_requested.emit()
+    QApplication.processEvents()
+    overlay2 = window._ocr_grab_overlay
+    assert overlay2 is not overlay1
+    assert overlay1.isVisible() is False
+    assert overlay2.isVisible()
+
+    window.set_active_tool(ToolMode.MOVE)  # teardown

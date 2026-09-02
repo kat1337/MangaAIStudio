@@ -39,8 +39,15 @@ import numpy as np
 from loguru import logger
 from natsort import natsorted
 from PIL import Image
-from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QRect, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import (
+    QAction,
+    QGuiApplication,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QDockWidget,
@@ -90,6 +97,12 @@ from manga_ai_studio.gui.canvas import EditorCanvas, validate_image_path
 from manga_ai_studio.gui.file_table import FileTable
 from manga_ai_studio.gui.inspector_panel import InspectorPanel
 from manga_ai_studio.gui.load_translations_dialog import LoadTranslationsDialog
+from manga_ai_studio.gui.ocr_grab import (
+    OcrGrabHistoryPanel,
+    ScreenGrabOverlay,
+    grab_screen_region,
+    qimage_to_rgb_array,
+)
 from manga_ai_studio.gui.page_select_dialog import PageSelectionDialog
 from manga_ai_studio.gui.side_panel import (  # noqa: F401
     CollapsibleSection,
@@ -308,6 +321,12 @@ class MainWindow(QMainWindow):
         self._build_central_widget()
         self._build_toolbar()
         self._build_status_bar()
+        # quick-260901-wmn: the OCR Grab floating history panel + its session
+        # state (created hidden — it must never appear at startup; see
+        # _build_ocr_grab_panel).
+        self._ocr_grab_overlay: ScreenGrabOverlay | None = None
+        self._prev_tool: ToolMode | None = None
+        self._build_ocr_grab_panel()
 
         # Route FileTable signals.
         self.file_table.file_clicked.connect(self.on_page_selected)
@@ -1305,6 +1324,23 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.progress_bar)
         bar.addWidget(self.error_chip)
         bar.addPermanentWidget(self.status_bar_right, 1)
+
+    def _build_ocr_grab_panel(self) -> None:
+        """Create the OCR Grab floating history panel (quick-260901-wmn).
+
+        The panel is a PURE FOLLOWER (gui/ocr_grab.py): it only emits
+        signals. ``capture_requested`` starts a fresh grab session;
+        ``entry_copy_requested`` re-copies an entry's full text to the OS
+        clipboard (T-QG-02: publishing recognized text to the OS clipboard
+        IS the feature). Created HIDDEN and parented to this window — it
+        must never appear at startup; ``set_active_tool`` shows/hides it
+        with tool selection.
+        """
+        self.ocr_grab_panel = OcrGrabHistoryPanel(self)
+        self.ocr_grab_panel.capture_requested.connect(self._start_ocr_grab_session)
+        self.ocr_grab_panel.entry_copy_requested.connect(
+            self._on_ocr_grab_history_copy
+        )
 
     def _refresh_status_bar(self) -> None:
         """Recompute the right field's 'Page {n} / {total}' text + action states."""
@@ -5177,6 +5213,22 @@ class MainWindow(QMainWindow):
             act.setChecked(act.data() == tool)
             act.blockSignals(was)
 
+        # quick-260901-wmn: OCR Grab session lifecycle (screen tool). Both a
+        # fresh selection AND a re-selection while already active (re)start a
+        # grab session — pressing S again is the re-trigger path for another
+        # grab. Switching AWAY from OCR Grab hides the floating history and
+        # closes any live overlay. The page canvas is never touched: the
+        # tool's interaction surface is the overlay + panel only.
+        prev = self._prev_tool
+        self._prev_tool = tool
+        if tool == ToolMode.OCR_GRAB:
+            self.ocr_grab_panel.show()
+            self.ocr_grab_panel.raise_()
+            self._start_ocr_grab_session()
+        elif prev == ToolMode.OCR_GRAB:
+            self.ocr_grab_panel.hide()
+            self._close_grab_overlay()
+
     def _on_clear_mask(self) -> None:
         """Edit -> Clear Mask: clear the canvas mask (destructive, plan 04).
 
@@ -6993,6 +7045,157 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         self._refresh_action_states()
 
+    # -------------------------------------------------- ocr grab (quick-260901-wmn)
+    def _start_ocr_grab_session(self) -> None:
+        """Arm a fullscreen selection overlay for a screen-grab OCR capture.
+
+        Any existing overlay is closed FIRST (one session at a time —
+        T-QG-03 mitigation: no stuck topmost window can pile up). The new
+        overlay is a pure rect picker (gui/ocr_grab.py): it emits
+        ``region_selected`` on release or ``selection_cancelled`` on Esc and
+        never stores pixels. Shown via plain ``show()`` — never modal exec,
+        so the history panel stays interactive.
+        """
+        self._close_grab_overlay()
+        overlay = ScreenGrabOverlay(self.screen())
+        overlay.region_selected.connect(self._on_grab_region_selected)
+        overlay.selection_cancelled.connect(self._close_grab_overlay)
+        self._ocr_grab_overlay = overlay
+        overlay.show()
+
+    def _close_grab_overlay(self) -> None:
+        """Close any live grab overlay (Esc path, tool switch, or re-arm)."""
+        if self._ocr_grab_overlay is not None:
+            self._ocr_grab_overlay.close()
+            self._ocr_grab_overlay = None
+
+    def _on_grab_region_selected(self, rect: QRect) -> None:
+        """A rectangle was dragged on the overlay: grab -> convert -> dispatch.
+
+        The overlay is closed BEFORE any grab so it can never appear in its
+        own capture (T-QG-01). A degenerate rect (a click without a drag) or
+        a failed grab shows a status hint instead of dispatching. The grab
+        itself runs on the main thread (a single fast ``grabWindow`` read);
+        the OCR model work is what goes to the Worker.
+        """
+        # Close FIRST — never photograph the overlay.
+        self._close_grab_overlay()
+        if rect.width() < 1 or rect.height() < 1:
+            self.status_bar_left.setText(
+                "Drag a rectangle over the text to grab"
+            )
+            return
+        image = grab_screen_region(self.screen(), rect)
+        if image.isNull():
+            self.status_bar_left.setText("Screen grab failed — try again")
+            return
+        # Pitfall 2: detached numpy buffer crosses into the worker.
+        region_arr = qimage_to_rgb_array(image)
+        self._dispatch_ocr_grab(region_arr)
+
+    def _dispatch_ocr_grab(self, region_arr: np.ndarray) -> None:
+        """Dispatch the screen-grab OCR worker (mirror of
+        :meth:`_dispatch_ocr_for_box`).
+
+        The ``_op_running`` gate skips with a status note when another op is
+        running (no worker pileup — the T-4-14 pattern). Everything else is
+        the established pipeline: factory-resolved adapter (D-14), Worker +
+        indeterminate progress, first-run model-download status note
+        (CR-11), off-GUI-thread model load (T-01-07).
+        """
+        if self._op_running:
+            self.status_bar_left.setText(
+                "Another operation is running — try again when it finishes"
+            )
+            return
+        model = backend_factory("ocr", self._ocr_backend())
+        worker = Worker(self._run_ocr_grab_task, region_arr, model)
+        worker.signals.result.connect(self._on_ocr_grab_finished)
+        worker.signals.error.connect(self._on_ocr_grab_error)
+        worker.signals.finished.connect(self._on_ocr_grab_cleanup)
+        worker.setAutoDelete(True)
+
+        self._op_running = True
+        self._refresh_action_states()
+        self.error_chip.hide()
+        # Indeterminate progress (no %-subdivisions for a single capture).
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.show()
+        self.status_bar_left.setText("Recognizing screen text\u2026")
+        # Pitfall 6: the first-run ~450MB download shows the loading UX
+        # BEFORE the worker starts it (the fetch runs off the GUI thread).
+        from panelcleaner.model_downloader import is_ocr_downloaded
+
+        if not is_ocr_downloaded():
+            self.status_bar_left.setText("Loading OCR model\u2026")
+        QThreadPool.globalInstance().start(worker)
+
+    def _run_ocr_grab_task(
+        self,
+        region_arr: np.ndarray,
+        model,
+        progress_callback=None,
+        abort_flag=None,
+    ) -> dict:
+        """Worker task: manga-ocr over a grabbed screen region.
+
+        Runs on a QThreadPool thread — numpy/adapter only, NO Qt calls
+        (T-01-07). ``model.load`` is the lazy singleton (load-once per
+        session; the first run performs the HF download here, off the GUI
+        thread). ``progress_callback``/``abort_flag`` are auto-injected by
+        ``Worker`` (unused — a single-region recognition has no progress
+        subdivisions).
+        """
+        model.load(self._resolve_ocr_model_path(), device="auto")
+        return {"text": model.recognize(region_arr), "source": "screen_grab"}
+
+    def _on_ocr_grab_finished(self, result) -> None:
+        """Copy the recognized text to the OS clipboard + record history.
+
+        The clipboard write IS the feature (T-QG-02 — Poricom parity; the
+        canvas box-copy no-OS-clipboard rule is scoped to in-app box
+        duplication and deliberately does not extend here). Empty/whitespace
+        text writes NOTHING (no clipboard, no history entry) and shows the
+        "No text recognized" status. Cleanup runs via the ``finished``
+        signal regardless.
+        """
+        text = result.get("text", "") if isinstance(result, dict) else ""
+        if not text or not text.strip():
+            self.status_bar_left.setText("No text recognized")
+            return
+        QGuiApplication.clipboard().setText(text)
+        self.ocr_grab_panel.add_entry(text)
+        self._show_transient_status(f"Copied {len(text)} chars to clipboard")
+
+    def _on_ocr_grab_error(self, worker_error) -> None:
+        """Surface a grab-OCR failure via the error chip (never a crash).
+
+        Mirrors :meth:`_on_ocr_error` minus the modal dialog: the traceback
+        goes to loguru (T-01-08) and the persistent chip shows friendly
+        copy. The session survives — the panel stays open for another grab
+        (S / New capture). ``_op_running`` is cleared by
+        :meth:`_on_ocr_grab_cleanup` (``finished`` always fires — Pitfall 7).
+        """
+        logger.error(f"OCR Grab failed: {worker_error}")
+        self._show_error_chip("Screen OCR error")
+        self.status_bar_left.setText("OCR Grab failed")
+
+    def _on_ocr_grab_cleanup(self, _args) -> None:
+        """Reset the async-op flag + progress UI after the grab worker ends.
+
+        Mirror of :meth:`_on_ocr_cleanup`. Deliberately does NOT
+        auto-relaunch the overlay: after each capture the user decides
+        (S, New capture, or switching tools).
+        """
+        self._op_running = False
+        self.progress_bar.hide()
+        self._refresh_action_states()
+
+    def _on_ocr_grab_history_copy(self, text: str) -> None:
+        """Re-copy a history entry's full text to the OS clipboard."""
+        QGuiApplication.clipboard().setText(text)
+        self._show_transient_status("Copied from history")
+
     def _confirm_reocr(self) -> bool:
         """Show the D-04 re-OCR confirmation (UI-SPEC §Copywriting).
 
@@ -8254,6 +8457,13 @@ class MainWindow(QMainWindow):
         if event.spontaneous() and not self._confirm_discard_changes():
             event.ignore()
             return
+        # quick-260901-wmn: the grab overlay is a PARENTLESS topmost window —
+        # without an explicit close it would outlive the window (T-QG-03: no
+        # stuck topmost overlay may survive app exit). The panel is a child
+        # and dies with the window, but hide it too so the teardown is total.
+        self._close_grab_overlay()
+        if getattr(self, "ocr_grab_panel", None) is not None:
+            self.ocr_grab_panel.hide()
         event.accept()
 
 
