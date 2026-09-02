@@ -553,6 +553,22 @@ def _clipboard_text() -> str:
     return QGuiApplication.clipboard().text()
 
 
+def _clipboard_text_eventually(qtbot, expected: str, attempts: int = 20) -> bool:
+    """Read the real OS clipboard with SPACED retries (50 ms apart).
+
+    Rapid back-to-back polling of the Windows clipboard can transiently
+    starve ("Unable to obtain clipboard" — the OS refuses the open while a
+    clipboard manager holds it), so the read loop backs off between
+    attempts instead of hammering. Returns True once the expected text is
+    observed.
+    """
+    for _ in range(attempts):
+        if _clipboard_text() == expected:
+            return True
+        qtbot.wait(50)
+    return _clipboard_text() == expected
+
+
 @pytest.mark.gui
 def test_grab_finished_copies_to_clipboard_and_history(qtbot, tmp_path) -> None:
     """A successful result copies the text to the OS clipboard, prepends it
@@ -563,13 +579,13 @@ def test_grab_finished_copies_to_clipboard_and_history(qtbot, tmp_path) -> None:
 
     window._on_ocr_grab_finished({"text": "テスト", "source": "screen_grab"})
 
-    assert _clipboard_text() == "テスト"
+    assert _clipboard_text_eventually(qtbot, "テスト")
     assert window.ocr_grab_panel.entries()[0] == "テスト"
     assert "copied" in window.status_bar_left.text().lower()
 
     # Empty/whitespace text: NO clipboard write, NO history entry.
     window._on_ocr_grab_finished({"text": "  \n ", "source": "screen_grab"})
-    assert _clipboard_text() == "テスト"
+    assert _clipboard_text_eventually(qtbot, "テスト")
     assert window.ocr_grab_panel.entries() == ["テスト"]
     assert "no text recognized" in window.status_bar_left.text().lower()
 
@@ -587,7 +603,7 @@ def test_grab_history_click_recopies_older_entry(qtbot, tmp_path) -> None:
     assert lst.item(0).data(Qt.ItemDataRole.UserRole) == "newer text"
     lst.itemClicked.emit(lst.item(1))  # index 1 = the older entry
 
-    assert _clipboard_text() == "older text"
+    assert _clipboard_text_eventually(qtbot, "older text")
     assert "copied from history" in window.status_bar_left.text().lower()
 
 
