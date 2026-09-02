@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-28 — Reverted quick task 260828-nrz (7488beb, user decision): justified alignment disabled, quality line-breaker restored, align stays Left/Center/Right (center default); full suite 1214 passed (1 pre-existing env flake)
+Last activity: 2026-09-02 - Completed quick task 260901-wmn: OCR Grab tool (Poricom-style) — screen-region grab → manga-ocr → OS clipboard, floating history panel, 8th strip tool (S); full suite 1246 passed
 
 ## Performance Metrics
 
@@ -394,6 +394,7 @@ None yet.
 | 260828-k4q | Batch menu "Export Typeset Pages…": PageSelectionDialog (all-checked page picker, Select All/None, Export gated at ≥1), TypesetPage + batch_export_typeset core loop (abort-at-top, per-page failure isolation, (percent,name) progress), dispatch mirrors the batch-OCR template — flush seam, .copy()-detached pixel projection, default_typeset_path sidecars, Worker + batch surface (progress bar/Cancel/failure-count copy) | 2026-08-28 | 724152e | [260828-k4q-batch-menu-export-typeset-pages-with-per](./quick/260828-k4q-batch-menu-export-typeset-pages-with-per/)
 | 260828-l3l | Restore tool: drag paints the ORIGINAL page's pixels back (fix mangled inpaints) — ToolMode.RESTORE, disc stamps interpolated along the stroke from the D-06 baseline slot, green cursor, shared brush size; per-stroke undo via push_image_action + current_image sync + dirty (inpaint-contract mirror), no rebaseline, suppressed during P-preview; strip button + O shortcut | 2026-08-28 | d367169 | [260828-l3l-restore-eraser-tool-paint-original-pixel](./quick/260828-l3l-restore-eraser-tool-paint-original-pixel/)
 | 260828-nrz | Justify alignment: model value + renderer (horizontal = natural-wrap AlignJustify, owned breaker bypassed in justify mode, fit degrades to height-only; vertical = inter-column gap distribution across inner_w, single column = center fallback); Inspector combo Left/Center/Right/Justify with round-trip + Mixed support — **REVERTED by user decision (7488beb): the natural-wrap tradeoff dropped the quality line-breaker; revisit with per-word placement if wanted** | 2026-08-28 | 7488beb | [260828-nrz-alignment-add-justify-alongside-left-cen](./quick/260828-nrz-alignment-add-justify-alongside-left-cen/)
+| 260901-wmn | OCR Grab tool (Poricom-style): 8th strip tool (S shortcut) — fullscreen rubber-band overlay grabs any on-screen text region, manga-ocr off-thread via the existing Worker pipeline, recognized text copied to the OS clipboard; floating always-on-top history panel (20 entries, most recent first, click-to-re-copy, Esc cancels, closes on tool switch) | 2026-09-02 | 9a40ded | [260901-wmn-add-a-new-tool-to-the-app-similar-to-wha](./quick/260901-wmn-add-a-new-tool-to-the-app-similar-to-wha/) |
 
 ## Deferred Items
 
