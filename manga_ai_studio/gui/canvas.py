@@ -1547,9 +1547,14 @@ class EditorCanvas(QGraphicsView):
             event.accept()
             return
 
+        # quick-260901-wmn: OCR_GRAB joins the exclusion tuple — the 8th tool
+        # is a screen tool (its overlay lives in MainWindow, gui/ocr_grab.py);
+        # a press on the page falls through to the base view (Move/Pan-style
+        # inert behavior) instead of painting or arming anything.
         if (
             event.button() == Qt.MouseButton.LeftButton
-            and self.current_tool not in (ToolMode.MOVE, ToolMode.CROP)
+            and self.current_tool
+            not in (ToolMode.MOVE, ToolMode.CROP, ToolMode.OCR_GRAB)
             and self._mask is not None
             and not self._mask.isNull()
         ):

@@ -1097,6 +1097,28 @@ class MainWindow(QMainWindow):
             lambda: self.set_active_tool(ToolMode.RESTORE)
         )
 
+        # The 8th tool (quick-260901-wmn): OCR Grab — same wiring as the other
+        # tool actions (setData(ToolMode) + set_active_tool via lambda; the
+        # strip button mirrors this standalone checkable action, and
+        # set_active_tool's sync loop keeps the strip and window in sync —
+        # WR-02: the window actions are NOT members of the strip's exclusive
+        # group). Tooltip matches the strip copy. Shortcut S is installed as
+        # a window-level QShortcut in _wire_tool_actions (free letter per the
+        # window shortcut audit; S = Screen). Unlike the page tools, this
+        # action is deliberately NOT page-open gated in _refresh_action_states
+        # — OCR Grab works with NO page open (it is a screen tool, not a page
+        # tool).
+        self.action_tool_ocr_grab = QAction("OCR Grab", self)
+        self.action_tool_ocr_grab.setCheckable(True)
+        self.action_tool_ocr_grab.setData(ToolMode.OCR_GRAB)
+        self.action_tool_ocr_grab.setToolTip(
+            "OCR Grab tool (S) — drag a rectangle over any on-screen text;"
+            " the recognized text is copied to the clipboard."
+        )
+        self.action_tool_ocr_grab.triggered.connect(
+            lambda: self.set_active_tool(ToolMode.OCR_GRAB)
+        )
+
         # Cancel Batch (D-09) — plan 04: emits batch_abort_requested, which the
         # running Worker.abort consumes (worker_thread.py abort_signal wiring).
         # Disabled unless a batch is running (refreshed in _refresh_action_states).
@@ -1170,6 +1192,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_tool_eraser)
         tools_menu.addAction(self.action_tool_restore)
         tools_menu.addAction(self.action_tool_crop)
+        # quick-260901-wmn: OCR Grab (the 8th tool) — last entry, after Crop.
+        tools_menu.addAction(self.action_tool_ocr_grab)
         tools_menu.addSeparator()
         # NOTE (plan 09-03, D-09): the Image section — the Rotate ▸ submenu
         # (action_rotate_cw/ccw/180), Curves… (action_curves), and Resize…
@@ -3672,6 +3696,8 @@ class MainWindow(QMainWindow):
         # G = Crop, the 6th tool (D-11, plan 05-07; free letter per the
         # UI-SPEC shortcut audit). O = Restore, the 7th tool
         # (quick-260828-l3l; O = Original — free letter per the same audit).
+        # S = OCR Grab, the 8th tool (quick-260901-wmn; S = Screen — free
+        # letter per the same audit).
         for key, tool in (
             ("V", ToolMode.MOVE),
             ("B", ToolMode.BRUSH),
@@ -3680,6 +3706,7 @@ class MainWindow(QMainWindow):
             ("E", ToolMode.ERASER),
             ("O", ToolMode.RESTORE),
             ("G", ToolMode.CROP),
+            ("S", ToolMode.OCR_GRAB),
         ):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(lambda _t=tool: self.set_active_tool(_t))
@@ -5133,8 +5160,8 @@ class MainWindow(QMainWindow):
         # Sync the vertical strip's own actions without re-emitting
         # tool_changed (the canvas is already updated; signals blocked).
         self.tools_strip.set_active_tool(tool)
-        # Sync the six window tool actions explicitly: check the matching
-        # action and uncheck the other five (signals blocked — the group no
+        # Sync the window tool actions explicitly: check the matching
+        # action and uncheck the others (signals blocked — the group no
         # longer does this for the window actions).
         for act in (
             self.action_tool_move,
@@ -5144,6 +5171,7 @@ class MainWindow(QMainWindow):
             self.action_tool_eraser,
             self.action_tool_restore,
             self.action_tool_crop,
+            self.action_tool_ocr_grab,
         ):
             was = act.blockSignals(True)
             act.setChecked(act.data() == tool)

@@ -2,10 +2,10 @@
 
 The strip is a vertical icon-only column embedded in the central widget,
 positioned BETWEEN the Pages dock and the canvas (D-05: left→right window
-order is Pages | strip | canvas | side panel). It holds exactly 9 buttons
+order is Pages | strip | canvas | side panel). It holds exactly 10 buttons
 top→bottom per D-04: Move/Pan (V), Brush (B), Rectangle (R), Lasso (L),
-Eraser (E), Restore (O, quick-260828-l3l), Crop (G), then a visual divider,
-then Detect Text (D) and Inpaint (C).
+Eraser (E), Restore (O, quick-260828-l3l), Crop (G), OCR Grab (S,
+quick-260901-wmn), then a visual divider, then Detect Text (D) and Inpaint (C).
 
 Contract guarded here (06 D-10 / WR-02): strip tool buttons are exclusive,
 exactly ONE ``tool_changed`` emission fires per selection from every entry
@@ -75,14 +75,14 @@ def test_strip_sits_between_pages_dock_and_canvas(qtbot, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D-04 membership: 9 buttons, exclusive group of exactly 7 tool actions
+# D-04 membership: 10 buttons, exclusive group of exactly 8 tool actions
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.gui
 def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
-    """9 buttons total; the exclusive group holds EXACTLY the strip's own
-    seven tool actions (window action_tool_* stay standalone)."""
+    """10 buttons total; the exclusive group holds EXACTLY the strip's own
+    eight tool actions (window action_tool_* stay standalone)."""
     window = _window(qtbot, tmp_path)
     strip = window.tools_strip
 
@@ -92,10 +92,10 @@ def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
         # QToolBar auto-creates an internal extension-popup button — not ours.
         if b.objectName() != "qt_toolbar_ext_button"
     ]
-    assert len(buttons) == 9
+    assert len(buttons) == 10
 
     actions = strip.tool_group.actions()
-    assert len(actions) == 7
+    assert len(actions) == 8
     assert strip.tool_group.isExclusive()
     for act in actions:
         assert act.isCheckable()
@@ -108,6 +108,7 @@ def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
         ToolMode.ERASER,
         ToolMode.RESTORE,
         ToolMode.CROP,
+        ToolMode.OCR_GRAB,
     }
     assert {act.data() for act in actions} == expected_modes
 
@@ -119,6 +120,7 @@ def test_strip_membership_and_exclusivity(qtbot, tmp_path) -> None:
         window.action_tool_lasso,
         window.action_tool_eraser,
         window.action_tool_crop,
+        window.action_tool_ocr_grab,
     ):
         assert window_action not in actions
         assert window_action.actionGroup() is None
@@ -148,15 +150,16 @@ def test_strip_divider_between_crop_and_detect(qtbot, tmp_path) -> None:
     before = [a.defaultWidget() for a in acts[:sep_idx]]
     after = [a.defaultWidget() for a in acts[sep_idx + 1 :]]
 
-    # Six tool buttons above the divider... (+ Restore, quick-260828-l3l: 7)
-    assert len(before) == 7
+    # Six tool buttons above the divider... (+ Restore, quick-260828-l3l: 7;
+    # + OCR Grab, quick-260901-wmn: 8)
+    assert len(before) == 8
     tool_buttons = [
         b
         for b in before
         if isinstance(b, QToolButton) and b.defaultAction() is strip.action_crop
     ]
-    assert len(tool_buttons) == 1  # crop is the LAST button above the divider
-    assert before[-1].defaultAction() is strip.action_crop
+    assert len(tool_buttons) == 1  # crop is still above the divider...
+    assert before[-1].defaultAction() is strip.action_ocr_grab  # ...but no longer LAST
 
     # ...and the Detect/Inpaint buttons below it.
     assert len(after) == 2
@@ -226,7 +229,7 @@ def test_detect_inpaint_buttons_mirror_window_actions(qtbot, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D-06 icon assets: 8 bundled module-relative SVGs, non-null QIcon
+# D-06 icon assets: 10 bundled module-relative SVGs, non-null QIcon
 # ---------------------------------------------------------------------------
 
 _ICON_NAMES = [
@@ -237,6 +240,7 @@ _ICON_NAMES = [
     "eraser",
     "restore",
     "crop",
+    "ocr-grab",
     "detect-text",
     "inpaint",
 ]
@@ -244,7 +248,7 @@ _ICON_NAMES = [
 
 @pytest.mark.gui
 def test_strip_icons_bundled_and_non_null(qtbot, tmp_path) -> None:
-    """All 8 buttons carry a non-null QIcon loaded from the module-relative
+    """All 10 buttons carry a non-null QIcon loaded from the module-relative
     assets directory (offscreen-safe — no pixel assertions, RESEARCH A5)."""
     from pathlib import Path
 
@@ -314,6 +318,7 @@ def test_top_toolbar_shrunk_to_d07_contents(qtbot, tmp_path) -> None:
         window.action_tool_lasso,
         window.action_tool_eraser,
         window.action_tool_crop,
+        window.action_tool_ocr_grab,
     ):
         assert removed not in widget_actions
 
@@ -354,14 +359,14 @@ def test_strip_icon_assets_art_direction(tmp_path) -> None:
 @pytest.mark.gui
 def test_strip_has_restore_action_carrying_toolmode(qtbot, tmp_path) -> None:
     """The strip exposes action_restore carrying ToolMode.RESTORE, member of
-    the exclusive group, and the group holds EXACTLY seven actions."""
+    the exclusive group, and the group holds EXACTLY eight actions."""
     window = _window(qtbot, tmp_path)
     strip = window.tools_strip
 
     assert strip.action_restore.data() == ToolMode.RESTORE
     assert strip.action_restore.actionGroup() is strip.tool_group
     assert strip.action_restore.isCheckable()
-    assert len(strip.tool_group.actions()) == 7
+    assert len(strip.tool_group.actions()) == 8
     # Restore sits after Eraser, before Crop (destructive/geometry last).
     order = [strip._action_to_tool[a] for a in strip.tool_group.actions()]
     assert order.index(ToolMode.RESTORE) == order.index(ToolMode.ERASER) + 1
@@ -369,6 +374,85 @@ def test_strip_has_restore_action_carrying_toolmode(qtbot, tmp_path) -> None:
     # The tooltip carries the O shortcut + the brush-family Alt clause.
     assert "(O)" in strip.action_restore.toolTip()
     assert "Alt" in strip.action_restore.toolTip()
+
+
+# ---------------------------------------------------------------------------
+# quick-260901-wmn: OCR Grab (the 8th tool) on the strip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_strip_has_ocr_grab_action_carrying_toolmode(qtbot, tmp_path) -> None:
+    """The strip exposes action_ocr_grab carrying ToolMode.OCR_GRAB, member of
+    the exclusive group (now EXACTLY eight actions), placed after Crop, with
+    the S tooltip and a non-null icon that lives ON the action (D-06)."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    assert strip.action_ocr_grab.data() == ToolMode.OCR_GRAB
+    assert strip.action_ocr_grab.actionGroup() is strip.tool_group
+    assert strip.action_ocr_grab.isCheckable()
+    assert len(strip.tool_group.actions()) == 8
+    # Screen tools last: OCR Grab sits after Crop.
+    order = [strip._action_to_tool[a] for a in strip.tool_group.actions()]
+    assert order.index(ToolMode.OCR_GRAB) == order.index(ToolMode.CROP) + 1
+    # The tooltip carries the S shortcut + the grab copy.
+    assert "(S)" in strip.action_ocr_grab.toolTip()
+    assert "clipboard" in strip.action_ocr_grab.toolTip()
+    # D-06: the icon lives on the ACTION (button-side icons get wiped by the
+    # default-action sync).
+    assert not strip.action_ocr_grab.icon().isNull()
+
+
+@pytest.mark.gui
+def test_set_active_tool_ocr_grab_checks_strip_and_emits(qtbot, tmp_path) -> None:
+    """Selecting OCR Grab (the user toggled path) checks the ocr-grab action
+    and every other action unchecked, emits tool_changed with OCR_GRAB
+    exactly once, and drives the canvas + window action through
+    set_active_tool; a programmatic set_active_tool emits ZERO additional
+    signals (WR-02)."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    emitted: list = []
+    strip.tool_changed.connect(emitted.append)
+
+    # User path: checking the strip action emits EXACTLY once.
+    strip.action_ocr_grab.setChecked(True)
+    QApplication.processEvents()
+
+    assert strip.active_tool() == ToolMode.OCR_GRAB
+    assert strip.action_ocr_grab.isChecked()
+    # Exclusivity: every other strip tool action is unchecked.
+    for act in strip.tool_group.actions():
+        if act is not strip.action_ocr_grab:
+            assert act.isChecked() is False
+    assert window.canvas.current_tool == ToolMode.OCR_GRAB
+    assert window.action_tool_ocr_grab.isChecked()
+    assert emitted == [ToolMode.OCR_GRAB]
+
+    # Programmatic path: syncs everywhere but emits NOTHING.
+    window.set_active_tool(ToolMode.MOVE)
+    QApplication.processEvents()
+    assert strip.active_tool() == ToolMode.MOVE
+    assert strip.action_ocr_grab.isChecked() is False
+    assert window.action_tool_ocr_grab.isChecked() is False
+    assert emitted == [ToolMode.OCR_GRAB]
+
+
+@pytest.mark.gui
+def test_ocr_grab_button_not_page_open_gated(qtbot, tmp_path) -> None:
+    """OCR Grab is a SCREEN tool — unlike the page tools it stays ENABLED with
+    no page open (deliberately absent from _refresh_action_states' page-open
+    gating tuple)."""
+    window = _window(qtbot, tmp_path)
+    strip = window.tools_strip
+
+    # No page open yet: page tools disabled, OCR Grab usable.
+    assert window.action_tool_brush.isEnabled() is False
+    assert window.action_tool_crop.isEnabled() is False
+    assert strip.action_ocr_grab.isEnabled() is True
+    assert window.action_tool_ocr_grab.isEnabled() is True
 
 
 @pytest.mark.gui

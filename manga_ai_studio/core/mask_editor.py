@@ -54,7 +54,7 @@ DEFAULT_BRUSH_SIZE = 40
 
 
 class ToolMode(enum.Enum):
-    """The 7 exclusive editing tools (UI-SPEC surface 6, D-11).
+    """The 8 exclusive editing tools (UI-SPEC surface 6, D-11).
 
     Move/Pan is the default (no painting). Brush/Rectangle/Lasso paint mask
     content; Eraser removes it; Crop (the 6th tool, plan 05-07) defines a
@@ -67,6 +67,13 @@ class ToolMode(enum.Enum):
     MangaCleaner_GPU's stringly-typed "NONE"/"BRUSH"/"RECT"/"LASSO" — we use
     an enum and treat Eraser as a first-class tool per UI-SPEC (not a Shift
     toggle alone).
+
+    OCR Grab (the 8th tool, quick-260901-wmn) is a SCREEN-grab OCR tool
+    (Poricom-style): it never touches the mask planes, the working image, or
+    the page boxes. Its interaction surface is a fullscreen selection overlay
+    handled by MainWindow (``gui/ocr_grab.py``); the canvas treats it as
+    inert — a press on the page falls through to the base view (Move/Pan
+    -style) instead of painting or arming a crop.
     """
 
     MOVE = "move"
@@ -76,6 +83,7 @@ class ToolMode(enum.Enum):
     ERASER = "eraser"
     RESTORE = "restore"
     CROP = "crop"
+    OCR_GRAB = "ocr_grab"
 
 
 def clamp_brush_size(size: int) -> int:

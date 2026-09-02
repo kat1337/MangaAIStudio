@@ -49,6 +49,7 @@ _TOOL_ICONS: dict[ToolMode, str] = {
     ToolMode.ERASER: "eraser",
     ToolMode.RESTORE: "restore",
     ToolMode.CROP: "crop",
+    ToolMode.OCR_GRAB: "ocr-grab",
 }
 
 # Strip button geometry (09-UI-SPEC §Spacing exceptions): 44px strip width,
@@ -98,7 +99,7 @@ def _icon(name: str) -> QIcon:
 
 
 class ToolsStrip(QToolBar):
-    """Vertical icon-only strip: 6 exclusive tools + divider + Detect/Inpaint."""
+    """Vertical icon-only strip: 8 exclusive tools + divider + Detect/Inpaint."""
 
     # Emitted when the user selects a different tool (the active strip QAction
     # becomes checked). Carries the matching ToolMode.
@@ -169,6 +170,15 @@ class ToolsStrip(QToolBar):
             " Esc cancels.",
             ToolMode.CROP,
         )
+        # quick-260901-wmn: OCR Grab (the 8th tool) — sits after Crop (screen
+        # tools last, after the canvas-geometry tools). It never touches the
+        # page: the selection overlay + history window are MainWindow-owned.
+        self.action_ocr_grab = self._make_tool_action(
+            "OCR Grab",
+            "OCR Grab tool (S) — drag a rectangle over any on-screen text;"
+            " the recognized text is copied to the clipboard.",
+            ToolMode.OCR_GRAB,
+        )
 
         # QAction -> ToolMode lookup for the toggled slot.
         self._action_to_tool: dict[QAction, ToolMode] = {
@@ -179,6 +189,7 @@ class ToolsStrip(QToolBar):
             self.action_eraser: ToolMode.ERASER,
             self.action_restore: ToolMode.RESTORE,
             self.action_crop: ToolMode.CROP,
+            self.action_ocr_grab: ToolMode.OCR_GRAB,
         }
         # Connect each action's toggled signal so tool_changed fires whether
         # the action is activated by a click or a programmatic setChecked(True).
@@ -188,7 +199,7 @@ class ToolsStrip(QToolBar):
         for act in self._action_to_tool:
             act.toggled.connect(self._on_action_toggled)
 
-        # ---- Buttons: 6 checkable tool buttons (icon-only, D-06) ----
+        # ---- Buttons: 8 checkable tool buttons (icon-only, D-06) ----
         # The icons live on the strip-owned actions (see _make_tool_action);
         # the buttons inherit them via setDefaultAction.
         for action in (
@@ -199,6 +210,7 @@ class ToolsStrip(QToolBar):
             self.action_eraser,
             self.action_restore,
             self.action_crop,
+            self.action_ocr_grab,
         ):
             btn = QToolButton(self)
             btn.setDefaultAction(action)
