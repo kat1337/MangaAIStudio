@@ -200,10 +200,9 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
 
     Plan 09-02: the tool row lives on the strip (the ToolsPanel was dissolved
     into section bodies), so the exclusivity contract is asserted there. The
-    action carries data == ToolMode.CROP and sits LAST in the group
-    (after Eraser); activating it deactivates Brush and vice versa
-    (QActionGroup exclusivity), and the strip emits ``tool_changed`` with the
-    right ToolMode on each activation.
+    action carries data == ToolMode.CROP and sits after Restore; activating
+    it deactivates Brush and vice versa (QActionGroup exclusivity), and the
+    strip emits ``tool_changed`` with the right ToolMode on each activation.
     """
     strip = ToolsStrip(QAction("Detect Text"), QAction("Inpaint"))
     qtbot.addWidget(strip)
@@ -221,6 +220,7 @@ def test_crop_is_sixth_exclusive_tool(qtbot) -> None:
         ToolMode.ERASER,
         ToolMode.RESTORE,  # the 7th tool (quick-260828-l3l), before Crop
         ToolMode.CROP,
+        ToolMode.OCR_GRAB,  # the 8th tool (quick-260901-wmn), after Crop
     ]
 
     emitted: list = []
