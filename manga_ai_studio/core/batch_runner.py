@@ -428,6 +428,9 @@ def batch_detect(
     the ~80MB CTD model. The last two kwargs are auto-injected by ``Worker``.
     """
     det_model = backend_factory("detection", det_backend)
+    # quick-260903-lm6: forward the profile's min confidence into the detector
+    # BEFORE load (load() passes conf_thresh into TextDetector).
+    det_model.configure(conf_thresh=float(getattr(masker_conf, "detection_conf_thresh", 0.4)))
     det_model.load(det_model_path, device="auto")
     return _run_batch_task(
         pages,
@@ -512,6 +515,9 @@ def batch_detect_and_clean(
     ``MainWindow._dispatch_batch`` from the profile.
     """
     det_model = backend_factory("detection", det_backend)
+    # quick-260903-lm6: forward the profile's min confidence into the detector
+    # BEFORE load (load() passes conf_thresh into TextDetector).
+    det_model.configure(conf_thresh=float(getattr(masker_conf, "detection_conf_thresh", 0.4)))
     det_model.load(det_model_path, device="auto")
     inp_model = backend_factory("inpainting", inp_backend)
     inp_model.load(inp_model_path)

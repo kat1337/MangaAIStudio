@@ -147,3 +147,65 @@ def test_ini_without_max_inpaint_key_falls_back_to_default(tmp_path: Path) -> No
     saved.write_text(stripped, encoding="utf-8")
     reloaded = pm.load_profile("default")
     assert reloaded.masker.max_inpaint_resolution == 2048
+
+
+# ===========================================================================
+# quick-260903-lm6 — MaskerConfig.detection_conf_thresh
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_detection_conf_thresh_default_is_point_four() -> None:
+    """quick-260903-lm6: a fresh MaskerConfig defaults detection_conf_thresh
+    to 0.4 — the upstream YOLO conf_thresh default, preserved as the setting's
+    neutral value."""
+    assert MaskerConfig().detection_conf_thresh == 0.4
+
+
+@pytest.mark.unit
+def test_detection_conf_thresh_round_trips_through_ini(tmp_path: Path) -> None:
+    """quick-260903-lm6: export_to_conf -> import_from_conf round-trips 0.55
+    through the ProfileManager INI machinery (the mask_dilation_radius
+    persistence pattern)."""
+    pm = ProfileManager(tmp_path)
+    profile = pm.default_profile()
+    profile.masker.detection_conf_thresh = 0.55
+    pm.save_profile(profile, "default")
+    reloaded = pm.load_profile("default")
+    assert reloaded.masker.detection_conf_thresh == 0.55
+
+
+@pytest.mark.unit
+def test_detection_conf_thresh_clamped_005_095() -> None:
+    """quick-260903-lm6: fix() coerces via float (fallback 0.4) and clamps to
+    0.05..0.95 — 3.0 -> 0.95, 0.0 -> 0.05; a garbage value falls back to 0.4."""
+    cfg_hi = MaskerConfig(detection_conf_thresh=3.0)
+    cfg_hi.fix()
+    assert cfg_hi.detection_conf_thresh == 0.95
+
+    cfg_lo = MaskerConfig(detection_conf_thresh=0.0)
+    cfg_lo.fix()
+    assert cfg_lo.detection_conf_thresh == 0.05
+
+    cfg_bad = MaskerConfig(detection_conf_thresh="high")  # type: ignore[arg-type]
+    cfg_bad.fix()
+    assert cfg_bad.detection_conf_thresh == 0.4
+
+
+@pytest.mark.unit
+def test_ini_without_detection_conf_thresh_falls_back_to_default(
+    tmp_path: Path,
+) -> None:
+    """quick-260903-lm6: a profile INI without the detection_conf_thresh key
+    (upstream PC never writes it) loads with the default 0.4 — the guarded
+    try_to_load path, same as every other Masker key."""
+    pm = ProfileManager(tmp_path)
+    profile = pm.default_profile()
+    profile.masker.detection_conf_thresh = 0.7  # start non-default
+    saved = pm.save_profile(profile, "default")
+    lines = saved.read_text(encoding="utf-8").splitlines(keepends=True)
+    stripped = "".join(ln for ln in lines if "detection_conf_thresh" not in ln)
+    assert "detection_conf_thresh" not in stripped  # precondition
+    saved.write_text(stripped, encoding="utf-8")
+    reloaded = pm.load_profile("default")
+    assert reloaded.masker.detection_conf_thresh == 0.4

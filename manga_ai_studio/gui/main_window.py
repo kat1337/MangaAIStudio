@@ -5303,6 +5303,18 @@ class MainWindow(QMainWindow):
         # Resolve the adapter via the factory (D-02). torch is imported lazily
         # inside TorchCTDModel.load, so this import does not pull torch here.
         model = backend_factory("detection", self._detection_backend())
+        # quick-260903-lm6: forward the profile's min confidence BEFORE the
+        # worker's load() (which passes conf_thresh into TextDetector). A fresh
+        # adapter per run makes the value effective on every Detect Text.
+        model.configure(
+            conf_thresh=float(
+                getattr(
+                    self.profile_manager.config.current_profile.masker,
+                    "detection_conf_thresh",
+                    0.4,
+                )
+            )
+        )
 
         # Build + dispatch the worker (PATTERNS.md §Shared Pattern 2).
         worker = Worker(self._run_detection_task, path, model)

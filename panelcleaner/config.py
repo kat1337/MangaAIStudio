@@ -571,6 +571,11 @@ class MaskerConfig:
     # input size (square cap, largest side). NOT upstream. Default 2048 per
     # D-05; clamped 512..8192 in fix() and via try_to_load fallback.
     max_inpaint_resolution: int = 2048
+    # Manga AI Studio addition (quick-260903-lm6): minimum YOLO detection
+    # confidence forwarded to the CTD detector as conf_thresh. NOT an
+    # upstream key (upstream import skips unknown options gracefully).
+    # Clamped 0.05..0.95 in fix().
+    detection_conf_thresh: float = 0.4
     debug_mask_color: tuple[int, int, int, int] = (108, 30, 240, 127)
 
     def export_to_conf(
@@ -650,6 +655,11 @@ class MaskerConfig:
         # Inpaint run (no live recompose).
         max_inpaint_resolution = {self.max_inpaint_resolution}
 
+        # Minimum YOLO detection confidence for Detect Text. Lower values keep more boxes,
+        # including possible false positives. Default 0.4; clamped 0.05..0.95. Applies on the
+        # next Detect Text run.
+        detection_conf_thresh = {self.detection_conf_thresh}
+
         # Color to use for the debug mask. [CLI: This is a tuple of RGBA values.]
         debug_mask_color = {','.join(map(str, self.debug_mask_color))}
         
@@ -680,6 +690,7 @@ class MaskerConfig:
         try_to_load(self, config_updater, section, bool, "mask_selection_fast")
         try_to_load(self, config_updater, section, Pixels, "mask_dilation_radius")
         try_to_load(self, config_updater, section, int, "max_inpaint_resolution")
+        try_to_load(self, config_updater, section, float, "detection_conf_thresh")
         try_to_load(self, config_updater, section, float, "mask_max_standard_deviation")
         try:
             color_tuple: tuple[int, ...] = tuple(
@@ -713,6 +724,12 @@ class MaskerConfig:
         except (TypeError, ValueError):
             self.max_inpaint_resolution = 2048
         self.max_inpaint_resolution = max(512, min(8192, int(self.max_inpaint_resolution)))
+        # quick-260903-lm6 clamp for detection_conf_thresh (default 0.4, 0.05..0.95)
+        try:
+            self.detection_conf_thresh = float(self.detection_conf_thresh)
+        except (TypeError, ValueError):
+            self.detection_conf_thresh = 0.4
+        self.detection_conf_thresh = max(0.05, min(0.95, float(self.detection_conf_thresh)))
         # We already ensured that it's a tuple of 4 ints.
         # noinspection PyTypeChecker
         self.debug_mask_color = tuple(max(0, min(255, x)) for x in self.debug_mask_color)

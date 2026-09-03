@@ -397,6 +397,12 @@ class _FixtureDetector:
         self.load_calls: int = 0
         self.heatmaps = list(heatmaps)
         self.blk_lists = list(blk_lists)
+        # quick-260903-lm6: batch_runner configures the det model before load.
+        self.configure_calls: list[dict] = []
+
+    def configure(self, **kwargs) -> None:
+        """Mirror ``TorchCTDModel.configure(**kwargs)`` (pre-load knob pass)."""
+        self.configure_calls.append(kwargs)
 
     def load(self, model_path, device: str = "cpu") -> None:
         self.load_calls += 1
@@ -1060,3 +1066,68 @@ def test_batch_empty_branch_and_headless(tmp_path, monkeypatch) -> None:
     # Passthrough is byte-identical via passthrough_original (filecmp would pass) — we check it exists and is white
     arr_empty = np.array(Image.open(cleaned / "empty.png").convert("RGB"))
     assert tuple(arr_empty[0, 0].tolist()) == (255, 255, 255)
+
+
+# ===========================================================================
+# quick-260903-lm6 — the profile's min detection confidence reaches the
+# detector via configure() BEFORE load(), at every batch det-model site
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_batch_detect_configures_conf_thresh_before_load(tmp_path, monkeypatch) -> None:
+    """quick-260903-lm6: ``batch_detect`` forwards the threaded ``masker_conf``'s
+    ``detection_conf_thresh`` to the det model via ``configure(conf_thresh=...)``
+    immediately BEFORE ``load`` (load() passes conf_thresh into TextDetector)."""
+    src = tmp_path / "chapter"
+    pages = make_pages(src, count=1)
+    cleaned = src / "cleaned"
+
+    det = FakeDetectionModel()
+    inp = FakeInpaintModel()
+    install_fakes(monkeypatch, det, inp)
+
+    masker_conf = cfg.MaskerConfig(detection_conf_thresh=0.55)
+    batch_detect(
+        pages,
+        det_model_path=Path("fake_det.pt"),
+        det_backend="torch",
+        cleaned_dir=cleaned,
+        masker_conf=masker_conf,
+        progress_callback=None,
+        abort_flag=None,
+    )
+
+    assert det.configure_calls == [{"conf_thresh": 0.55}]
+    assert det.load_calls == 1
+
+
+@pytest.mark.unit
+def test_batch_detect_and_clean_configures_conf_thresh_before_load(
+    tmp_path, monkeypatch
+) -> None:
+    """quick-260903-lm6: the ``batch_detect_and_clean`` det-model site forwards
+    the same conf_thresh from ``masker_conf`` before load."""
+    src = tmp_path / "chapter"
+    pages = make_pages(src, count=1)
+    cleaned = src / "cleaned"
+
+    det = FakeDetectionModel()
+    inp = FakeInpaintModel()
+    install_fakes(monkeypatch, det, inp)
+
+    masker_conf = cfg.MaskerConfig(detection_conf_thresh=0.3)
+    batch_detect_and_clean(
+        pages,
+        det_model_path=Path("fake_det.pt"),
+        inp_model_path=Path("fake_inp.pt"),
+        det_backend="torch",
+        inp_backend="torch",
+        cleaned_dir=cleaned,
+        masker_conf=masker_conf,
+        progress_callback=None,
+        abort_flag=None,
+    )
+
+    assert det.configure_calls == [{"conf_thresh": 0.3}]
+    assert det.load_calls == 1

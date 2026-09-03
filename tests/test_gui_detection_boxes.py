@@ -1260,7 +1260,14 @@ def test_detection_dispatch_stamps_target_page(qtbot, tmp_path, monkeypatch) -> 
             return _FakePool._Inst()
 
     monkeypatch.setattr(mw, "Worker", _FakeWorker)
-    monkeypatch.setattr(mw, "backend_factory", lambda *a, **k: None)
+    # quick-260903-lm6 (Rule 3): detect_text() now configures the fresh
+    # adapter (conf_thresh) before spawning the worker, so the factory stub
+    # must return an object with configure() instead of None.
+    monkeypatch.setattr(
+        mw,
+        "backend_factory",
+        lambda *a, **k: SimpleNamespace(configure=lambda **k: None, load=lambda *a, **k: None),
+    )
     monkeypatch.setattr(mw, "QThreadPool", _FakePool)
 
     window.detect_text()

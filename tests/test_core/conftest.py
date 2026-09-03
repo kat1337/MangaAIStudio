@@ -52,6 +52,14 @@ class FakeDetectionModel:
         self.fail_on_call = fail_on_call
         self.set_flag_after = set_flag_after
         self._flag = flag
+        # quick-260903-lm6: the real adapters accept configure(**kwargs)
+        # before load(); batch_runner forwards the profile's min confidence
+        # through it, so the fake records the kwargs for assertions.
+        self.configure_calls: list[dict] = []
+
+    def configure(self, **kwargs) -> None:
+        """Mirror ``TorchCTDModel.configure(**kwargs)`` (pre-load knob pass)."""
+        self.configure_calls.append(kwargs)
 
     def load(self, model_path, device: str = "cpu") -> None:
         """Mirror ``TorchCTDModel.load(model_path, device="auto")``."""
