@@ -415,3 +415,46 @@ def test_merge_page_boxes_keeps_user_replaces_detected() -> None:
     assert stale_detected not in merged
     assert merged[1].origin == DETECTED
     assert merged[1].box.as_tuple == (40, 40, 55, 48)
+
+
+# ===========================================================================
+# quick-260903-lm6 — per-box detector confidence normalization
+# ===========================================================================
+
+
+@pytest.mark.unit
+def test_build_detected_pageboxes_confidence_normalization() -> None:
+    """quick-260903-lm6: ``build_detected_pageboxes`` reads ``blk.prob`` and
+    normalizes it onto ``PageBox.confidence`` under the locked range rule —
+    a real confidence (0..1) passes through, the -1.0 scattered sentinel and
+    a missing ``prob`` attribute normalize to None, and the upstream default
+    prob=1 lands as 1.0 (documented edge of the locked range rule)."""
+    from manga_ai_studio.core.detection_boxes import build_detected_pageboxes
+
+    yolo = _blk(10, 10, 40, 30)
+    yolo.prob = 0.87
+    scattered = _blk(50, 10, 70, 30)
+    scattered.prob = -1.0  # the group_output scattered-line sentinel
+    no_prob = _blk(10, 40, 40, 45)  # duck-typed fake with no prob attr
+    upstream_default = _blk(50, 40, 70, 45)
+    upstream_default.prob = 1  # TextBlock.__init__ default
+
+    result = build_detected_pageboxes(
+        [yolo, scattered, no_prob, upstream_default], 100, 80
+    )
+
+    assert result[0].confidence == 0.87
+    assert result[1].confidence is None  # sentinel -> unknown
+    assert result[2].confidence is None  # missing attr -> unknown
+    assert result[3].confidence == 1.0  # locked range rule documents this
+
+
+@pytest.mark.unit
+def test_build_detected_pageboxes_existing_no_prob_fakes_default_none() -> None:
+    """Existing no-prob fakes (the Phase 8 test doubles) keep passing: their
+    PageBoxes default ``confidence`` to None."""
+    from manga_ai_studio.core.detection_boxes import build_detected_pageboxes
+
+    result = build_detected_pageboxes([_blk(10, 10, 40, 30)], 100, 80)
+    assert len(result) == 1
+    assert result[0].confidence is None

@@ -93,6 +93,14 @@ def build_detected_pageboxes(
                 f"({box.as_tuple} -> {clamped.as_tuple} after clamp)"
             )
             continue
+        # quick-260903-lm6: normalize the detector confidence. Real confs
+        # (0..1) pass through; the -1.0 scattered sentinel and any missing
+        # attr normalize to None. The upstream default prob=1 would land as
+        # 1.0 under this locked range rule — acceptable; our group_output
+        # deviation sites guarantee YOLO and scattered blocks never carry
+        # the default.
+        raw = getattr(blk, "prob", None)
+        confidence = float(raw) if raw is not None and 0.0 <= float(raw) <= 1.0 else None
         # payload = the TextBlock, preserved untouched for OCR + export.
         # origin DETECTED so re-detect can replace it (D-03).
         detected_pageboxes.append(
@@ -101,6 +109,7 @@ def build_detected_pageboxes(
                     origin=DETECTED,
                     payload=blk,
                     style=default_style(default_family) if default_family else None,
+                    confidence=confidence,
                 )
             )
     return detected_pageboxes

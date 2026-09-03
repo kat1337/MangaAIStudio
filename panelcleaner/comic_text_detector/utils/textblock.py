@@ -449,7 +449,10 @@ def group_output(blks, lines, im_w, im_h, mask=None, sort_blklist=True) -> List[
     scattered_lines = {"ver": [], "hor": []}
     for bbox, cls, conf in zip(*blks):
         # cls could give wrong result
-        blk_list.append(TextBlock(bbox, language=LANG_LIST[cls]))
+        # Manga AI Studio deviation (quick-260903-lm6): keep per-block detector confidence (upstream discards it).
+        blk = TextBlock(bbox, language=LANG_LIST[cls])
+        blk.prob = float(conf)
+        blk_list.append(blk)
 
     # step1: filter & assign lines to textblocks
     bbox_score_thresh = 0.4
@@ -472,6 +475,9 @@ def group_output(blks, lines, im_w, im_h, mask=None, sort_blklist=True) -> List[
                 if mask_score < mask_score_thresh:
                     continue
             blk = TextBlock([bx1, by1, bx2, by2], [line])
+            # Manga AI Studio deviation (quick-260903-lm6): -1.0 sentinel means "unknown" confidence,
+            # so scattered blocks never masquerade as the upstream prob=1 default.
+            blk.prob = -1.0
             examine_textblk(blk, im_w, im_h, sort=False)
             if blk.vertical:
                 scattered_lines["ver"].append(blk)

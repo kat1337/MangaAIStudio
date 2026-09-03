@@ -1144,3 +1144,62 @@ def test_pagebox_copy_detaches_mask_preserves_fill_color() -> None:
     assert clone.fill_color == (10, 20, 30)
     pb.mask.putpixel((2, 2), 1)
     assert clone.mask.getpixel((2, 2)) == 0
+
+
+@pytest.mark.unit
+def test_confidence_round_trip() -> None:
+    """quick-260903-lm6: a PageBox carrying confidence=0.87 serializes the
+    float and loads it back equal; confidence=None serializes null and loads
+    back None."""
+    from manga_ai_studio.core.project_io import pagebox_to_json, json_to_pagebox
+
+    pb = PageBox(box=Box(0, 0, 10, 10), origin=USER, payload=None, confidence=0.87)
+    d = pagebox_to_json(pb)
+    assert d["confidence"] == 0.87
+    out = json_to_pagebox(d)
+    assert out.confidence == 0.87
+
+    pb_none = PageBox(box=Box(0, 0, 10, 10), origin=USER, payload=None, confidence=None)
+    d_none = pagebox_to_json(pb_none)
+    assert d_none["confidence"] is None
+    out_none = json_to_pagebox(d_none)
+    assert out_none.confidence is None
+
+
+@pytest.mark.unit
+def test_legacy_pagebox_without_confidence_loads_none() -> None:
+    """quick-260903-lm6: a legacy .mas pagebox dict with no "confidence" key
+    loads clean with confidence None."""
+    from manga_ai_studio.core.project_io import json_to_pagebox
+
+    legacy = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    out = json_to_pagebox(legacy)
+    assert out.confidence is None
+
+
+@pytest.mark.unit
+def test_invalid_confidence_rejected() -> None:
+    """quick-260903-lm6: a non-numeric confidence raises ProjectFormatError
+    via float coercion (the std_dev precedent)."""
+    from manga_ai_studio.core.project_io import json_to_pagebox
+
+    base = {
+        "box": [0, 0, 10, 10],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+    }
+    with pytest.raises(ProjectFormatError):
+        json_to_pagebox({**base, "confidence": "high"})
+    # a numeric value loads
+    out = json_to_pagebox({**base, "confidence": 0.42})
+    assert out.confidence == 0.42

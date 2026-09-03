@@ -119,6 +119,11 @@ class PageBox:
     # Carried through boxes_snapshot, geometry-op invalidation, and .mas
     # persistence. Tuple is immutable — copy() shares by ref.
     fill_color: Optional[tuple[int, int, int]] = None
+    # quick-260903-lm6: detector confidence in [0, 1]; None = unknown
+    # (user-drawn, scattered, or legacy box). Populated by
+    # build_detected_pageboxes; copy() uses dataclasses.replace, so this
+    # plain field survives undo snapshots automatically.
+    confidence: Optional[float] = None
 
     # --------------------------------------------------------- text setters
     def _ensure_payload(self) -> None:

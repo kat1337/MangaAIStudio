@@ -278,6 +278,9 @@ def pagebox_to_json(pb) -> dict:
             if getattr(pb, "fill_color", None) is not None
             else None
         ),  # 08.1 optional triple
+        # quick-260903-lm6: per-box detector confidence (float | null).
+        # None = unknown (user-drawn, scattered, or legacy box).
+        "confidence": None if pb.confidence is None else float(pb.confidence),
         "payload": None if payload is None else {
             "xyxy": [int(v) for v in payload.xyxy],
             # quick-260824-pqn: nested int() coercion handles BOTH ndarray
@@ -382,6 +385,16 @@ def json_to_pagebox(d: dict):
         if not all(0 <= c <= 255 for c in fill_color):
             raise ProjectFormatError("fill_color components must be 0..255")
 
+    # quick-260903-lm6: confidence — optional float with the same V5
+    # coercion discipline as std_dev. Absent/None -> None (legacy .mas);
+    # a non-numeric value is structural garbage.
+    confidence = None
+    if d.get("confidence") is not None:
+        try:
+            confidence = float(d["confidence"])
+        except (TypeError, ValueError) as exc:
+            raise ProjectFormatError("confidence must be a number") from exc
+
     if len(box_vals) != 4:
         raise ProjectFormatError("box must have exactly 4 coordinates")
     box = Box(*(_coerce_int(v, "box coordinate") for v in box_vals))
@@ -440,6 +453,7 @@ def json_to_pagebox(d: dict):
         inpaint_override=override_raw,
         mask=mask,
         fill_color=fill_color,
+        confidence=confidence,
     )
 
 
