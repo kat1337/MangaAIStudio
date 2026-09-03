@@ -170,7 +170,7 @@ class DetectionSettingsBody(QWidget):
         - ``dilation_changed(int)`` — dilation radius changed (D-06, LIVE).
         - ``std_dev_threshold_changed(float)`` — gate threshold changed
           (D-12, LIVE).
-        - ``masker_params_changed()`` — any of the seven next-detect fit
+        - ``masker_params_changed()`` — any of the eight next-detect fit
           params changed (one persist + apply-next-detect fate, UI-SPEC §36).
 
     The section chrome (divider + header) is supplied by the wrapping
@@ -312,6 +312,23 @@ class DetectionSettingsBody(QWidget):
         self.off_white_spin.valueChanged.connect(self._on_fit_param_changed)
         form.addRow("Off-white threshold", self.off_white_spin)
 
+        # quick-260903-lm6: minimum YOLO detection confidence (next-detect fit
+        # param) — forwarded to the CTD detector as conf_thresh on the next
+        # Detect Text run (interactive and batch).
+        self.conf_thresh_spin = QDoubleSpinBox(self)
+        self.conf_thresh_spin.setRange(0.05, 0.95)
+        self.conf_thresh_spin.setSingleStep(0.05)
+        self.conf_thresh_spin.setDecimals(2)
+        self.conf_thresh_spin.setValue(0.40)
+        self.conf_thresh_spin.setWrapping(False)
+        self.conf_thresh_spin.setToolTip(
+            "Minimum detector confidence for Detect Text. Lower values keep"
+            " more boxes, including possible false positives. Applies on the"
+            " next Detect Text run."
+        )
+        self.conf_thresh_spin.valueChanged.connect(self._on_fit_param_changed)
+        form.addRow("Min confidence", self.conf_thresh_spin)
+
         self.improvement_spin = QDoubleSpinBox(self)
         self.improvement_spin.setRange(0, 1)
         self.improvement_spin.setSingleStep(0.01)
@@ -361,7 +378,7 @@ class DetectionSettingsBody(QWidget):
         self.dilation_changed.emit(value)
 
     def _on_fit_param_changed(self, *args) -> None:
-        """Any of the seven next-detect controls changed — one shared signal."""
+        """Any of the eight next-detect controls changed — one shared signal."""
         self.masker_params_changed.emit()
 
     def masker_values(self) -> dict:
@@ -380,6 +397,7 @@ class DetectionSettingsBody(QWidget):
             "allow_colored_masks": self.allow_colored_check.isChecked(),
             "mask_selection_fast": self.fast_selection_check.isChecked(),
             "max_inpaint_resolution": self.max_inpaint_spin.value(),
+            "detection_conf_thresh": self.conf_thresh_spin.value(),
         }
 
     def set_masker_values(self, masker_conf, detect_boxes: bool) -> None:
@@ -400,6 +418,7 @@ class DetectionSettingsBody(QWidget):
             self.growth_steps_spin,
             self.min_thickness_spin,
             self.off_white_spin,
+            self.conf_thresh_spin,
             self.improvement_spin,
             self.allow_colored_check,
             self.fast_selection_check,
@@ -421,6 +440,11 @@ class DetectionSettingsBody(QWidget):
             self.growth_steps_spin.setValue(masker_conf.mask_growth_steps)
             self.min_thickness_spin.setValue(masker_conf.min_mask_thickness)
             self.off_white_spin.setValue(masker_conf.off_white_max_threshold)
+            # quick-260903-lm6: getattr mirrors the max_inpaint tolerance
+            # precedent (a legacy MaskerConfig without the field stays 0.4).
+            self.conf_thresh_spin.setValue(
+                float(getattr(masker_conf, "detection_conf_thresh", 0.4))
+            )
             self.improvement_spin.setValue(
                 masker_conf.mask_improvement_threshold
             )

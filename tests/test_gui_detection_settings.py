@@ -2,7 +2,8 @@
 
 Covers the "Detection settings" section body (UI-SPEC surface 36, D-05/D-06;
 plan 09-02 relocated it into the unified panel's ``DetectionSettingsBody``):
-the relocated Detect Boxes toggle, the nine masker parameters
+the relocated Detect Boxes toggle, the masker parameters
+(including the quick-260903-lm6 Min-confidence spin)
 each with its PanelCleaner INI-comment tooltip, and the Tab-chain focus
 reachability of every section control.
 
@@ -133,6 +134,7 @@ def test_all_section_controls_reachable_in_tab_chain(qtbot) -> None:
         panel.growth_steps_spin,
         panel.min_thickness_spin,
         panel.off_white_spin,
+        panel.conf_thresh_spin,
         panel.improvement_spin,
         panel.allow_colored_check,
         panel.fast_selection_check,
@@ -225,13 +227,16 @@ def test_section_defaults_match_ui_spec(qtbot) -> None:
     assert panel.allow_colored_check.isChecked() is True
     assert panel.fast_selection_check.isChecked() is False
 
+    # quick-260903-lm6: the Min-confidence spin boots at its locked default.
+    assert panel.conf_thresh_spin.value() == 0.40
+
     # Every control carries a non-empty PanelCleaner-derived tooltip.
     for c in controls_for(panel):
         assert c.toolTip(), f"{type(c).__name__} has an empty tooltip"
 
 
 def controls_for(panel: DetectionSettingsBody) -> list:
-    """The ten section controls (the radius pair is one row, both widgets)."""
+    """The section controls (the radius pair is one row, both widgets)."""
     return [
         panel.detect_checkbox,
         panel.dilation_slider,
@@ -241,6 +246,7 @@ def controls_for(panel: DetectionSettingsBody) -> list:
         panel.growth_steps_spin,
         panel.min_thickness_spin,
         panel.off_white_spin,
+        panel.conf_thresh_spin,
         panel.improvement_spin,
         panel.allow_colored_check,
         panel.fast_selection_check,
@@ -348,6 +354,87 @@ def test_masker_params_change_persists_once(qtbot, tmp_path) -> None:
     fresh.load_profile("default")
     assert fresh.config.current_profile.masker.mask_growth_steps == 25
     assert fresh.config.current_profile.masker.allow_colored_masks is False
+
+
+# ===========================================================================
+# quick-260903-lm6 — the Min-confidence spinbox (next-detect fit param)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_conf_thresh_spin_default_range_and_emits_masker_params_changed(qtbot) -> None:
+    """quick-260903-lm6: the Min-confidence spin boots at 0.40 over the locked
+    0.05..0.95 range (step 0.05, 2 decimals, no wrapping), and a user change
+    emits the shared ``masker_params_changed`` persist signal."""
+    panel = DetectionSettingsBody()
+    qtbot.addWidget(panel)
+
+    assert panel.conf_thresh_spin.minimum() == 0.05
+    assert panel.conf_thresh_spin.maximum() == 0.95
+    assert panel.conf_thresh_spin.singleStep() == 0.05
+    assert panel.conf_thresh_spin.decimals() == 2
+    assert panel.conf_thresh_spin.value() == 0.40
+    assert panel.conf_thresh_spin.wrapping() is False
+
+    spy = Mock()
+    panel.masker_params_changed.connect(spy)
+    panel.conf_thresh_spin.setValue(0.55)
+    spy.assert_called_once()
+
+
+@pytest.mark.gui
+def test_set_masker_values_populates_conf_thresh_without_emission(qtbot) -> None:
+    """quick-260903-lm6: ``set_masker_values`` populates the spin from the
+    MaskerConfig WITHOUT re-emitting ``masker_params_changed`` (the
+    blockSignals contract — a startup population never saves back)."""
+    panel = DetectionSettingsBody()
+    qtbot.addWidget(panel)
+
+    spy = Mock()
+    panel.masker_params_changed.connect(spy)
+
+    mc = MaskerConfig(detection_conf_thresh=0.7)
+    panel.set_masker_values(mc, detect_boxes=True)
+
+    assert panel.conf_thresh_spin.value() == 0.7
+    spy.assert_not_called()
+
+    # A legacy MaskerConfig-shaped object without the field falls back to 0.4
+    # (the getattr tolerance precedent) instead of raising.
+    from types import SimpleNamespace
+
+    legacy = SimpleNamespace(
+        mask_dilation_radius=2,
+        mask_max_standard_deviation=15,
+        max_inpaint_resolution=2048,
+        mask_growth_step_pixels=2,
+        mask_growth_steps=11,
+        min_mask_thickness=4,
+        off_white_max_threshold=240,
+        mask_improvement_threshold=0.1,
+        allow_colored_masks=True,
+        mask_selection_fast=False,
+    )
+    panel.set_masker_values(legacy, detect_boxes=True)
+    assert panel.conf_thresh_spin.value() == 0.40
+
+
+@pytest.mark.gui
+def test_conf_thresh_change_persists_to_profile_and_ini(qtbot, tmp_path) -> None:
+    """quick-260903-lm6: changing Min confidence persists onto
+    ``profile.masker.detection_conf_thresh`` and the INI round-trips through a
+    fresh ProfileManager (the masker_params_changed setattr loop — the key
+    equals the MaskerConfig field name)."""
+    window = _window(qtbot, tmp_path)
+
+    window.detection_body.conf_thresh_spin.setValue(0.6)
+
+    pm = window.profile_manager
+    assert pm.config.current_profile.masker.detection_conf_thresh == 0.6
+
+    fresh = ProfileManager(tmp_path)
+    fresh.load_profile("default")
+    assert fresh.config.current_profile.masker.detection_conf_thresh == 0.6
 
 
 @pytest.mark.gui

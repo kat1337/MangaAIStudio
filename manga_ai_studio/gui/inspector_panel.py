@@ -108,6 +108,7 @@ _INSPECTOR_QSS = """
 QLabel { color: #e8e8ea; }
 QLabel#styleHeaderLabel { color: #9a9aa2; font-size: 12px; font-weight: 600; }
 QLabel#stdDevLabel { color: #9a9aa2; }
+QLabel#confidenceLabel { color: #9a9aa2; }
 QTextEdit {
     background: #2d2d33;
     border: 1px solid #3a3a42;
@@ -386,6 +387,16 @@ class InspectorPanel(QWidget):
             "above the Std-dev threshold (Panel \u2192 Detection settings)."
         )
         form.addRow("Std dev", self.std_dev_label)
+
+        # quick-260903-lm6: the read-only per-box detector confidence row,
+        # mirroring the Std dev row (muted label, em dash when unknown).
+        self.confidence_label = QLabel("\u2014")  # em dash placeholder (muted)
+        self.confidence_label.setObjectName("confidenceLabel")
+        self.confidence_label.setToolTip(
+            "Detector confidence reported for this box. \u2014 means unknown "
+            "(user-drawn or legacy box)."
+        )
+        form.addRow("Confidence", self.confidence_label)
 
         # Recognized + Translation — multi-line commit-on-focus-loss text edits.
         self.recognized_edit = _CommitTextEdit()
@@ -688,6 +699,9 @@ class InspectorPanel(QWidget):
         )
         self._loaded_inpaint = self.inpaint_combo.currentText()
         self._set_std_dev_text(pagebox.std_dev)
+        # quick-260903-lm6: the per-box detector confidence (percentage or em
+        # dash); getattr tolerates PageBoxes from older call sites.
+        self._set_confidence_text(getattr(pagebox, "confidence", None))
 
         # Recognized text (str/list aware — TextBlock.text may be a list).
         recognized = ""
@@ -933,6 +947,9 @@ class InspectorPanel(QWidget):
             self._set_inpaint_combo("Mixed", mixed=True)
         self._loaded_inpaint = self.inpaint_combo.currentText()
         self._set_std_dev_text(None)
+        # quick-260903-lm6: multi-selection is per-box-ambiguous -> the em dash
+        # (the Std dev mirror — a stale single-box value must never linger).
+        self._set_confidence_text(None)
 
         self._apply_auto_fit_spin_state()
         for key in self._effect_checks:
@@ -1136,6 +1153,18 @@ class InspectorPanel(QWidget):
         else:
             self.std_dev_label.setText(f"{float(std_dev):.1f}")
 
+    def _set_confidence_text(self, conf) -> None:
+        """The read-only Confidence label (quick-260903-lm6): ``f"{v:.0%}"``
+        (0.87 -> "87%") or the em dash when unknown.
+
+        The muted ``#9a9aa2`` style comes from ``QLabel#confidenceLabel`` in
+        the panel QSS (applied at construction).
+        """
+        if conf is None:
+            self.confidence_label.setText("\u2014")
+        else:
+            self.confidence_label.setText(f"{float(conf):.0%}")
+
     def _set_swatch_color(self, swatch: _ColorSwatchButton, color) -> None:
         """Set a swatch's color (``None`` = the D-10 split/Mixed fill)."""
         swatch.color = color
@@ -1214,6 +1243,8 @@ class InspectorPanel(QWidget):
         self._set_inpaint_combo("Auto", mixed=False)
         self._loaded_inpaint = self.inpaint_combo.currentText()
         self._set_std_dev_text(None)
+        # quick-260903-lm6: the Confidence row resets to the em dash too.
+        self._set_confidence_text(None)
         was_v = self.vertical_check.blockSignals(True)
         self.vertical_check.setTristate(False)
         self.vertical_check.setChecked(False)
@@ -1239,6 +1270,7 @@ class InspectorPanel(QWidget):
             self.align_v_combo,
             self.inpaint_combo,
             self.std_dev_label,
+            self.confidence_label,
             *self._effect_checks.values(),
             *self._effect_swatches.values(),
             *self._effect_spins.values(),

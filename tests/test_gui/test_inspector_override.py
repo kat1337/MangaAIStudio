@@ -122,6 +122,61 @@ def test_std_dev_row_renders_value_or_em_dash(
     assert panel.std_dev_label.text() == expected_text
 
 
+# ===========================================================================
+# quick-260903-lm6 — the read-only per-box Confidence row
+# ===========================================================================
+
+
+def _pb_with_conf(conf, **kwargs) -> PageBox:
+    """A USER-origin PageBox carrying a detector confidence (quick-260903-lm6)."""
+    pb = _pb(**kwargs)
+    pb.confidence = conf
+    return pb
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "conf,expected_text",
+    [
+        (0.87, "87%"),
+        (None, "\u2014"),
+        (0.05, "5%"),
+        (1.0, "100%"),
+    ],
+)
+def test_confidence_row_renders_percentage_or_em_dash(
+    qtbot, conf, expected_text
+) -> None:
+    """quick-260903-lm6: ``load_box`` shows the detector confidence as a
+    percentage, or the em dash when unknown (user-drawn / legacy box)."""
+    panel = _make_inspector(qtbot)
+    panel.load_box(_pb_with_conf(conf))
+    assert panel.confidence_label.text() == expected_text
+    # The muted styling mirrors the Std dev row (objectName -> QSS hook).
+    assert panel.confidence_label.objectName() == "confidenceLabel"
+
+
+@pytest.mark.gui
+def test_confidence_row_clears_to_em_dash(qtbot) -> None:
+    """quick-260903-lm6: after ``clear()`` (no selection) the Confidence row
+    resets to the em dash — a stale box's value never lingers."""
+    panel = _make_inspector(qtbot)
+    panel.load_box(_pb_with_conf(0.87))
+    assert panel.confidence_label.text() == "87%"
+
+    panel.clear()
+    assert panel.confidence_label.text() == "\u2014"
+
+
+@pytest.mark.gui
+def test_confidence_row_multiselect_shows_em_dash(qtbot) -> None:
+    """quick-260903-lm6: a multi-selection shows the em dash (per-box data,
+    the Std dev mirror) even when every box carries a confidence."""
+    panel = _make_inspector(qtbot)
+    panel.load_multi_selection([_pb_with_conf(0.9), _pb_with_conf(0.5)])
+    assert panel.confidence_label.text() == "\u2014"
+
+
 @pytest.mark.gui
 def test_mixed_sentinel_display_on_differing_multi_select(qtbot) -> None:
     """Differing overrides in a multi-selection -> the dynamic "Mixed"
