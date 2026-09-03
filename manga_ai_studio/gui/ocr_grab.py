@@ -35,12 +35,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# Dim veil over the whole screen while the grab overlay is up (subtle — the
-# user must still READ the text underneath to aim the rectangle).
-_DIM_COLOR = QColor(0, 0, 0, 90)
-# Darker fill OUTSIDE the current selection so the kept region pops.
-_OUTSIDE_COLOR = QColor(0, 0, 0, 120)
 # Selection border in the strip-highlight accent token (#00d4ff).
+# NO dim veil (Poricom parity): the screen must stay fully readable — the
+# user aims the rectangle at text they are looking at. The cross cursor
+# signals armed mode; while dragging only the border is stroked.
 _ACCENT_COLOR = QColor(0, 212, 255)
 
 # History panel geometry + cap (plan contract: compact ~280x360, 20 entries).
@@ -158,32 +156,19 @@ class ScreenGrabOverlay(QWidget):
 
     # -------------------------------------------------------------- paint
     def paintEvent(self, event) -> None:  # noqa: N802
-        """Dim the whole screen; outside the live selection darker; stroke
-        the selection in the accent color. Nothing selected yet = plain dim."""
+        """Poricom-parity: NO dim veil — paint nothing when idle (the
+        translucent window is invisible; only the cross cursor shows the
+        tool is armed) and stroke ONLY the live selection border in the
+        accent color while dragging. The screen underneath stays fully
+        readable so the user can aim at the text they want to OCR."""
+        if not (self._dragging and not self._selection.isNull()):
+            return
         painter = QPainter(self)
         try:
-            painter.fillRect(self.rect(), _DIM_COLOR)
-            if self._dragging and not self._selection.isNull():
-                sel = self._selection
-                # Four rects covering everything OUTSIDE the selection.
-                painter.fillRect(QRect(0, 0, self.width(), sel.top()), _OUTSIDE_COLOR)
-                painter.fillRect(
-                    QRect(0, sel.bottom() + 1, self.width(),
-                          self.height() - sel.bottom() - 1),
-                    _OUTSIDE_COLOR,
-                )
-                painter.fillRect(
-                    QRect(0, sel.top(), sel.left(), sel.height()), _OUTSIDE_COLOR
-                )
-                painter.fillRect(
-                    QRect(sel.right() + 1, sel.top(),
-                          self.width() - sel.right() - 1, sel.height()),
-                    _OUTSIDE_COLOR,
-                )
-                pen = QPen(_ACCENT_COLOR)
-                pen.setWidth(2)
-                painter.setPen(pen)
-                painter.drawRect(sel)
+            pen = QPen(_ACCENT_COLOR)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawRect(self._selection)
         finally:
             painter.end()
 

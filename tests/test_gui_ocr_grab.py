@@ -324,6 +324,53 @@ def test_overlay_geometries_match_screen_and_stores_no_pixels(qtbot) -> None:
         assert not hasattr(overlay, forbidden)
 
 
+@pytest.mark.gui
+def test_overlay_renders_fully_transparent_when_idle(qtbot) -> None:
+    """Poricom parity: NO dim veil — an idle overlay paints NOTHING (the
+    translucent fullscreen window is invisible; the cross cursor is the
+    armed indicator). Guards against the dim veil coming back."""
+    overlay = _overlay(qtbot)
+    image = overlay.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    xs = list(range(0, image.width(), 64)) + [image.width() - 1]
+    ys = list(range(0, image.height(), 64)) + [image.height() - 1]
+    opaque = [
+        (x, y) for y in ys for x in xs if image.pixelColor(x, y).alpha() != 0
+    ]
+    assert opaque == []
+
+
+@pytest.mark.gui
+def test_overlay_drag_paints_only_the_selection_border(qtbot) -> None:
+    """Mid-drag the ONLY painted pixels are the accent selection border —
+    the selection interior and the rest of the screen stay transparent
+    (no dim, no outside-darkening)."""
+    overlay = _overlay(qtbot)
+
+    overlay.mousePressEvent(_raw_mouse(
+        overlay, QEvent.Type.MouseButtonPress, 100, 100,
+        Qt.MouseButton.LeftButton))
+    overlay.mouseMoveEvent(_raw_mouse(
+        overlay, QEvent.Type.MouseMove, 200, 150, Qt.MouseButton.NoButton))
+    # NO release — grab() renders the LIVE mid-drag paint synchronously.
+
+    image = overlay.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+
+    # The selection interior is untouched...
+    for x, y in ((150, 125), (120, 110), (180, 140)):
+        assert image.pixelColor(x, y).alpha() == 0
+    # ...and the screen far from the selection is untouched (no veil)...
+    for x, y in ((10, 10), (300, 200), (400, 300)):
+        assert image.pixelColor(x, y).alpha() == 0
+    # ...but the border IS stroked: scan a band around the top edge.
+    border_hits = [
+        (x, y)
+        for x in range(105, 200, 5)
+        for y in range(97, 104)
+        if image.pixelColor(x, y).alpha() != 0
+    ]
+    assert border_hits, "selection border not painted while dragging"
+
+
 # ---------------------------------------------------------------------------
 # Task 2: grab + conversion helpers
 # ---------------------------------------------------------------------------
