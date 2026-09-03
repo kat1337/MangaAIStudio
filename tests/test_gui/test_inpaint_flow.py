@@ -544,3 +544,144 @@ def test_action_fill_boxes_exists_with_shortcut_f_and_gating(qtbot, tmp_path):
     window._refresh_action_states()
     assert action.isEnabled() is False
 
+
+
+# ---------------------------------------------------------------------------
+# Stale-result guard: page switched mid-op (C/F finish targets the wrong page)
+# ---------------------------------------------------------------------------
+
+
+def _two_page_window(qtbot, tmp_path):
+    """A MainWindow with a real two-page folder loaded (page_01 selected)."""
+    from PySide6.QtWidgets import QApplication
+
+    folder = tmp_path / "chapter"
+    folder.mkdir(parents=True)
+    Image.new("RGB", (60, 40), color=(200, 200, 200)).save(folder / "page_01.png")
+    Image.new("RGB", (60, 40), color=(150, 150, 150)).save(folder / "page_02.png")
+    pm = ProfileManager(tmp_path / "config")
+    window = MainWindow(pm)
+    qtbot.addWidget(window)
+    window._load_folder(folder)
+    QApplication.processEvents()
+    return window, folder / "page_01.png", folder / "page_02.png"
+
+
+@pytest.mark.gui
+def test_inpaint_result_discarded_after_page_switch(qtbot, tmp_path):
+    """REGRESSION: C on page A, navigate to page B mid-op — the finish
+    handler used to composite A's result over B (canvas bbox paste or
+    whole-frame replacement), overwrite B's ImageFile.current_image, consume
+    B's mask planes, and push no usable undo record. The stale guard drops
+    the result instead; B is left byte-identical."""
+    from PySide6.QtWidgets import QApplication
+
+    window, path_a, path_b = _two_page_window(qtbot, tmp_path)
+    window._op_target_path = path_a  # what inpaint()/fill_boxes() stamps
+
+    # User switches to page B while the worker runs (select_path first, then
+    # the seam — the same order a real file-table click drives).
+    window.file_table.select_path(path_b)
+    window.on_page_selected(path_b)
+    QApplication.processEvents()
+    assert window.file_table.current_path() == path_b
+
+    canvas_before = window.canvas.get_image_numpy().copy()
+    idx = window._current_page_index()
+    model_before = window.image_files[idx].current_image
+    depth_before = len(window.history._image_undo)
+
+    # bbox'd result (page A's "inpainted" frame, same dims as B here).
+    window._on_inpaint_finished({
+        "image": np.full((40, 60, 3), 10, dtype=np.uint8),
+        "bbox": (5, 5, 20, 15),
+        "fill_count": 1,
+        "inpaint_count": 1,
+    })
+    assert np.array_equal(window.canvas.get_image_numpy(), canvas_before)
+    if model_before is None:
+        assert window.image_files[idx].current_image is None
+    else:
+        assert np.array_equal(window.image_files[idx].current_image, model_before)
+    assert len(window.history._image_undo) == depth_before
+    assert "discarded" in window.status_bar_left.text().lower()
+
+    # Whole-frame result (bbox=None — the no-undo-record corruption path).
+    window._on_inpaint_finished({
+        "image": np.full((40, 60, 3), 99, dtype=np.uint8),
+        "bbox": None,
+        "fill_count": 0,
+        "inpaint_count": 1,
+    })
+    assert np.array_equal(window.canvas.get_image_numpy(), canvas_before)
+    if model_before is None:
+        assert window.image_files[idx].current_image is None
+    else:
+        assert np.array_equal(window.image_files[idx].current_image, model_before)
+    assert len(window.history._image_undo) == depth_before
+
+
+@pytest.mark.gui
+def test_inpaint_result_applies_when_target_page_current(qtbot, tmp_path):
+    """Control: target page still current -> the guard is inert and the
+    result lands exactly as before the guard existed."""
+    window, path_a, _path_b = _two_page_window(qtbot, tmp_path)
+    assert window.file_table.current_path() == path_a
+    window._op_target_path = path_a
+
+    canvas_before = window.canvas.get_image_numpy().copy()
+    depth_before = len(window.history._image_undo)
+    window._on_inpaint_finished({
+        "image": np.full((40, 60, 3), 7, dtype=np.uint8),
+        "bbox": (5, 5, 10, 10),
+        "fill_count": 0,
+        "inpaint_count": 1,
+    })
+    after = window.canvas.get_image_numpy()
+    assert tuple(after[8, 8]) == (7, 7, 7), "bbox region must be applied"
+    assert tuple(after[0, 0]) == tuple(canvas_before[0, 0]), (
+        "outside the bbox must stay pixel-exact"
+    )
+    assert len(window.history._image_undo) == depth_before + 1
+
+
+@pytest.mark.gui
+def test_inpaint_dispatch_stamps_target_page(qtbot, tmp_path, monkeypatch):
+    """inpaint() records the current page at dispatch — the identity the
+    finish-handler guard compares against."""
+    from types import SimpleNamespace
+
+    import manga_ai_studio.gui.main_window as mw
+
+    window = _open_page_window(qtbot, tmp_path)
+    window.canvas.has_mask = lambda: True  # skip the fill-work content gate
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    class _FakeWorker:
+        def __init__(self, *a, **k):
+            self.signals = SimpleNamespace(
+                progress=_Sig(), result=_Sig(), error=_Sig(), finished=_Sig()
+            )
+
+        def setAutoDelete(self, *a, **k):
+            pass
+
+    class _FakePool:
+        class _Inst:
+            def start(self, *a, **k):
+                pass
+
+        @staticmethod
+        def globalInstance():
+            return _FakePool._Inst()
+
+    monkeypatch.setattr(mw, "Worker", _FakeWorker)
+    monkeypatch.setattr(mw, "backend_factory", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "QThreadPool", _FakePool)
+
+    window.inpaint()
+    assert window._op_running is True
+    assert window._op_target_path == window.file_table.current_path()

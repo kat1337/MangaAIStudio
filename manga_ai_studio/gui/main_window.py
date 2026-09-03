@@ -186,6 +186,13 @@ class MainWindow(QMainWindow):
         # Actions that start an async op are disabled while this is set so the
         # user cannot start a second model op concurrently (UI-SPEC surface 9).
         self._op_running = False
+        # Page the running interactive op was dispatched FOR (its file_table
+        # path at dispatch time). The finish handlers compare this against the
+        # current path and DROP stale results — after a mid-op page switch,
+        # applying would composite the result onto the WRONG page (canvas +
+        # ImageFile.current_image + mask consume + an undo record on the
+        # wrong page's timeline). None = no op in flight / legacy tests.
+        self._op_target_path: Path | None = None
 
         # quick-260826-vhh (T-QHH-01/T-QHH-02/T-QHH-03): async-save race
         # infrastructure. ``_page_edit_serials`` bumps on every real edit
@@ -5306,6 +5313,9 @@ class MainWindow(QMainWindow):
         worker.setAutoDelete(True)
 
         self._op_running = True
+        # Stale-result identity: the finish handler drops the result if the
+        # user navigates away from this page before the worker completes.
+        self._op_target_path = path
         self._refresh_action_states()
         self.error_chip.hide()
         self.progress_bar.setRange(0, 100)
@@ -5433,6 +5443,27 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(int(percent))
         self.status_bar_left.setText(f"Detecting text\u2026 {int(percent)}%")
 
+    def _op_result_is_stale(self) -> bool:
+        """True when the user navigated away from the dispatched page mid-op.
+
+        The async finish handlers apply their result to the CURRENT canvas +
+        current ImageFile. If the page switched while the worker ran, the
+        "current" page is a DIFFERENT page and applying the result corrupts
+        it — the dispatched page's pixels composited over it (bbox region or
+        whole frame), ``ImageFile.current_image`` overwritten, mask planes
+        consumed, and an undo record pushed onto the wrong page's history
+        (whole-frame results push NO undo record at all — the bbox gate —
+        so Ctrl+Z cannot repair it).
+
+        Stale results are therefore DROPPED with a status hint. The target
+        page keeps its mask/boxes (flushed by the page-switch seam), so the
+        op can simply be re-run after navigating back.
+        """
+        return (
+            self._op_target_path is not None
+            and self.file_table.current_path() != self._op_target_path
+        )
+
     def _on_detection_finished(self, result) -> None:
         """Reworked detection->mask seam (plan 08-07) — the reorder + the
         box-constrained derivation (main thread only).
@@ -5469,6 +5500,15 @@ class MainWindow(QMainWindow):
         mask = result["mask"]
         if mask is None:
             self.status_bar_left.setText("Detection complete (no mask)")
+            return
+
+        if self._op_result_is_stale():
+            # Stale-result guard: the page switched while the worker ran.
+            # Applying would land THIS page's boxes/mask on the WRONG page
+            # (canvas + ImageFile raw/auto slots). Drop — re-run on return.
+            self.status_bar_left.setText(
+                "Page changed since detection started \u2014 result discarded"
+            )
             return
 
         profile = self.profile_manager.config.current_profile
@@ -5920,12 +5960,15 @@ class MainWindow(QMainWindow):
         worker.setAutoDelete(True)
 
         self._op_running = True
+        # Stale-result identity: the finish handler drops the result if the
+        # user navigates away from this page before the worker completes.
+        self._op_target_path = path
         self._refresh_action_states()
         self.error_chip.hide()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.show()
-        self.status_bar_left.setText("Filling… 0%")
+        self.status_bar_left.setText("Filling\u2026 0%")
         QThreadPool.globalInstance().start(worker)
 
     def inpaint(self) -> None:
@@ -6035,6 +6078,9 @@ class MainWindow(QMainWindow):
         worker.setAutoDelete(True)
 
         self._op_running = True
+        # Stale-result identity: the finish handler drops the result if the
+        # user navigates away from this page before the worker completes.
+        self._op_target_path = path
         self._refresh_action_states()
         self.error_chip.hide()
         self.progress_bar.setRange(0, 100)
@@ -6454,6 +6500,20 @@ class MainWindow(QMainWindow):
         bbox = result["bbox"]
         if result_rgb is None:
             self.status_bar_left.setText("Inpainting complete (no result)")
+            return
+
+        if self._op_result_is_stale():
+            # Stale-result guard: the page switched while the worker ran.
+            # Applying would composite THIS page's inpainted result onto the
+            # WRONG page — canvas bbox paste (or whole-frame replacement when
+            # bbox is None), ImageFile.current_image overwritten, mask planes
+            # consumed, and NO usable undo record (the push below slices the
+            # "pre" patch from the WRONG page's canvas; whole-frame results
+            # push nothing at all). Drop — the target page's mask/boxes are
+            # intact on it, so the op can be re-run after navigating back.
+            self.status_bar_left.setText(
+                "Page changed since the inpaint started \u2014 result discarded"
+            )
             return
 
         original_patch_numpy = None

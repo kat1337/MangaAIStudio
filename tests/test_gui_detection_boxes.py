@@ -1187,3 +1187,82 @@ def test_inpaint_completion_copy_zero_skipped(qtbot, tmp_path) -> None:
     window._on_inpaint_finished({"image": result_rgb, "bbox": (0, 0, 60, 50), "fill_count": 0, "inpaint_count": 1, "patch_count": 1})
     assert "1 inpainted" in window.status_bar_left.text().lower()
     assert "filled" not in window.status_bar_left.text().lower() or "1 filled" not in window.status_bar_left.text().lower()
+
+
+# ===========================================================================
+# Stale-result guard: page switched mid-detection (wrong-page write family)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_detection_result_discarded_after_page_switch(qtbot, tmp_path) -> None:
+    """REGRESSION family (user report: C-inpaint corrupted the page they
+    switched to): detection finishing AFTER a page switch must not write
+    boxes/mask onto the NEW page. The stale guard drops the result."""
+    from manga_ai_studio.core.image_file import ImageFile
+
+    window = _window_with_page(qtbot, tmp_path)
+    path_a = window.file_table.current_path()
+
+    # A second page to switch to mid-op.
+    from PIL import Image
+
+    path_b = tmp_path / "page_b.png"
+    Image.new("RGB", (60, 50), color=(120, 120, 120)).save(path_b)
+    window.image_files.append(ImageFile(path=path_b))
+    window.file_table.set_pages([path_a, path_b])
+    window.file_table.select_path(path_b)
+    window.on_page_selected(path_b)
+    QApplication.processEvents()
+    assert window.file_table.current_path() == path_b
+
+    canvas_before = window.canvas.get_image_numpy().copy()
+    window._op_target_path = path_a  # what detect_text() stamps at dispatch
+
+    window._on_detection_finished({"mask": _mask_np(), "blocks": []})
+
+    assert np.array_equal(window.canvas.get_image_numpy(), canvas_before)
+    assert window.image_files[0].raw_detected_mask is None
+    assert "discarded" in window.status_bar_left.text().lower()
+
+
+@pytest.mark.gui
+def test_detection_dispatch_stamps_target_page(qtbot, tmp_path, monkeypatch) -> None:
+    """detect_text() records the current page at dispatch — the identity the
+    finish-handler guard compares against."""
+    from types import SimpleNamespace
+
+    import manga_ai_studio.gui.main_window as mw
+
+    window = _window_with_page(qtbot, tmp_path)
+    window._confirm_replace_mask = lambda: True
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    class _FakeWorker:
+        def __init__(self, *a, **k):
+            self.signals = SimpleNamespace(
+                progress=_Sig(), result=_Sig(), error=_Sig(), finished=_Sig()
+            )
+
+        def setAutoDelete(self, *a, **k):
+            pass
+
+    class _FakePool:
+        class _Inst:
+            def start(self, *a, **k):
+                pass
+
+        @staticmethod
+        def globalInstance():
+            return _FakePool._Inst()
+
+    monkeypatch.setattr(mw, "Worker", _FakeWorker)
+    monkeypatch.setattr(mw, "backend_factory", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "QThreadPool", _FakePool)
+
+    window.detect_text()
+    assert window._op_running is True
+    assert window._op_target_path == window.file_table.current_path()
