@@ -325,25 +325,29 @@ def test_overlay_geometries_match_screen_and_stores_no_pixels(qtbot) -> None:
 
 
 @pytest.mark.gui
-def test_overlay_renders_fully_transparent_when_idle(qtbot) -> None:
-    """Poricom parity: NO dim veil — an idle overlay paints NOTHING (the
-    translucent fullscreen window is invisible; the cross cursor is the
-    armed indicator). Guards against the dim veil coming back."""
+def test_overlay_renders_without_dim_veil_when_idle(qtbot) -> None:
+    """Poricom parity: NO dim veil — an idle overlay renders at most the
+    invisible 1/255 hit-test anchor (Windows per-pixel hit-testing makes a
+    fully transparent window CLICK-THROUGH: the drag never reaches it).
+    Alpha must stay imperceptible (<= 1/255), never the old 90/255 veil."""
     overlay = _overlay(qtbot)
     image = overlay.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
     xs = list(range(0, image.width(), 64)) + [image.width() - 1]
     ys = list(range(0, image.height(), 64)) + [image.height() - 1]
-    opaque = [
-        (x, y) for y in ys for x in xs if image.pixelColor(x, y).alpha() != 0
+    too_opaque = [
+        (x, y)
+        for y in ys
+        for x in xs
+        if image.pixelColor(x, y).alpha() > 1
     ]
-    assert opaque == []
+    assert too_opaque == []
 
 
 @pytest.mark.gui
 def test_overlay_drag_paints_only_the_selection_border(qtbot) -> None:
-    """Mid-drag the ONLY painted pixels are the accent selection border —
-    the selection interior and the rest of the screen stay transparent
-    (no dim, no outside-darkening)."""
+    """Mid-drag the ONLY painted pixels above the hit-test anchor are the
+    accent selection border — the selection interior and the rest of the
+    screen stay imperceptible (no dim, no outside-darkening)."""
     overlay = _overlay(qtbot)
 
     overlay.mousePressEvent(_raw_mouse(
@@ -355,18 +359,18 @@ def test_overlay_drag_paints_only_the_selection_border(qtbot) -> None:
 
     image = overlay.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
 
-    # The selection interior is untouched...
+    # The selection interior is untouched (anchor alpha at most)...
     for x, y in ((150, 125), (120, 110), (180, 140)):
-        assert image.pixelColor(x, y).alpha() == 0
+        assert image.pixelColor(x, y).alpha() <= 1
     # ...and the screen far from the selection is untouched (no veil)...
     for x, y in ((10, 10), (300, 200), (400, 300)):
-        assert image.pixelColor(x, y).alpha() == 0
+        assert image.pixelColor(x, y).alpha() <= 1
     # ...but the border IS stroked: scan a band around the top edge.
     border_hits = [
         (x, y)
         for x in range(105, 200, 5)
         for y in range(97, 104)
-        if image.pixelColor(x, y).alpha() != 0
+        if image.pixelColor(x, y).alpha() > 1
     ]
     assert border_hits, "selection border not painted while dragging"
 

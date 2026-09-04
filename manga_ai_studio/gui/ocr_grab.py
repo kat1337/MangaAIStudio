@@ -40,6 +40,11 @@ from PySide6.QtWidgets import (
 # user aims the rectangle at text they are looking at. The cross cursor
 # signals armed mode; while dragging only the border is stroked.
 _ACCENT_COLOR = QColor(0, 212, 255)
+# Invisible hit-test anchor: Windows hit-tests translucent (layered) windows
+# PER-PIXEL — alpha-0 pixels are click-through, so a window that paints
+# nothing never receives the drag. A 1/255-alpha fill is imperceptible
+# (<0.5% darkening) but makes every pixel hittable. It is NOT a dim veil.
+_HIT_TEST_COLOR = QColor(0, 0, 0, 1)
 
 # History panel geometry + cap (plan contract: compact ~280x360, 20 entries).
 _PANEL_WIDTH = 280
@@ -156,19 +161,19 @@ class ScreenGrabOverlay(QWidget):
 
     # -------------------------------------------------------------- paint
     def paintEvent(self, event) -> None:  # noqa: N802
-        """Poricom-parity: NO dim veil — paint nothing when idle (the
-        translucent window is invisible; only the cross cursor shows the
-        tool is armed) and stroke ONLY the live selection border in the
-        accent color while dragging. The screen underneath stays fully
-        readable so the user can aim at the text they want to OCR."""
-        if not (self._dragging and not self._selection.isNull()):
-            return
+        """Poricom-parity: NO dim veil — the screen stays fully readable so
+        the user can aim at the text they want to OCR. The paint is the
+        invisible hit-test anchor (Windows per-pixel input hit-testing —
+        see :data:`_HIT_TEST_COLOR`) plus the accent selection border while
+        dragging."""
         painter = QPainter(self)
         try:
-            pen = QPen(_ACCENT_COLOR)
-            pen.setWidth(2)
-            painter.setPen(pen)
-            painter.drawRect(self._selection)
+            painter.fillRect(self.rect(), _HIT_TEST_COLOR)
+            if self._dragging and not self._selection.isNull():
+                pen = QPen(_ACCENT_COLOR)
+                pen.setWidth(2)
+                painter.setPen(pen)
+                painter.drawRect(self._selection)
         finally:
             painter.end()
 
