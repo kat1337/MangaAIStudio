@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-02 - Completed quick task 260901-wmn: OCR Grab tool (Poricom-style) — screen-region grab → manga-ocr → OS clipboard, floating history panel, 8th strip tool (S); full suite 1246 passed
+Last activity: 2026-09-05 - Completed quick task 260904-wn0: fixed intermittent flat-white corner fill after resize-then-C (stale fit data skipped in fill/LaMa compose paths via the mask-dims freshness predicate); full suite 1278 passed (1 pre-existing env flake)
 
 ## Performance Metrics
 
@@ -396,6 +396,7 @@ None yet.
 | 260828-nrz | Justify alignment: model value + renderer (horizontal = natural-wrap AlignJustify, owned breaker bypassed in justify mode, fit degrades to height-only; vertical = inter-column gap distribution across inner_w, single column = center fallback); Inspector combo Left/Center/Right/Justify with round-trip + Mixed support — **REVERTED by user decision (7488beb): the natural-wrap tradeoff dropped the quality line-breaker; revisit with per-word placement if wanted** | 2026-08-28 | 7488beb | [260828-nrz-alignment-add-justify-alongside-left-cen](./quick/260828-nrz-alignment-add-justify-alongside-left-cen/)
 | 260901-wmn | OCR Grab tool (Poricom-style): 8th strip tool (S shortcut) — fullscreen rubber-band overlay grabs any on-screen text region, manga-ocr off-thread via the existing Worker pipeline, recognized text copied to the OS clipboard; floating always-on-top history panel (20 entries, most recent first, click-to-re-copy, Esc cancels, closes on tool switch) | 2026-09-02 | 9a40ded | [260901-wmn-add-a-new-tool-to-the-app-similar-to-wha](./quick/260901-wmn-add-a-new-tool-to-the-app-similar-to-wha/) |
 | 260903-lm6 | Detection confidence: per-box YOLO confidence captured via vendored group_output deviation (blk.prob, scattered-line −1.0 sentinel), PageBox.confidence + .mas persistence, Inspector read-only Confidence row (%, em dash unknown); "Min confidence" spinbox (0.05-0.95) in Detection settings → MaskerConfig.detection_conf_thresh → configure(conf_thresh) at all 3 detect sites (interactive + both batch entry points) — prunes high-res false positives on next Detect Text | 2026-09-03 | 0760f4f | [260903-lm6-detection-confidence-min-confidence-sett](./quick/260903-lm6-detection-confidence-min-confidence-sett/) |
+| 260904-wn0 | Fix flat-white corner fill after resize+clean (C): the fit-time box-cropped mask was pasted at the CURRENT post-resize box origin with stale low std_dev keeping the box on the fill route — `_has_auto_mask_content` now requires `mask.size == (box_w, box_h)` (project_io save-side stale invariant, quick-260825-u9q, lifted into the live path); compose_fill_specs/fill_binary/auto_binary + the worker auto_contrib loop consume that single predicate, so resized boxes route gate_skipped exactly like post-save/reload (re-derive via the amber re-detect affordance); pure box moves regression-guarded; batch_runner inherits unchanged | 2026-09-05 | 9860048 | [260904-wn0-fix-intermittent-bug-sometimes-when-clea](./quick/260904-wn0-fix-intermittent-bug-sometimes-when-clea/) |
 
 ## Deferred Items
 
