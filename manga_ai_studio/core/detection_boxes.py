@@ -424,7 +424,11 @@ def compose_auto_binary(
             continue
         if pb.inpaint_override == "fill":
             continue
-        if pb.mask is None or pb.mask.getbbox() is None:
+        # quick-260904-wn0: the emptiness + fit-freshness predicate lives in
+        # ONE place — PageBox._has_auto_mask_content (intentional cross-module
+        # use within manga_ai_studio.core) — so a resize-stale mask can never
+        # be composed at the current box origin.
+        if not pb._has_auto_mask_content():
             continue
         if pb.inpaint_override == "always":
             contributing.append(pb)
@@ -458,7 +462,9 @@ def compose_fill_binary(
             continue
         if pb.inpaint_override == "always":
             continue
-        if pb.mask is None or pb.mask.getbbox() is None:
+        # quick-260904-wn0: same single-site predicate — resize-stale masks
+        # never reach the fill binary either.
+        if not pb._has_auto_mask_content():
             continue
         if pb.inpaint_override == "fill":
             contributing.append(pb)
@@ -484,7 +490,10 @@ def compose_fill_specs(
     for pb in boxes:
         if pb.inpaint_override == "never" or pb.inpaint_override == "always":
             continue
-        if pb.mask is None or pb.mask.getbbox() is None:
+        # quick-260904-wn0: same single-site predicate — a resized box's
+        # stale fit-time mask must not be returned as a fill spec at the
+        # CURRENT box origin (the flat median-color corner-fill bug).
+        if not pb._has_auto_mask_content():
             continue
         is_fill = False
         if pb.inpaint_override == "fill":

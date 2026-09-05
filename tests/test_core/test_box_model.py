@@ -459,10 +459,15 @@ def test_inpaint_state_matrix() -> None:
             mask=mask, std_dev=std_dev,
         )
 
-    content_mask = _mask_with_content()
+    # quick-260904-wn0: masks must be FIT-FRESH — sized exactly to the box
+    # (2x2 here) — or the freshness-aware predicate reports gate_skipped and
+    # the will_fill/will_inpaint rows would test staleness, not std routing.
     from PIL import Image
 
-    empty_mask = Image.new("1", (4, 4), 0)  # all-zero -> getbbox() is None
+    content_mask = Image.new("1", (2, 2), 0)  # box-cropped at fit time
+    content_mask.putpixel((1, 1), 1)
+
+    empty_mask = Image.new("1", (2, 2), 0)  # all-zero -> getbbox() is None
     assert empty_mask.getbbox() is None  # precondition of the empty row
 
     threshold = 15.0

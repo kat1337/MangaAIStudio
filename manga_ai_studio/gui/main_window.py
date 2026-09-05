@@ -6281,7 +6281,11 @@ class MainWindow(QMainWindow):
             for pb in boxes_snapshot:  # type: ignore[union-attr]
                 if pb.inpaint_override == "never" or pb.inpaint_override == "fill":
                     continue
-                if pb.mask is None or pb.mask.getbbox() is None:
+                # quick-260904-wn0: the SAME single-site predicate the compose
+                # functions use (PageBox._has_auto_mask_content) so
+                # inpaint_count stays consistent with the composed binary —
+                # resize-stale masks count as contributing nothing.
+                if not pb._has_auto_mask_content():
                     continue
                 if pb.inpaint_override == "always":
                     auto_contrib += 1

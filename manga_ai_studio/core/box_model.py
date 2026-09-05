@@ -196,7 +196,8 @@ class PageBox:
 
     # ------------------------------------------------- inpaint state (Phase 8)
     def _has_auto_mask_content(self) -> bool:
-        """Return ``True`` iff the box carries non-empty AUTO mask content.
+        """Return ``True`` iff the box carries non-empty AND fit-FRESH auto
+        mask content.
 
         ``self.mask`` is a box-cropped mode-"1" PIL image (the plan 08-03
         storage convention: content = the non-zero pixels), so ``getbbox()``
@@ -204,8 +205,28 @@ class PageBox:
         ``pick_best_mask`` applies to a precise mask (panelcleaner
         image_ops.py). An all-zero (empty) mask reports ``getbbox() is
         None`` and fails this check.
+
+        Fit-freshness contract (quick-260904-wn0): the stored mask is
+        cropped EXACTLY to the box at FIT time
+        (``detection_boxes._fit_one_box`` stores the ``ops.cut_out_mask``
+        output, so ``mask.size == (box_w, box_h)`` holds at fit time). A box
+        RESIZED after its fit keeps the fit-time mask anchored to the old
+        geometry — composing it at the current box origin would paste stale
+        pixels offset from the actual text (the intermittent flat
+        median-color corner fill on C). Size divergence therefore means the
+        box carries stale fit data and contributes NOTHING to fill or LaMa —
+        identical to ``gate_skipped`` semantics, and identical to the box's
+        own post-save/reload state (project_io's save-side guard already
+        nulls mask + std_dev + fill_color for ``mask.size != (box_w,
+        box_h)``, quick-260825-u9q). A pure MOVE (dims unchanged) keeps
+        fresh data and composes as before. The re-derive path is the
+        geometry-stale per-box re-detect affordance.
         """
-        return self.mask is not None and self.mask.getbbox() is not None
+        if self.mask is None or self.mask.getbbox() is None:
+            return False
+        box_w = self.box.x2 - self.box.x1
+        box_h = self.box.y2 - self.box.y1
+        return self.mask.size == (box_w, box_h)
 
     def inpaint_state(self, threshold: float) -> str:
         """Derive the border-state contract state (08-UI-SPEC §Color + 08.1 D-01/D-04).
