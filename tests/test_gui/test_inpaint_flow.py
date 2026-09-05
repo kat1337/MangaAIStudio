@@ -685,3 +685,61 @@ def test_inpaint_dispatch_stamps_target_page(qtbot, tmp_path, monkeypatch):
     window.inpaint()
     assert window._op_running is True
     assert window._op_target_path == window.file_table.current_path()
+
+
+# ---------------------------------------------------------------------------
+# quick-260904-wn0 — resize-then-C must not paint a stale flat fill patch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_fill_only_worker_skips_resized_stale_box(qtbot, tmp_path):
+    """A will_fill box RESIZED after its fit carries a stale fit-time mask
+    (mask dims != box dims). The fill-only worker must skip it entirely —
+    fill_count 0 and the page pixel-identical to the background (no flat
+    white patch pasted at the current box origin)."""
+    window = _make_window(qtbot, tmp_path)
+    page_h, page_w = 40, 40
+    image_rgb = np.full((page_h, page_w, 3), 200, dtype=np.uint8)
+    pb_resized = _make_pb(5, 5, 15, 15, DETECTED, 0.0, None, (255, 255, 255))
+    # RESIZE commits new geometry; the fit-time 10x10 mask stays — stale.
+    pb_resized.box = Box(8, 6, 20, 20)  # 12x14 at a shifted origin
+    manual_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+    erase_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+
+    result = window._run_inpaint_task(
+        image_rgb, [pb_resized], manual_bin, erase_bin,
+        max_size=(2048, 2048), model_path=None, model=None, fill_only=True,
+    )
+    assert result["fill_count"] == 0, (
+        f"stale resized box filled: fill_count {result['fill_count']}"
+    )
+    assert result["patch_count"] == 0
+    assert np.array_equal(result["image"], image_rgb), (
+        "a resized box's stale mask must not paint anything"
+    )
+
+
+@pytest.mark.gui
+def test_fill_only_worker_moved_box_still_fills(qtbot, tmp_path):
+    """Anti-over-fix control: a pure MOVE (dims unchanged) keeps fresh fit
+    data — the fill still happens, at the NEW origin (fill follows box), and
+    nothing lands at the pre-move location."""
+    window = _make_window(qtbot, tmp_path)
+    page_h, page_w = 60, 60
+    image_rgb = np.full((page_h, page_w, 3), 200, dtype=np.uint8)
+    pb_moved = _make_pb(5, 5, 15, 15, DETECTED, 0.0, None, (255, 255, 255))
+    # Pure move: dims still 10x10, origin shifted.
+    pb_moved.box = Box(30, 40, 40, 50)
+    manual_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+    erase_bin = np.zeros((page_h, page_w), dtype=np.uint8)
+
+    result = window._run_inpaint_task(
+        image_rgb, [pb_moved], manual_bin, erase_bin,
+        max_size=(2048, 2048), model_path=None, model=None, fill_only=True,
+    )
+    assert result["fill_count"] == 1
+    # White fill composited at the NEW origin (rows 40..49, cols 30..39).
+    assert tuple(result["image"][45, 35]) == (255, 255, 255)
+    # Nothing at the ORIGINAL pre-move location.
+    assert tuple(result["image"][10, 10]) == (200, 200, 200)

@@ -458,3 +458,97 @@ def test_build_detected_pageboxes_existing_no_prob_fakes_default_none() -> None:
     result = build_detected_pageboxes([_blk(10, 10, 40, 30)], 100, 80)
     assert len(result) == 1
     assert result[0].confidence is None
+
+
+# ===========================================================================
+# quick-260904-wn0 — stale fit data after a box RESIZE must never compose
+# ===========================================================================
+
+
+def _resized_box(std_dev: float, override=None):
+    """A fill/inpaint-routed box whose stored mask no longer matches its
+    geometry: fitted 10x10 (all-content mask, white fill) then RESIZED to
+    12x14 at a shifted origin. The mask is stale exactly per the project_io
+    save-side rule (``mask.size != (box_w, box_h)``, quick-260825-u9q)."""
+    pb = PageBox(
+        box=st.Box(2, 3, 14, 17),  # 12x14 at a shifted origin
+        origin=DETECTED,
+        std_dev=std_dev,
+        inpaint_override=override,
+        fill_color=(255, 255, 255),
+    )
+    pb.mask = Image.new("1", (10, 10), 1)  # fit-time crop, still 10x10
+    return pb
+
+
+def _pure_moved_box():
+    """Same fit data, box MOVED (dims unchanged): still 10x10 but at a new
+    origin. Mask dims match — fresh data, must keep composing at the new
+    origin (fill follows box)."""
+    pb = PageBox(
+        box=st.Box(20, 30, 30, 40),
+        origin=DETECTED,
+        std_dev=5.0,
+        fill_color=(255, 255, 255),
+    )
+    pb.mask = Image.new("1", (10, 10), 1)
+    return pb
+
+
+@pytest.mark.unit
+def test_compose_fill_specs_skips_resized_stale_mask_box() -> None:
+    """quick-260904-wn0 RED: a resized box's fit-time mask is anchored to the
+    fit-time geometry; composing it at the CURRENT box origin paints a flat
+    median-color patch offset from the actual text (the reported C bug).
+    compose_fill_specs must skip it — identical to a gate_skipped box."""
+    from manga_ai_studio.core.detection_boxes import compose_fill_specs
+
+    specs = compose_fill_specs([_resized_box(5.0)], threshold=15.0)
+    assert specs == [], (
+        f"stale resized box produced fill specs: {specs!r}"
+    )
+
+
+@pytest.mark.unit
+def test_compose_fill_specs_pure_moved_box_composes_at_new_origin() -> None:
+    """quick-260904-wn0 anti-over-fix guard: a pure MOVE (dims unchanged)
+    keeps fresh fit data — the spec IS returned, pasted at the NEW origin."""
+    from manga_ai_studio.core.detection_boxes import compose_fill_specs
+
+    pb = _pure_moved_box()
+    specs = compose_fill_specs([pb], threshold=15.0)
+    assert len(specs) == 1
+    assert specs[0][0].size == (10, 10)
+    assert specs[0][1] == (255, 255, 255)
+    assert specs[0][2] == (20, 30)  # the new origin, not the fit-time one
+
+
+@pytest.mark.unit
+def test_compose_binaries_resized_box_contributes_zero_pixels() -> None:
+    """quick-260904-wn0 RED: the stale mask must land NOWHERE on the page via
+    compose_auto_binary or compose_fill_binary (today it is pasted at the
+    current origin — a misaligned binary for both the fill and LaMa planes,
+    across every auto routing that would otherwise contribute)."""
+    from manga_ai_studio.core.detection_boxes import compose_auto_binary, compose_fill_binary
+
+    # fill-routed (std 5): must not reach the fill binary.
+    fill = compose_fill_binary([_resized_box(5.0)], threshold=15.0, page_size=(40, 40))
+    assert np.count_nonzero(fill) == 0, "stale resized box reached the fill binary"
+    # inpaint-routed (std 30): must not reach the LaMa auto binary.
+    auto = compose_auto_binary([_resized_box(30.0)], threshold=15.0, page_size=(40, 40))
+    assert np.count_nonzero(auto) == 0, "stale resized box reached the auto binary"
+    # forced LaMa ("always") on a resized box is stale too — no misaligned
+    # paste at the current origin for ANY contributing routing.
+    forced = compose_auto_binary(
+        [_resized_box(30.0, override="always")], threshold=15.0, page_size=(40, 40)
+    )
+    assert np.count_nonzero(forced) == 0, "stale resized forced box reached the auto binary"
+
+
+@pytest.mark.unit
+def test_inpaint_state_resized_gate_skipped_moved_will_fill() -> None:
+    """quick-260904-wn0 RED: the SINGLE derivation site must report
+    gate_skipped for a resized box (so pens, Inspector, and the F-gate all
+    agree with what C actually does) and keep will_fill for a pure move."""
+    assert _resized_box(5.0).inpaint_state(15.0) == "gate_skipped"
+    assert _pure_moved_box().inpaint_state(15.0) == "will_fill"
