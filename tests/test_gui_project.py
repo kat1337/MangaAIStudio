@@ -1864,3 +1864,127 @@ def test_folder_drop_reroutes_through_detection(
     QApplication.processEvents()
     assert [imf.path.name for imf in window.image_files] == ["page_01.png"]
     assert window._project_dir is None
+
+
+# ----------------- quick-260907-l3w: _load_folder loads .mas page files
+
+
+def _project_minus_manifest(
+    qtbot, tmp_path, monkeypatch, project_dir: Path
+) -> Path:
+    """A saved project folder with its manifest.json deleted — a flat folder
+    of self-contained page ``.mas`` files (the plan's fixture shape)."""
+    _make_project_on_disk(qtbot, tmp_path, monkeypatch, project_dir)
+    (project_dir / "manifest.json").unlink()
+    return project_dir
+
+
+@pytest.mark.gui
+def test_open_folder_of_mas_pages_loads_session_without_manifest(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A folder of .mas page files WITHOUT manifest.json (a saved project
+    whose manifest was deleted) loads ALL pages as one session: embedded
+    images present on every page, folder identity reset (CR-02/T-Q3L-03),
+    first page displayed, dirty flags cleared."""
+    project_dir = _project_minus_manifest(
+        qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
+    )
+    window = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, project_dir)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert len(window.image_files) == 2
+    for imf in window.image_files:
+        assert imf.current_image is not None
+        assert imf.current_image.shape[:2] == (60, 60)
+    assert window._project_dir is None
+    assert window._project_name is None
+    assert not any(imf.dirty for imf in window.image_files)
+    # The first page (.mas-backed) displays via its embedded state.
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_open_folder_mixed_images_and_mas_one_session(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A mixed folder (plain .png + page .mas files) loads ONE natsorted
+    session containing both kinds; the first page displays correctly
+    whether it is image-backed (on_page_selected lazy path) or .mas-backed
+    (_display_page_state embedded path)."""
+    project_dir = _project_minus_manifest(
+        qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
+    )
+
+    # --- first page image-backed: the extra sorts before the .mas pages ---
+    extra_a = project_dir / "aaa_extra.png"
+    PILImage.new("RGB", (60, 60), color=(10, 10, 10)).save(extra_a)
+    window = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, project_dir)
+    window.open_folder()
+    QApplication.processEvents()
+    names = [imf.path.name for imf in window.image_files]
+    assert names == ["aaa_extra.png", "page_01.png", "page_02.png"]
+    for imf in window.image_files:
+        assert imf.current_image is not None
+    assert window._project_dir is None
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+    # --- first page .mas-backed: the extra sorts after the .mas pages ---
+    extra_z = project_dir / "zzz_extra.png"
+    PILImage.new("RGB", (60, 60), color=(10, 10, 10)).save(extra_z)
+    window2 = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, project_dir)
+    window2.open_folder()
+    QApplication.processEvents()
+    names2 = [imf.path.name for imf in window2.image_files]
+    assert names2 == [
+        "aaa_extra.png",
+        "page_01.png",
+        "page_02.png",
+        "zzz_extra.png",
+    ]
+    assert window2.image_files[0].path.name == "aaa_extra.png"
+    # The LAST page is image-backed and still carries a decoded image.
+    assert window2.image_files[-1].path.name == "zzz_extra.png"
+    assert window2.image_files[-1].current_image is not None
+    assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_open_folder_corrupt_mas_aborts_whole_open(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A corrupt .mas (garbage bytes) among valid content -> the
+    corrupt-project critical fires, the gate ran exactly once, and the
+    session is untouched — the build-before-swap is all-or-nothing."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    before = [imf.path for imf in window.image_files]
+
+    folder = tmp_path / "mixed"
+    folder.mkdir()
+    PILImage.new("RGB", (60, 60), color=(5, 5, 5)).save(folder / "ok_page.png")
+    (folder / "broken.mas").write_bytes(b"this is not a mas container")
+
+    captured = _capture_critical(monkeypatch)
+    titles: list = []
+    _stub_messagebox_exec(
+        monkeypatch,
+        role=QMessageBox.ButtonRole.DestructiveRole,  # Discard
+        capture=titles,
+    )
+    _stub_dir_dialog(monkeypatch, folder)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert captured and "Couldn't open" in captured[0][0]
+    assert "corrupt or from a newer version" in captured[0][1]
+    assert titles == ["Unsaved Changes"]  # gate-once holds on the abort path
+    assert [imf.path for imf in window.image_files] == before
+    assert window._session_dirty()  # no partial swap, flags untouched
+    assert window._project_dir is None
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
