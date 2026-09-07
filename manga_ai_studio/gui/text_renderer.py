@@ -305,6 +305,28 @@ def current_focus_text(pb) -> str:
     return str(t).strip()
 
 
+def detected_text(pb) -> str:
+    """The raw OCR-recognized text of ``pb`` (quick-260907-m4u).
+
+    The Ctrl+click copy rule (Move tool, ``EditorCanvas.copy_text_requested``)
+    reads ONLY ``payload.text`` — it deliberately does NOT fall back to
+    ``translation``. ``current_focus_text`` is the D-04 display-focus rule
+    (translation preferred for rendering); ``detected_text`` is the raw
+    recognized-text read — what a scanlator pastes into a translator. Same
+    defensive shape as :func:`current_focus_text`: ``None`` payload -> "",
+    missing attr -> "", list -> join+strip, else ``str().strip()``.
+    """
+    payload = pb.payload
+    if payload is None:
+        return ""
+    t = getattr(payload, "text", None)
+    if t is None:
+        return ""
+    if isinstance(t, list):
+        return "".join(str(s) for s in t).strip()
+    return str(t).strip()
+
+
 # ---------------------------------------------------------------------------
 # Font / document helpers
 # ---------------------------------------------------------------------------

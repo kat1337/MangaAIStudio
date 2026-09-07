@@ -81,7 +81,7 @@ from manga_ai_studio.core.mask_planes import (
 from manga_ai_studio.core.text_style import TextStyle
 from manga_ai_studio.gui.box_item import BoxItem, CornerHandle, RotationHandle, origin_hue
 from manga_ai_studio.gui.inline_editor import InlineEditor
-from manga_ai_studio.gui.text_renderer import _normalize_rotation
+from manga_ai_studio.gui.text_renderer import _normalize_rotation, detected_text
 
 
 # Maximum zoom factor (image_viewer.py:233 clamps at 100).
@@ -238,6 +238,13 @@ class EditorCanvas(QGraphicsView):
     # Ctrl+Z reverts the whole stroke via the existing bbox-patch image
     # stack with zero new history code.
     restore_committed = Signal(object)
+    # quick-260907-m4u: emitted when the user Ctrl+clicks a bubble under the
+    # Move tool. Carries the box's DETECTED (OCR-recognized) text — possibly
+    # empty; the receiver (MainWindow) decides the empty feedback ("No text
+    # recognized"). The canvas NEVER touches the OS clipboard — it is a dumb
+    # emitter, exactly the gui/ocr_grab.py:19 discipline (MainWindow owns the
+    # clipboard write + transient status copy).
+    copy_text_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1516,6 +1523,27 @@ class EditorCanvas(QGraphicsView):
                     event.accept()
                     return
                 if isinstance(item, BoxItem):
+                    # quick-260907-m4u: Ctrl+click under the Move tool copies
+                    # the bubble's DETECTED (OCR-recognized) text. The branch
+                    # sits BEFORE the Shift check — Ctrl wins over Shift on
+                    # this arm. A CornerHandle/RotationHandle hit is a
+                    # resize/rotate gesture and NEVER copies (the branches
+                    # above return first). Under PAINT_TOOLS Ctrl still
+                    # paints (MASK-06 — Alt stays the sole box modifier
+                    # there); this dispatch is Move-tool-only. The canvas
+                    # stays a dumb emitter: it selects without arming a drag
+                    # and hands the raw detected text to MainWindow, which
+                    # owns the clipboard (ocr_grab.py:19 discipline).
+                    if (
+                        self.current_tool == ToolMode.MOVE
+                        and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                    ):
+                        if not item.isSelected():
+                            self._deselect_box()
+                            item.setSelected(True)
+                        self.copy_text_requested.emit(detected_text(item.pagebox))
+                        event.accept()
+                        return
                     if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                         self._toggle_box_selection(item)
                     else:
