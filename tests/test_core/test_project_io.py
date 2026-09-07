@@ -1203,3 +1203,102 @@ def test_invalid_confidence_rejected() -> None:
     # a numeric value loads
     out = json_to_pagebox({**base, "confidence": 0.42})
     assert out.confidence == 0.42
+
+
+# ------------------------------------- quick-260907-l3w: find_project_manifest
+
+
+@pytest.mark.unit
+def test_find_project_manifest_direct_project(tmp_path: Path) -> None:
+    """A directory that IS a project (manifest.json directly inside) returns
+    that manifest path — validated through load_project (quick-260907-l3w)."""
+    from manga_ai_studio.core.project_io import find_project_manifest
+
+    project_dir = tmp_path / "chapter-01.mas-project"
+    manifest_path = save_project(
+        project_dir, "ch1", [("page_001", {"meta.json": b"{}"})]
+    )
+    assert find_project_manifest(project_dir) == manifest_path
+
+
+@pytest.mark.unit
+def test_find_project_manifest_no_project(tmp_path: Path) -> None:
+    """A folder with no manifest anywhere (plain images / loose files) is
+    NOT a project -> None. Non-existent paths and FILE paths passed as the
+    directory also return None (never raise) — the router treats them as
+    the plain-folder route."""
+    from manga_ai_studio.core.project_io import find_project_manifest
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "page_001.png").write_bytes(b"\x89PNG fake bytes")
+    (plain / "notes.txt").write_text("loose file", encoding="utf-8")
+    assert find_project_manifest(plain) is None
+
+    # Non-existent directory -> None.
+    assert find_project_manifest(tmp_path / "does-not-exist") is None
+
+    # A file passed as the directory -> None (the is_dir guard).
+    assert find_project_manifest(plain / "notes.txt") is None
+
+
+@pytest.mark.unit
+def test_find_project_manifest_contains_project(tmp_path: Path) -> None:
+    """A folder CONTAINING a project subdir returns that subdir's manifest:
+    image-only decoy subdirs are skipped, and among MULTIPLE project
+    subdirs the natsorted-first one wins deterministically (chapter_2
+    before chapter_10 — a plain str sort would wrongly pick chapter_10)."""
+    from manga_ai_studio.core.project_io import find_project_manifest
+
+    outer = tmp_path / "outer"
+    decoy = outer / "decoy"
+    decoy.mkdir(parents=True)
+    (decoy / "page.png").write_bytes(b"\x89PNG fake bytes")
+
+    chapter_2 = outer / "chapter_2"
+    manifest_2 = save_project(
+        chapter_2, "ch2", [("page_001", {"meta.json": b"{}"})]
+    )
+    chapter_10 = outer / "chapter_10"
+    save_project(chapter_10, "ch10", [("page_001", {"meta.json": b"{}"})])
+
+    found = find_project_manifest(outer)
+    assert found == chapter_2 / "manifest.json" == manifest_2
+
+    # The plan's chapter_1 + decoy shape: the single project subdir wins.
+    outer2 = tmp_path / "outer2"
+    (outer2 / "decoy").mkdir(parents=True)
+    (outer2 / "decoy" / "img.png").write_bytes(b"\x89PNG fake bytes")
+    chapter_1 = outer2 / "chapter_1"
+    manifest_1 = save_project(
+        chapter_1, "ch1", [("page_001", {"meta.json": b"{}"})]
+    )
+    assert find_project_manifest(outer2) == chapter_1 / "manifest.json" == manifest_1
+
+
+@pytest.mark.unit
+def test_find_project_manifest_corrupt_direct_manifest(tmp_path: Path) -> None:
+    """A manifest.json that exists but is malformed raises ProjectFormatError
+    — NEVER None and never a silent fall-through to the image route (the
+    find_sibling_manifest corrupt-raises contract)."""
+    from manga_ai_studio.core.project_io import find_project_manifest
+
+    bad = tmp_path / "bad.mas-project"
+    bad.mkdir()
+    (bad / "manifest.json").write_bytes(b"not json")
+    with pytest.raises(ProjectFormatError):
+        find_project_manifest(bad)
+
+
+@pytest.mark.unit
+def test_find_project_manifest_corrupt_subdir_manifest(tmp_path: Path) -> None:
+    """A corrupt manifest inside a scanned subdir raises ProjectFormatError —
+    the scan must not skip it and fall through to a later (or no) result."""
+    from manga_ai_studio.core.project_io import find_project_manifest
+
+    outer = tmp_path / "outer"
+    bad = outer / "chapter_1"
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_bytes(b"not json")
+    with pytest.raises(ProjectFormatError):
+        find_project_manifest(outer)
