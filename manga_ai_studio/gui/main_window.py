@@ -2016,19 +2016,68 @@ class MainWindow(QMainWindow):
         self._open_single_image(Path(path))
 
     def open_folder(self) -> None:
-        """Open a folder of images: scan (flat, non-recursive), sort, populate.
+        """Open a folder: project detection first, then images (Ctrl+Shift+O).
 
-        UI-SPEC surface 4 Open Folder (Ctrl+Shift+O). Folder scan uses
-        ``Path.iterdir`` + ``is_file`` + ``validate_image_path`` — symlink
-        resolution is handled by ``Path.resolve()`` inside the validator.
-        The D-07 Unsaved Changes gate runs before the session is replaced.
+        UI-SPEC surface 4 Open Folder (Ctrl+Shift+O). The picked directory
+        routes through :meth:`_open_folder_session` (quick-260907-l3w):
+        a folder that IS a Manga AI Studio project (``manifest.json``
+        directly inside) or CONTAINS one (an immediate subdirectory with
+        a valid ``manifest.json``) loads that project session; otherwise
+        the folder's images (and page ``.mas`` files) load as a plain
+        session. The D-07 Unsaved Changes gate runs EXACTLY ONCE per
+        action: on the project route it is
+        :meth:`_load_project_session`'s internal gate (detection precedes
+        gating, so a corrupt manifest never consumes a prompt); on the
+        plain-folder route the router gates before ``_load_folder``.
         """
         directory = QFileDialog.getExistingDirectory(self, "Open Folder", "")
         if not directory:
             return
+        self._open_folder_session(Path(directory))
+
+    def _open_folder_session(self, directory: Path) -> None:
+        """The SINGLE Open Folder router (quick-260907-l3w).
+
+        Detection (:func:`project_io.find_project_manifest`):
+          1. A manifest is found (the folder IS a project or CONTAINS one)
+             -> :meth:`_load_project_session` — its internal D-07 gate is
+             the one and only gate on this route.
+          2. No manifest -> the D-07 gate runs here (the one and only gate
+             on this route) -> :meth:`_load_folder` (images + page
+             ``.mas`` files).
+
+        Every ``(ProjectFormatError, OSError)`` from the detection or the
+        folder load surfaces the corrupt-project copy (the same
+        :meth:`_open_project` wording, T-05-13) and leaves the current
+        session untouched — a corrupt manifest or ``.mas`` file never
+        silently falls through to the other route.
+        """
+        try:
+            manifest = project_io.find_project_manifest(directory)
+        except (project_io.ProjectFormatError, OSError) as exc:
+            logger.error(f"Open Folder failed: {exc}", exc_info=True)
+            self._open_folder_corrupt_dialog(directory.name)
+            return
+        if manifest is not None:
+            self._load_project_session(manifest)
+            return
         if not self._confirm_discard_changes():
             return
-        self._load_folder(Path(directory))
+        try:
+            self._load_folder(directory)
+        except (project_io.ProjectFormatError, OSError) as exc:
+            logger.error(f"Open Folder failed: {exc}", exc_info=True)
+            self._open_folder_corrupt_dialog(directory.name)
+
+    def _open_folder_corrupt_dialog(self, name: str) -> None:
+        """The T-05-13 corrupt-project critical for the folder route (the
+        copy mirrors :meth:`_open_project`'s)."""
+        QMessageBox.critical(
+            self,
+            f"Couldn't open '{name}'.",
+            "The project file may be corrupt or from a newer version of"
+            " Manga AI Studio. No pages were changed.",
+        )
 
     def _load_folder(self, directory: Path) -> None:
         """Scan ``directory`` for images and populate the FileTable."""
@@ -2443,8 +2492,16 @@ class MainWindow(QMainWindow):
         self._set_pages(paths)
 
     def _on_folder_dropped(self, directory: Path) -> None:
-        """FileTable dropped a folder -> scan + load."""
-        self._load_folder(directory)
+        """FileTable dropped a folder -> the Open Folder router.
+
+        Folder drops share the project detection (IS / CONTAINS / corrupt
+        dialog) AND the D-07 gate placement with :meth:`open_folder`
+        (quick-260907-l3w) — a dropped project folder loads its project;
+        a dropped plain folder is gated before the session swap like every
+        other open path. File drops (:meth:`_on_files_dropped`) keep the
+        direct ``_set_pages`` route.
+        """
+        self._open_folder_session(directory)
 
     # ------------------------------------------------------------- recent
     def _settings(self):

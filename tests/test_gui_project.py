@@ -1695,8 +1695,12 @@ def _make_project_on_disk(
     qtbot, tmp_path, monkeypatch, project_dir: Path, count: int = 2
 ) -> Path:
     """Build a REAL on-disk project at ``project_dir`` via the established
-    recipe: seed a window session from a page folder, then Save As."""
-    pages = tmp_path / "seed-pages-2"
+    recipe: seed a window session from a page folder, then Save As.
+
+    The seed folder is named ``chapter`` so the save-side name derivation
+    (source-folder name) writes ``name: "chapter"`` into the manifest —
+    matching the established recipes in this file."""
+    pages = tmp_path / "chapter"
     _make_pages(pages, count=count)
     seed = _make_window(qtbot, tmp_path, folder=pages)
     _dirty(seed)
