@@ -5,9 +5,10 @@ Origin: our own module — Phase 5 greenfield per 05-CONTEXT canonical refs
 PanelCleaner code is involved).
 
 Dependency contract: this module imports ONLY stdlib + numpy + Pillow (+ loguru
-for stale-mask-drop warnings, quick-260825-u9q) — no Qt, no torch, no models —
-so it is safe to call from a worker thread and unit-testable headless (mirrors
-``core/image_io.py``).
+for stale-mask-drop warnings, quick-260825-u9q; + natsort for the
+find_project_manifest deterministic subdir scan, quick-260907-l3w) — no Qt,
+no torch, no models — so it is safe to call from a worker thread and
+unit-testable headless (mirrors ``core/image_io.py``).
 
 The on-disk layout is a published, one-way format (CONTEXT D-01/D-02/D-03/
 D-04): a chapter is a ``<chapter>.mas-project/`` folder holding a plain-JSON
@@ -46,6 +47,7 @@ from pathlib import Path
 
 import numpy as np
 from loguru import logger
+from natsort import natsorted
 from PIL import Image, UnidentifiedImageError
 
 from manga_ai_studio.core.image_io import save_image_bytes
@@ -874,6 +876,44 @@ def find_sibling_manifest(page_mas_path: Path) -> Path | None:
         return None
     load_project(sibling)  # raises ProjectFormatError when malformed
     return sibling
+
+
+def find_project_manifest(directory: Path) -> Path | None:
+    """Quick-260907-l3w: whether an opened folder IS or CONTAINS a project.
+
+    Detection order (the Open Folder router's contract):
+      1. ``directory / "manifest.json"`` exists -> validated via
+         :func:`load_project` and returned (the folder IS a project).
+      2. Else the immediate subdirectories are scanned (natsorted by path,
+         deterministic first-wins): the first ``sub / "manifest.json"``
+         that exists is validated and returned (the folder CONTAINS a
+         project). Deliberately ONE level deep; when MULTIPLE project
+         subdirectories exist the natsorted-first one is picked (there is
+         no interactive chooser on the folder route).
+      3. Else ``None`` — the plain-folder route (images + page ``.mas``).
+
+    Corrupt-raises contract (the :func:`find_sibling_manifest` precedent):
+    a manifest that exists but is malformed — or from a newer format
+    version — raises ProjectFormatError. A corrupt project must NEVER be
+    skipped so the folder silently falls through to the image route.
+    Non-directory input (a file path, or a path that does not exist)
+    returns ``None``.
+    """
+    if not directory.is_dir():
+        return None
+    direct = directory / "manifest.json"
+    if direct.is_file():
+        load_project(direct)  # raises ProjectFormatError when malformed
+        return direct
+    subdirs = natsorted(
+        (s for s in directory.iterdir() if s.is_dir()), key=str
+    )
+    for sub in subdirs:
+        candidate = sub / "manifest.json"
+        if candidate.is_file():
+            load_project(candidate)  # raises ProjectFormatError when malformed
+            return candidate
+    return None
 
 
 # -------------------------------------------------- untrusted-input validation
