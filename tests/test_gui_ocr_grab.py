@@ -851,3 +851,55 @@ def test_grab_capture_button_starts_new_session(qtbot, tmp_path) -> None:
     assert overlay2.isVisible()
 
     window.set_active_tool(ToolMode.MOVE)  # teardown
+
+
+# ---------------------------------------------------------------------------
+# quick-260907-m4u: Ctrl+click a bubble (Move tool) copies its detected text.
+# The canvas emits copy_text_requested(str); MainWindow owns the clipboard
+# write + status copy — the same empty-rule and transient-copy structure as
+# the OCR Grab handler above. Handler is the contract under test (same
+# convention); real OS clipboard via the spaced-retry helpers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_box_text_copy_handler_copies_and_flashes_status(qtbot, tmp_path) -> None:
+    """A non-empty detected text lands on the real OS clipboard and flashes
+    the transient copied status."""
+    window = _window(qtbot, tmp_path)
+    _clear_clipboard("sentinel")
+
+    window._on_box_text_copy_requested("hello bubble")
+
+    assert _clipboard_text_eventually(qtbot, "hello bubble")
+    assert "copied" in window.status_bar_left.text().lower()
+
+
+@pytest.mark.gui
+def test_box_text_copy_handler_empty_rules(qtbot, tmp_path) -> None:
+    """Empty and whitespace-only text write NOTHING (the pre-seeded sentinel
+    survives) and set the "No text recognized" status — grab-handler parity."""
+    window = _window(qtbot, tmp_path)
+    _clear_clipboard("sentinel")
+
+    window._on_box_text_copy_requested("")
+    assert _clipboard_text_eventually(qtbot, "sentinel")
+    assert window.status_bar_left.text() == "No text recognized"
+
+    window._on_box_text_copy_requested("   ")
+    assert _clipboard_text_eventually(qtbot, "sentinel")
+    assert window.status_bar_left.text() == "No text recognized"
+
+
+@pytest.mark.gui
+def test_canvas_copy_text_requested_wired_to_handler(qtbot, tmp_path) -> None:
+    """canvas.copy_text_requested is connected to the clipboard handler —
+    emitting the signal alone drives the OS clipboard write."""
+    window = _window(qtbot, tmp_path)
+    _clear_clipboard("sentinel")
+
+    window.canvas.copy_text_requested.emit("wire check")
+    QApplication.processEvents()
+
+    assert _clipboard_text_eventually(qtbot, "wire check")
+
