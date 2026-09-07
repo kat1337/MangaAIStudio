@@ -126,8 +126,13 @@ class ToolsStrip(QToolBar):
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
 
+        # quick-260907-m4u: the Move tooltip gains the Ctrl+click copy clause
+        # (matches the brush family's Alt-clause pattern below).
         self.action_move = self._make_tool_action(
-            "Move/Pan", "Move/Pan tool (V)", ToolMode.MOVE, checked=True
+            "Move/Pan",
+            "Move/Pan tool (V) — Ctrl+click a bubble to copy its detected text.",
+            ToolMode.MOVE,
+            checked=True,
         )
         # The brush-family tooltips carry the D-15 Alt clause verbatim (the
         # old ToolsPanel row's copy — relocated here with the row, plan 09-02).

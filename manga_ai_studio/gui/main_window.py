@@ -168,6 +168,10 @@ class MainWindow(QMainWindow):
         # stationary-grace auto-dispatch timer is REMOVED — no automatic
         # trigger path remains.
         self.canvas.box_redetect_requested.connect(self._on_box_redetect_requested)
+        # quick-260907-m4u: Ctrl+click a bubble under the Move tool copies its
+        # detected text — the canvas emits the raw text; THIS window owns the
+        # OS clipboard write + status copy (ocr_grab.py:19 discipline).
+        self.canvas.copy_text_requested.connect(self._on_box_text_copy_requested)
         # G-07-3: new user-drawn boxes are born with the saved default
         # family. The provider returns None when no family is saved — a
         # no-key box keeps style None and the renderer's TextStyle() defaults
@@ -7375,6 +7379,28 @@ class MainWindow(QMainWindow):
             return
         QGuiApplication.clipboard().setText(text)
         self.ocr_grab_panel.add_entry(text)
+        self._show_transient_status(f"Copied {len(text)} chars to clipboard")
+
+    def _on_box_text_copy_requested(self, text: str) -> None:
+        """Copy a bubble's detected text to the OS clipboard (Ctrl+click, Move).
+
+        quick-260907-m4u: mirrors :meth:`_on_ocr_grab_finished` verbatim in
+        structure. The canvas box-copy no-OS-clipboard rule is scoped to
+        in-app Ctrl+C/V box DUPLICATION (see the grab handler's docstring) —
+        an explicit Ctrl+click copy-text interaction is the same deliberate
+        carve-out class, and the canvas stays a dumb emitter (the
+        gui/ocr_grab.py:19 discipline: no clipboard business logic in the
+        canvas layer; the signal carries the text even when empty so the
+        empty feedback is decided here). Empty/whitespace text writes
+        NOTHING (no clipboard write) and shows the "No text recognized"
+        status — grab-handler parity. Only the recognized text is ever
+        copied: the canvas emits ``detected_text(pagebox)``, which never
+        falls back to the translation.
+        """
+        if not text or not text.strip():
+            self.status_bar_left.setText("No text recognized")
+            return
+        QGuiApplication.clipboard().setText(text)
         self._show_transient_status(f"Copied {len(text)} chars to clipboard")
 
     def _on_ocr_grab_error(self, worker_error) -> None:
