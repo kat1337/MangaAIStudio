@@ -277,11 +277,25 @@ def _canvas_with_image_and_boxes(qtbot, size: int = 200) -> EditorCanvas:
 
 
 def _press_at(
-    canvas: EditorCanvas, sx: float, sy: float, *, alt: bool = False
+    canvas: EditorCanvas,
+    sx: float,
+    sy: float,
+    *,
+    alt: bool = False,
+    ctrl: bool = False,
 ) -> QMouseEvent:
-    """Build a left-button mouse-press whose viewport coords map to scene (sx, sy)."""
+    """Build a left-button mouse-press whose viewport coords map to scene (sx, sy).
+
+    quick-260907-m4u: ``ctrl`` ORs ControlModifier in (mirroring the ``alt``
+    param) so the Ctrl+click copy dispatch is drivable; existing call sites
+    are unchanged (both default False).
+    """
     vp = canvas.mapFromScene(QPointF(sx, sy))
-    mods = Qt.KeyboardModifier.AltModifier if alt else Qt.KeyboardModifier.NoModifier
+    mods = Qt.KeyboardModifier.NoModifier
+    if alt:
+        mods |= Qt.KeyboardModifier.AltModifier
+    if ctrl:
+        mods |= Qt.KeyboardModifier.ControlModifier
     return QMouseEvent(
         QEvent.Type.MouseButtonPress,
         QPointF(vp),
@@ -5302,4 +5316,192 @@ def test_no_ghost_after_undo_and_scroll(qtbot) -> None:
                 f"ghost stroke pixels visible after wheel (ctrl={ctrl}, "
                 f"angle={angle})"
             )
+
+
+# ===========================================================================
+# quick-260907-m4u — Ctrl+click a bubble (Move tool) copies its DETECTED text
+# ===========================================================================
+#
+# The canvas extracts and emits (copy_text_requested(str)); MainWindow owns
+# the clipboard (gui/ocr_grab.py:19 discipline). These tests cover the canvas
+# side: the detected_text helper + the Ctrl branch in mousePressEvent's
+# non-paint box arm. Every other interaction must stay byte-identical.
+
+
+def _copy_test_canvas(qtbot, pb: PageBox):
+    """Canvas with one user box added via the real set_boxes seam + MOVE active."""
+    canvas = _canvas_with_image_and_boxes(qtbot)
+    canvas.set_tool(ToolMode.MOVE)
+    canvas.set_boxes(user_pageboxes=[pb], detected_pageboxes=[])
+    QApplication.processEvents()
+    return canvas, canvas._box_items[-1]
+
+
+@pytest.mark.gui
+def test_detected_text_reads_recognized_text_only(qtbot) -> None:
+    """detected_text: recognized text ONLY — translation is NEVER read."""
+    from manga_ai_studio.gui.text_renderer import detected_text
+
+    # Recognized str text comes back verbatim.
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("\u30cf\u30ed\u30fc")
+    assert detected_text(pb) == "\u30cf\u30ed\u30fc"
+
+    # Never-OCR'd box (payload None) -> "".
+    assert detected_text(PageBox(box=Box(0, 0, 10, 10), origin=USER)) == ""
+
+    # List-shaped payload.text -> join+strip (current_focus_text's defensive shape).
+    pb_list = PageBox(box=Box(0, 0, 10, 10), origin=USER)
+    pb_list._ensure_payload()
+    pb_list.payload.text = ["a", "b"]
+    assert detected_text(pb_list) == "ab"
+
+    # Translation set but recognized text empty -> "" (translation never leaks).
+    pb_tr = PageBox(box=Box(0, 0, 10, 10), origin=USER)
+    pb_tr.set_translation("\u7ffb\u8a33")
+    assert detected_text(pb_tr) == ""
+    # Whitespace-only recognized text strips to "".
+    pb_ws = PageBox(box=Box(0, 0, 10, 10), origin=USER)
+    pb_ws.set_recognized_text("   ")
+    assert detected_text(pb_ws) == ""
+
+
+@pytest.mark.gui
+def test_ctrl_click_move_copies_detected_text(qtbot) -> None:
+    """Ctrl+click (MOVE) on an OCR'd box emits copy_text_requested with the
+    exact recognized text; the box is selected and NO move drag is armed."""
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("copied text")
+    canvas, item = _copy_test_canvas(qtbot, pb)
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    canvas.mousePressEvent(_press_at(canvas, 40, 40, ctrl=True))
+    QApplication.processEvents()
+
+    assert emitted == ["copied text"]
+    assert item.isSelected() is True
+    assert canvas._moving_box is None
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+
+
+@pytest.mark.gui
+def test_ctrl_click_move_wins_over_shift(qtbot) -> None:
+    """Ctrl wins over Shift on the Move-tool box arm: Ctrl+Shift+click copies
+    (the Shift-toggle branch never runs)."""
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("copied text")
+    canvas, item = _copy_test_canvas(qtbot, pb)
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    vp = canvas.mapFromScene(QPointF(40, 40))
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(vp),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    canvas.mousePressEvent(ev)
+    QApplication.processEvents()
+
+    assert emitted == ["copied text"]
+    assert item.isSelected() is True
+    assert canvas._moving_box is None
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+
+
+@pytest.mark.gui
+def test_ctrl_click_move_on_payload_none_box_emits_empty(qtbot) -> None:
+    """Ctrl+click (MOVE) on a never-OCR'd box emits copy_text_requested("")
+    — the canvas stays dumb; the receiver decides empty feedback."""
+    canvas, item = _copy_test_canvas(
+        qtbot, PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    )
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    canvas.mousePressEvent(_press_at(canvas, 40, 40, ctrl=True))
+    QApplication.processEvents()
+
+    assert emitted == [""]
+    assert item.isSelected() is True
+    assert canvas._moving_box is None
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+
+
+@pytest.mark.gui
+def test_plain_click_move_arms_drag_and_emits_nothing(qtbot) -> None:
+    """Today's behavior intact: a plain click (no Ctrl) under MOVE emits
+    nothing and arms the move drag."""
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("copied text")
+    canvas, item = _copy_test_canvas(qtbot, pb)
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    canvas.mousePressEvent(_press_at(canvas, 40, 40))
+    QApplication.processEvents()
+
+    assert emitted == []
+    assert canvas._moving_box is item
+    assert item.isSelected() is True
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+
+
+@pytest.mark.gui
+def test_ctrl_click_on_corner_handle_never_copies(qtbot) -> None:
+    """A CornerHandle hit is a resize gesture, NOT a copy — the Ctrl branch
+    only fires on the BoxItem arm."""
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("copied text")
+    canvas, item = _copy_test_canvas(qtbot, pb)
+
+    # Select first so the corner handles are visible.
+    canvas.mousePressEvent(_press_at(canvas, 40, 40))
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+    QApplication.processEvents()
+    assert item.isSelected() is True
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    canvas.mousePressEvent(_press_at(canvas, 10, 10, ctrl=True))
+    QApplication.processEvents()
+
+    assert emitted == []
+    assert canvas._resizing_box is not None
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 10, 10))
+
+
+@pytest.mark.gui
+def test_ctrl_click_under_paint_tool_emits_nothing(qtbot) -> None:
+    """MASK-06 preserved: under a paint tool (RECTANGLE) Ctrl+click still
+    paints — the box branch falls through and NOTHING is emitted."""
+    pb = PageBox(box=Box(10, 10, 60, 60), origin=USER)
+    pb.set_recognized_text("copied text")
+    canvas, _item = _copy_test_canvas(qtbot, pb)
+    canvas.set_tool(ToolMode.RECTANGLE)
+
+    emitted: list[str] = []
+    canvas.copy_text_requested.connect(emitted.append)
+
+    canvas.mousePressEvent(_press_at(canvas, 40, 40, ctrl=True))
+    QApplication.processEvents()
+
+    assert emitted == []
+    assert canvas._moving_box is None
+
+    canvas.mouseReleaseEvent(_release_at(canvas, 40, 40))
+
 
