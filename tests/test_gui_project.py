@@ -1686,3 +1686,177 @@ def test_async_save_failure_keeps_flags_and_cleans_stray(
     assert not default.exists()  # WR-01 stray-folder cleanup honored
     assert window._session_dirty()  # ALL flags intact (T-05-12 contract)
     assert window.image_files[0].dirty and window.image_files[1].dirty
+
+
+# --------------------- quick-260907-l3w: Open Folder project detection router
+
+
+def _make_project_on_disk(
+    qtbot, tmp_path, monkeypatch, project_dir: Path, count: int = 2
+) -> Path:
+    """Build a REAL on-disk project at ``project_dir`` via the established
+    recipe: seed a window session from a page folder, then Save As."""
+    pages = tmp_path / "seed-pages-2"
+    _make_pages(pages, count=count)
+    seed = _make_window(qtbot, tmp_path, folder=pages)
+    _dirty(seed)
+    _save_as(seed, project_dir, monkeypatch, qtbot=qtbot)
+    assert (project_dir / "manifest.json").is_file()
+    return project_dir
+
+
+@pytest.mark.gui
+def test_open_folder_on_project_dir_loads_project_session(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Open Folder on a directory that IS a project loads the full project
+    session — the identical end state to Open Project (project identity,
+    page count, per-page embedded images, restored title)."""
+    project_dir = _make_project_on_disk(
+        qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
+    )
+    window = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, project_dir)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert window._project_dir == project_dir
+    assert window._project_name == "chapter"
+    assert len(window.image_files) == 2
+    for imf in window.image_files:
+        assert imf.current_image is not None
+        assert imf.current_image.shape[:2] == (60, 60)
+    assert window.windowTitle() == (
+        "Manga AI Studio \u2014 chapter \u2014 page_01.png"
+    )
+
+
+@pytest.mark.gui
+def test_open_folder_on_parent_of_project_loads_subdir_project(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Open Folder on a directory CONTAINING a project subdir loads THAT
+    subdir's project session (one-level containment detection)."""
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / "notes.txt").write_text("loose file", encoding="utf-8")
+    project_dir = _make_project_on_disk(
+        qtbot, tmp_path, monkeypatch, outer / "chapter.mas-project"
+    )
+    window = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, outer)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert window._project_dir == project_dir == outer / "chapter.mas-project"
+    assert window._project_name == "chapter"
+    assert len(window.image_files) == 2
+
+
+@pytest.mark.gui
+def test_open_folder_corrupt_manifest_keeps_session_no_gate(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Open Folder on a dir whose manifest.json is corrupt -> the
+    corrupt-project critical fires, the current session is untouched, and
+    the Unsaved Changes gate did NOT consume a prompt first (detection
+    precedes gating)."""
+    chapter = tmp_path / "chapter"
+    window = _make_window(qtbot, tmp_path, folder=chapter)
+    _dirty(window)
+    before = [imf.path for imf in window.image_files]
+
+    corrupt_dir = tmp_path / "bad.mas-project"
+    corrupt_dir.mkdir()
+    (corrupt_dir / "manifest.json").write_text(
+        "this is not json {", encoding="utf-8"
+    )
+
+    captured = _capture_critical(monkeypatch)
+    titles: list = []
+    _stub_messagebox_exec(monkeypatch, role=None, capture=titles)
+    _stub_dir_dialog(monkeypatch, corrupt_dir)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert captured and "Couldn't open" in captured[0][0]
+    assert "corrupt or from a newer version" in captured[0][1]
+    assert "Unsaved Changes" not in titles  # detection precedes gating
+    assert [imf.path for imf in window.image_files] == before
+    assert window._session_dirty()  # the dirty page survived untouched
+    assert window._project_dir is None
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_open_folder_gate_runs_exactly_once(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Dirty session + Open Folder on a valid project dir -> EXACTLY ONE
+    Unsaved Changes prompt for the whole action (the router delegates to
+    _load_project_session whose internal D-07 gate is the one and only
+    gate — no double-prompt)."""
+    project_dir = _make_project_on_disk(
+        qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
+    )
+    window = _make_window(qtbot, tmp_path, folder=tmp_path / "session-pages")
+    _dirty(window)
+    titles: list = []
+    _stub_messagebox_exec(
+        monkeypatch,
+        role=QMessageBox.ButtonRole.DestructiveRole,  # Discard
+        capture=titles,
+    )
+    _stub_dir_dialog(monkeypatch, project_dir)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert titles == ["Unsaved Changes"]  # exactly one prompt, no double-gate
+    assert window._project_dir == project_dir
+    assert len(window.image_files) == 2
+
+
+@pytest.mark.gui
+def test_open_folder_plain_images_unchanged(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A plain images folder via open_folder keeps today's behavior:
+    sidebar populated natsorted, project identity reset, original_verified."""
+    folder = tmp_path / "plain"
+    _make_pages(folder, count=2)
+    window = _make_window(qtbot, tmp_path)
+    _stub_dir_dialog(monkeypatch, folder)
+    window.open_folder()
+    QApplication.processEvents()
+
+    assert window._project_dir is None
+    assert [imf.path.name for imf in window.image_files] == [
+        "page_01.png",
+        "page_02.png",
+    ]
+    assert all(imf.original_verified for imf in window.image_files)
+
+
+@pytest.mark.gui
+def test_folder_drop_reroutes_through_detection(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """_on_folder_dropped delegates to the router: dropping a PROJECT
+    folder loads the project session (identical detection to Open Folder);
+    the file-drop path (_on_files_dropped) stays untouched."""
+    project_dir = _make_project_on_disk(
+        qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
+    )
+    window = _make_window(qtbot, tmp_path)
+    window._on_folder_dropped(project_dir)
+    QApplication.processEvents()
+    assert window._project_dir == project_dir
+    assert len(window.image_files) == 2
+
+    # File drops keep the direct _set_pages route (no project detection).
+    plain = tmp_path / "plain"
+    _make_pages(plain, count=1)
+    window._on_files_dropped([plain / "page_01.png"])
+    QApplication.processEvents()
+    assert [imf.path.name for imf in window.image_files] == ["page_01.png"]
+    assert window._project_dir is None
