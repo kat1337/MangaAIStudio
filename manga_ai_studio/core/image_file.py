@@ -80,11 +80,21 @@ class ImageFile:
             ``cleaned/``). Levels does NOT set it (A4 — geometry-free).
         current_image: Phase 5 (plan 05-05) runtime save-time capture slot.
             Holds the page's current image as an ``(H, W, 3)`` uint8 RGB numpy
-            array (``.copy()``-detached). Populated for EVERY page at project
-            load (decoded from the embedded ``image.png`` entry — the D-08
-            batch-export dims fallback and the D-06/D-08 missing-original
-            navigation source) and refreshed for the CURRENT page at save time
-            (``_snapshot_current_page``). ``None`` until populated.
+            array (``.copy()``-detached). Populated for the DISPLAYED page at
+            project load (decoded from the embedded ``image.png`` entry) and
+            for every other page on first visit (lazy materialization via
+            ``source_mas`` — quick-260907-nfq; folder/image sessions load on
+            first display via ``set_image_from_path``); refreshed for the
+            CURRENT page at save time (``_snapshot_current_page``).
+            ``None`` for never-visited lazy pages and until populated.
+        source_mas: quick-260907-nfq. Back-pointer to the page ``.mas``
+            container this lazy page was loaded from; set by the project-open
+            meta loop and consumed by the gap-fill materialization helper
+            (page visit / batch dispatch / save PREPARE). ``None`` for
+            folder/image sessions and eager ``.mas`` opens.
+        embedded_size: quick-260907-nfq. ``(w, h)`` from ``meta.img`` at lazy
+            load — the dims source for exports when ``current_image`` is not
+            yet materialized. ``None`` until a lazy open sets it.
     """
 
     path: Path
@@ -116,6 +126,9 @@ class ImageFile:
     geometry_altered: bool = False
     # Phase 5 runtime save-time capture slot (see class docstring).
     current_image: np.ndarray | None = None
+    # quick-260907-nfq lazy-open slots (see class docstring).
+    source_mas: Path | None = None
+    embedded_size: tuple[int, int] | None = None
 
     def load_thumbnail(self, size: int = THUMBNAIL_SIZE) -> None:
         """Load ``self.thumbnail`` from ``self.path`` as a letterboxed pixmap.

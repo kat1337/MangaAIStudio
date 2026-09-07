@@ -1302,3 +1302,192 @@ def test_find_project_manifest_corrupt_subdir_manifest(tmp_path: Path) -> None:
     (bad / "manifest.json").write_bytes(b"not json")
     with pytest.raises(ProjectFormatError):
         find_project_manifest(outer)
+
+
+# ------------------------- quick-260907-nfq: selective decompression + meta
+
+
+def _valid_page_entries(tmp_path: Path) -> dict[str, bytes]:
+    """A valid page container's entries (real image + meta + original ref)."""
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    image[5:10, 8:15] = 200
+    orig = tmp_path / "page_001.png"
+    return build_page_entries(
+        {
+            "boxes": [],
+            "image_rgb": image,
+            "mask_bin": None,
+            "geometry_altered": False,
+            "original_path": orig,
+            "original_sha256": "ab" * 32,
+        }
+    )
+
+
+@pytest.mark.unit
+def test_load_page_file_selective_names_returns_subset(tmp_path: Path) -> None:
+    """load_page_file with a ``names`` subset decompresses ONLY the requested
+    entries: meta.json round-trips byte-identical and unrequested entries are
+    ABSENT from the result (quick-260907-nfq — the lazy-open enabler)."""
+    entries = _valid_page_entries(tmp_path)
+    page_file = tmp_path / "page_001.mas"
+    save_page_file(page_file, entries)
+
+    picked = load_page_file(page_file, names=frozenset({"meta.json"}))
+    assert set(picked) == {"meta.json"}
+    assert picked["meta.json"] == entries["meta.json"]
+
+
+def _container_with_corrupt_image_blob(tmp_path: Path) -> tuple[Path, dict]:
+    """A hand-built container whose ``image.png`` PAYLOAD (the compressed
+    stream itself) is garbage — table-walkable, meta/original intact.
+
+    ``save_page_file`` LZMA-compresses whatever payload it is handed, so a
+    corrupt-blob fixture must be assembled at the container level: a valid
+    entry-table record whose 32-byte payload is not an XZ stream.
+    """
+    from manga_ai_studio.core.project_io import _pack_entry
+
+    entries = _valid_page_entries(tmp_path)
+    name_b = b"image.png"
+    corrupt = struct.pack("<HQ", len(name_b), 32) + name_b + b"\xff" * 32
+    parts = [
+        _MAGIC + struct.pack("<II", 1, 2),
+        _pack_entry("meta.json", entries["meta.json"]),
+        corrupt,
+        _pack_entry("original.json", entries["original.json"]),
+    ]
+    page_file = tmp_path / "corrupt_image.mas"
+    page_file.write_bytes(b"".join(parts))
+    return page_file, entries
+
+
+@pytest.mark.unit
+def test_load_page_file_skips_decompressing_corrupt_unrequested_blob(
+    tmp_path: Path,
+) -> None:
+    """A container whose unrequested entry blob is GARBAGE (not an LZMA
+    stream) loads fine under a names-subset excluding it — proving the blob
+    is never decompressed — while a FULL load raises ProjectFormatError."""
+    page_file, entries = _container_with_corrupt_image_blob(tmp_path)
+
+    picked = load_page_file(page_file, names=frozenset({"meta.json"}))
+    assert set(picked) == {"meta.json"}  # the corrupt blob was never touched
+    assert picked["meta.json"] == entries["meta.json"]
+
+    with pytest.raises(ProjectFormatError):
+        load_page_file(page_file)
+
+
+@pytest.mark.unit
+def test_load_page_file_corrupt_requested_entry_still_raises(tmp_path: Path) -> None:
+    """Selective load does NOT weaken validation: a requested-but-corrupt
+    entry still raises ProjectFormatError (T-05-01 contract unchanged)."""
+    page_file, _entries = _container_with_corrupt_image_blob(tmp_path)
+
+    with pytest.raises(ProjectFormatError):
+        load_page_file(page_file, names=frozenset({"meta.json", "image.png"}))
+
+
+@pytest.mark.unit
+def test_load_page_file_names_none_decompresses_everything(tmp_path: Path) -> None:
+    """load_page_file WITHOUT names (None) decompresses every entry —
+    byte-identical to the pre-lazy signature (existing callers unchanged)."""
+    entries = _valid_page_entries(tmp_path)
+    page_file = tmp_path / "page_001.mas"
+    save_page_file(page_file, entries)
+    assert load_page_file(page_file, names=None) == entries
+    assert load_page_file(page_file) == entries
+
+
+@pytest.mark.unit
+def test_parse_page_meta_returns_validated_meta_and_original(
+    tmp_path: Path,
+) -> None:
+    """parse_page_meta performs exactly parse_page_entries' head: the
+    validated meta dict + the optional original dict."""
+    from manga_ai_studio.core.project_io import parse_page_meta
+
+    entries = _valid_page_entries(tmp_path)
+    parsed = parse_page_meta(entries)
+    assert parsed["meta"]["img"] == {"w": 30, "h": 20}
+    assert parsed["meta"]["geometry_altered"] is False
+    assert parsed["original"] == {
+        "path": str(tmp_path / "page_001.png"),
+        "sha256": "ab" * 32,
+    }
+
+    # A container without original.json parses meta with original None.
+    meta_only = {"meta.json": entries["meta.json"]}
+    parsed2 = parse_page_meta(meta_only)
+    assert parsed2["meta"]["img"] == {"w": 30, "h": 20}
+    assert parsed2["original"] is None
+
+
+@pytest.mark.unit
+def test_parse_page_meta_rejects_malformed_meta(tmp_path: Path) -> None:
+    """Malformed meta JSON, non-dict meta, a missing meta.json entry, and a
+    validate_meta failure (bad dims) all raise ProjectFormatError."""
+    from manga_ai_studio.core.project_io import parse_page_meta
+
+    entries = _valid_page_entries(tmp_path)
+
+    # malformed meta JSON
+    with pytest.raises(ProjectFormatError):
+        parse_page_meta({"meta.json": b"{not json"})
+    # non-dict meta
+    with pytest.raises(ProjectFormatError):
+        parse_page_meta({"meta.json": b"[1, 2, 3]"})
+    # missing meta.json entry
+    with pytest.raises(ProjectFormatError):
+        parse_page_meta({"image.png": entries["image.png"]})
+    # validate_meta failure: oversized dims
+    bad_dims = json.dumps({"version": 1, "img": {"w": 99999, "h": 20}}).encode(
+        "utf-8"
+    )
+    with pytest.raises(ProjectFormatError):
+        parse_page_meta({"meta.json": bad_dims})
+
+
+@pytest.mark.unit
+def test_parse_page_entries_requires_image_after_meta_refactor(
+    tmp_path: Path,
+) -> None:
+    """After the parse_page_meta refactor, parse_page_entries still
+    full-validates: meta-only entries raise on the missing image.png, and a
+    full container still returns image_png/mask/planes."""
+    entries = _valid_page_entries(tmp_path)
+
+    with pytest.raises(ProjectFormatError):
+        parse_page_entries({"meta.json": entries["meta.json"]})
+
+    page_file = tmp_path / "page_001.mas"
+    save_page_file(page_file, entries)
+    parsed = parse_page_entries(load_page_file(page_file))
+    assert parsed["meta"]["img"] == {"w": 30, "h": 20}
+    assert parsed["original"] is not None
+    with Image.open(BytesIO(parsed["image_png"])) as im:
+        assert im.size == (30, 20)
+    assert parsed["mask"] is None
+    assert parsed["raw_packed"] is None
+
+
+@pytest.mark.unit
+def test_image_file_lazy_slots_default_none() -> None:
+    """ImageFile carries the quick-260907-nfq lazy slots with None defaults;
+    a lazily-built instance exposes both alongside current_image None."""
+    from manga_ai_studio.core.image_file import ImageFile
+
+    imf = ImageFile(path=Path("page_001.png"))
+    assert imf.source_mas is None
+    assert imf.embedded_size is None
+    assert imf.current_image is None
+
+    lazy = ImageFile(
+        path=Path("page_001.mas"),
+        source_mas=Path("proj/page_001.mas"),
+        embedded_size=(60, 60),
+    )
+    assert lazy.source_mas == Path("proj/page_001.mas")
+    assert lazy.embedded_size == (60, 60)
+    assert lazy.current_image is None

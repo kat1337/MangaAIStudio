@@ -145,7 +145,9 @@ def save_page_file(path: Path, entries: dict[str, bytes]) -> None:
     _atomic_write_bytes(path, header + table)
 
 
-def load_page_file(path: Path) -> dict[str, bytes]:
+def load_page_file(
+    path: Path, names: frozenset[str] | None = None
+) -> dict[str, bytes]:
     """Read a page container back into ``{name: raw_bytes}`` entries.
 
     Every malformed-input failure — wrong magic, truncated header, an entry
@@ -155,6 +157,18 @@ def load_page_file(path: Path) -> dict[str, bytes]:
     LZMAError (T-05-01 entry-table sanity; ``test_malformed_entry_table_rejected``).
     Image dimensions are NOT validated here — that needs ``meta.json``
     (``validate_meta``, plan 05-01 Task 3).
+
+    quick-260907-nfq: ``names`` enables SELECTIVE decompression — when not
+    ``None``, only the named entries are LZMA-decompressed and returned; the
+    entry table is still walked in full and ``off`` advances past every
+    skipped blob, but the blob is never handed to ``lzma.decompress`` and the
+    entry is omitted from the result. This is the lazy-open enabler: project
+    open parses only ``meta.json``/``original.json`` per page and defers the
+    (large) pixel/plane blobs to first visit. Validation is NOT weakened — a
+    requested-but-corrupt entry still raises ProjectFormatError, the
+    name/length prefix sanity checks run for every entry, and
+    ``MAX_ENTRY_DECOMPRESSED`` still bounds every decompression that DOES
+    happen.
     """
     try:
         raw = path.read_bytes()
@@ -180,6 +194,10 @@ def load_page_file(path: Path) -> dict[str, bytes]:
             off += nlen
             blob = raw[off : off + dlen]
             off += dlen
+            if names is not None and name not in names:
+                # Selective load: advance past the blob WITHOUT decompressing
+                # it and omit the entry from the result.
+                continue
             entries[name] = lzma.decompress(
                 blob, format=lzma.FORMAT_XZ, memlimit=MAX_ENTRY_DECOMPRESSED
             )
@@ -717,6 +735,42 @@ def load_project(manifest_path: Path) -> dict:
     return {"version": version, "name": name, "pages": pages}
 
 
+def parse_page_meta(entries: dict[str, bytes]) -> dict:
+    """Decode + validate ONLY a page container's meta head (quick-260907-nfq).
+
+    This is exactly the head of :func:`parse_page_entries` (the meta.json
+    requirement, the JSON decode, the isinstance-dict check,
+    :func:`validate_meta`, and the optional ``original.json`` parse) extracted
+    so the lazy project open can validate every page's structural metadata
+    WITHOUT decompressing the (large) pixel/plane blobs. Returns
+    ``{"meta": <validated dict>, "original": <dict | None>}``.
+
+    The untrusted-input discipline is identical to :func:`parse_page_entries`
+    (T-05-01..T-05-04): a missing ``meta.json``, malformed JSON, a non-dict
+    meta, or a :func:`validate_meta` failure all raise ProjectFormatError —
+    a strict subset of the full parse's rejection surface, never broader.
+    """
+    try:
+        meta_raw = entries["meta.json"]
+    except KeyError as exc:
+        raise ProjectFormatError(f"page file missing required entry: {exc}") from exc
+    try:
+        meta = json.loads(meta_raw.decode("utf-8"))
+    except ValueError as exc:
+        raise ProjectFormatError(f"malformed meta.json: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise ProjectFormatError("meta.json must be a JSON object")
+    validate_meta(meta)
+
+    original = None
+    if "original.json" in entries:
+        try:
+            original = json.loads(entries["original.json"].decode("utf-8"))
+        except ValueError as exc:
+            raise ProjectFormatError(f"malformed original.json: {exc}") from exc
+    return {"meta": meta, "original": original}
+
+
 def parse_page_entries(entries: dict[str, bytes]) -> dict:
     """Decode a page container's entries into a raw dict — the load-side
     mirror of :func:`build_page_entries`.
@@ -738,19 +792,20 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
     array). Callers unpack via ``mask_planes.unpack_binary`` with the page
     dims. Typed model construction (PageBox/ImageFile) happens at the GUI
     boundary (plan 05-05) so this module stays Qt-free.
+
+    quick-260907-nfq: the meta head (require + decode + validate meta.json,
+    parse original.json) is shared with :func:`parse_page_meta` — this
+    function starts from its result and continues with the image/mask/plane
+    body unchanged.
     """
+    meta_head = parse_page_meta(entries)
+    meta = meta_head["meta"]
+    original = meta_head["original"]
+
     try:
-        meta_raw = entries["meta.json"]
         image_png = entries["image.png"]
     except KeyError as exc:
         raise ProjectFormatError(f"page file missing required entry: {exc}") from exc
-    try:
-        meta = json.loads(meta_raw.decode("utf-8"))
-    except ValueError as exc:
-        raise ProjectFormatError(f"malformed meta.json: {exc}") from exc
-    if not isinstance(meta, dict):
-        raise ProjectFormatError("meta.json must be a JSON object")
-    validate_meta(meta)
 
     mask = None
     mask_meta = meta.get("mask")
@@ -780,13 +835,6 @@ def parse_page_entries(entries: dict[str, bytes]) -> dict:
         mask = np.frombuffer(mask_bytes, dtype=np.uint8).reshape(
             mask_h, mask_w
         ).copy()
-
-    original = None
-    if "original.json" in entries:
-        try:
-            original = json.loads(entries["original.json"].decode("utf-8"))
-        except ValueError as exc:
-            raise ProjectFormatError(f"malformed original.json: {exc}") from exc
 
     # Phase 8 (plan 08-04): the four OPTIONAL packed plane entries. Blob
     # length is cross-checked against the meta-declared IMAGE dims (the
