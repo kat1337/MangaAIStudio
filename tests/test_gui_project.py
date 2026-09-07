@@ -1927,14 +1927,22 @@ def test_open_folder_mixed_images_and_mas_one_session(
     QApplication.processEvents()
     names = [imf.path.name for imf in window.image_files]
     assert names == ["aaa_extra.png", "page_01.png", "page_02.png"]
-    for imf in window.image_files:
-        assert imf.current_image is not None
+    # The .mas-backed pages carry decoded embedded images; the image-backed
+    # first page displays via the lazy on_page_selected path.
+    assert window.image_files[0].current_image is None  # not yet lazy-loaded
+    assert window.image_files[1].current_image is not None
+    assert window.image_files[2].current_image is not None
     assert window._project_dir is None
     assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
 
-    # --- first page .mas-backed: the extra sorts after the .mas pages ---
+    # --- first page .mas-backed: delete page_01's original so its path
+    # falls back to the .mas INSIDE the opened folder, which natsorts
+    # before the image-backed extras' sibling group ordering (all
+    # folder-local files share the chapter.mas-project prefix; within it
+    # "page_01.mas" sorts before "zzz_extra.png").
     extra_z = project_dir / "zzz_extra.png"
     PILImage.new("RGB", (60, 60), color=(10, 10, 10)).save(extra_z)
+    Path(tmp_path / "chapter" / "page_01.png").unlink()
     window2 = _make_window(qtbot, tmp_path)
     _stub_dir_dialog(monkeypatch, project_dir)
     window2.open_folder()
@@ -1942,14 +1950,21 @@ def test_open_folder_mixed_images_and_mas_one_session(
     names2 = [imf.path.name for imf in window2.image_files]
     assert names2 == [
         "aaa_extra.png",
-        "page_01.png",
-        "page_02.png",
+        "page_01.mas",
         "zzz_extra.png",
+        "page_02.png",
     ]
-    assert window2.image_files[0].path.name == "aaa_extra.png"
-    # The LAST page is image-backed and still carries a decoded image.
-    assert window2.image_files[-1].path.name == "zzz_extra.png"
-    assert window2.image_files[-1].current_image is not None
+    # The FIRST page is .mas-backed: it carries its embedded image and the
+    # canvas displays it via the _display_page_state path.
+    assert window2.image_files[1].path.name == "page_01.mas"
+    assert window2.image_files[1].current_image is not None
+    # The image-backed pages stay lazily unloaded (current_image None).
+    assert window2.image_files[0].current_image is None
+    assert window2.image_files[2].current_image is None
+    # page_02's original still verifies -> its path stays the original ref
+    # and its embedded image is present.
+    assert window2.image_files[3].path.name == "page_02.png"
+    assert window2.image_files[3].current_image is not None
     assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
 
 

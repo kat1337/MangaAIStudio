@@ -2080,7 +2080,29 @@ class MainWindow(QMainWindow):
         )
 
     def _load_folder(self, directory: Path) -> None:
-        """Scan ``directory`` for images and populate the FileTable."""
+        """Scan ``directory`` for images + page ``.mas`` files; populate.
+
+        quick-260907-l3w: the flat, non-recursive scan (UI-SPEC surface 4)
+        now also collects ``.mas`` page files. With NO ``.mas`` files the
+        session builds exactly as before via :meth:`_set_pages` (the
+        byte-identical legacy route — every existing call site keeps its
+        behavior). With any ``.mas`` present, EVERY page's ``ImageFile``
+        is built BEFORE anything is swapped (image-backed: a fresh
+        ``ImageFile`` with ``original_verified=True``; .mas-backed:
+        :func:`project_io.load_page_file` + ``parse_page_entries`` +
+        :meth:`_build_image_file_from_parsed`) — any ``ProjectFormatError``
+        propagates to the router's corrupt-project dialog with the current
+        session untouched (all-or-nothing; this method deliberately does
+        NOT catch). The swap mirrors :meth:`_load_project_session`'s tail
+        with FOLDER identity: ``_project_dir`` / ``_project_name`` reset
+        (CR-02 / T-Q3L-03: Ctrl+S must never overwrite a previous
+        project's manifest with .mas-folder pages), dirty cleared, and the
+        first page displayed from its embedded state when .mas-backed
+        (:meth:`_display_page_state` + fresh undo) or lazy-loaded when
+        image-backed (:meth:`on_page_selected`). An empty combined list
+        keeps the legacy "No images found in folder" status via
+        :meth:`_set_pages`.
+        """
         if not directory.is_dir():
             return
         # Flat, non-recursive scan (UI-SPEC surface 4).
@@ -2089,7 +2111,62 @@ class MainWindow(QMainWindow):
             for p in directory.iterdir()
             if p.is_file() and validate_image_path(p)
         ]
-        self._set_pages(candidates)
+        mas_files = [
+            p
+            for p in directory.iterdir()
+            if p.is_file() and p.suffix.lower() == ".mas"
+        ]
+        if not mas_files:
+            self._set_pages(candidates)
+            return
+
+        # Build-before-swap (the _load_project_session discipline): the
+        # whole session is fully constructed before any window state moves.
+        # Keyed by resolved path string: a plain image and a .mas page whose
+        # verified original resolves to that same file are ONE page — the
+        # .mas-backed build runs second and wins (the richer slot: it
+        # carries the saved mask/boxes/embedded image).
+        by_path: dict[str, ImageFile] = {}
+        for p in candidates:
+            imf = ImageFile(path=p, original_verified=True)
+            by_path[str(imf.path)] = imf
+        for mas_path in mas_files:
+            entries = project_io.load_page_file(mas_path)
+            parsed = project_io.parse_page_entries(entries)
+            imf = self._build_image_file_from_parsed(parsed, mas_path)
+            by_path[str(imf.path)] = imf
+        ordered = [by_path[key] for key in natsorted(by_path, key=str)]
+        if not ordered:  # pragma: no cover - mas_files non-empty implies >0
+            self._set_pages(candidates)
+            return
+
+        # ---- session swap (everything above succeeded) — folder identity ----
+        self.image_files = ordered
+        # quick-260826-vhh (T-QHH-03): the swap invalidates any in-flight
+        # async-save completion for the previous session.
+        self._session_generation += 1
+        # Cross-session bleed fix (quick 260826-1by): retire the OUTGOING
+        # index before anything can observe the swapped-in list.
+        self._last_page_index = None
+        self._project_dir = None
+        self._project_name = None
+        self.file_table.set_pages([imf.path for imf in ordered])
+        self.file_table.select_path(ordered[0].path)
+        first = ordered[0]
+        if first.current_image is not None:
+            # .mas-backed (or any page carrying an embedded image): display
+            # from its own restored state — the lazy on_page_selected path
+            # would try to re-decode a path that may not exist on disk.
+            self._display_page_state(first)
+            self.reset_history()  # D-05: fresh undo on session open
+            # The D-11 seam baseline (the _load_project_session rule):
+            # post-open edits persist on first navigation.
+            self._last_page_index = 0
+        else:
+            self.on_page_selected(first.path)
+        for imf in self.image_files:
+            imf.dirty = False
+        self._refresh_status_bar()
 
     def _set_pages(self, paths: list[Path]) -> None:
         """Build ``ImageFile``s from ``paths`` and push them to the sidebar.
