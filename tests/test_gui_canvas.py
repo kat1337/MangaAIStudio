@@ -38,6 +38,7 @@ from manga_ai_studio.gui.canvas import (  # noqa: E402
     EditorCanvas,
     validate_image_path,
 )
+import manga_ai_studio.gui.canvas as _canvas_mod  # noqa: E402
 from manga_ai_studio.gui.main_window import MainWindow  # noqa: E402
 from manga_ai_studio.gui.side_panel import SidePanel  # noqa: E402
 from manga_ai_studio.gui.tools_panel import BrushBody  # noqa: E402
@@ -1242,3 +1243,104 @@ def test_restore_bbox_refresh_none_slot_falls_back_to_full_rebuild(qtbot) -> Non
     canvas._refresh_restore_display_bbox((10, 40, 50, 60))  # must not raise
     assert counter["n"] == 1, "None slot -> the full-rebuild fallback ran"
     canvas._restore_work = None
+
+
+# ---------------------------------------------------------------------------
+# quick-260907-sni Task 3 — recompose_mask per-plane binary cache (F5/S2)
+# ---------------------------------------------------------------------------
+
+
+def _count_conversions(canvas: EditorCanvas, fn) -> dict:
+    """Run ``fn`` counting ``mask_to_numpy_binary`` calls per plane identity."""
+    calls = {"manual": 0, "erase": 0, "other": 0}
+    orig = _canvas_mod.mask_to_numpy_binary
+
+    def _counting(qimg):
+        if qimg is canvas._mask_manual:
+            calls["manual"] += 1
+        elif qimg is canvas._mask_erase:
+            calls["erase"] += 1
+        else:
+            calls["other"] += 1
+        return orig(qimg)
+
+    _canvas_mod.mask_to_numpy_binary = _counting
+    try:
+        fn()
+    finally:
+        _canvas_mod.mask_to_numpy_binary = orig
+    return calls
+
+
+def _stroke(canvas: EditorCanvas, x0: float, y0: float, x1: float, y1: float) -> None:
+    """Press-move-release a brush stroke (commits via _end_paint)."""
+    canvas.mousePressEvent(_press(canvas, x0, y0))
+    canvas.mouseMoveEvent(_move(canvas, x1, y1))
+    canvas.mouseReleaseEvent(_release(canvas, x1, y1))
+
+
+@pytest.mark.gui
+def test_recompose_cache_manual_only_stroke_converts_one_plane(qtbot) -> None:
+    """After a stroke commit that mutated ONLY the manual plane, the next
+    commit recompose converts manual exactly ONCE and erase ZERO times —
+    the untouched plane is served from the per-plane binary cache."""
+    canvas = _canvas_with_image(qtbot, 60)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    # Warm-up stroke: the first commit on the page converts both planes once.
+    _stroke(canvas, 10, 10, 25, 10)
+
+    calls = _count_conversions(
+        canvas, lambda: _stroke(canvas, 30, 30, 45, 30)
+    )
+    assert calls["manual"] == 1, (
+        f"the mutated manual plane converts exactly once; got {calls}"
+    )
+    assert calls["erase"] == 0, (
+        f"the untouched erase plane must be served from cache; got {calls}"
+    )
+
+
+@pytest.mark.gui
+def test_recompose_cache_invalidated_by_replacement_and_fill_sites(qtbot) -> None:
+    """After set_planes (undo/page restore), clear_mask, or
+    consume_mask_display fills — and after set_image's fresh-plane re-seed
+    (a page display with NO set_planes) — the next recompose converts BOTH
+    planes: stale cache can never serve."""
+    canvas = _canvas_with_image(qtbot, 60)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _stroke(canvas, 10, 10, 25, 10)  # warm the cache
+
+    # set_planes REPLACES both planes and recomposes internally.
+    calls = _count_conversions(
+        canvas, lambda: canvas.set_planes(QImage(), QImage(), None)
+    )
+    assert calls["manual"] == 1 and calls["erase"] == 1, (
+        f"set_planes must invalidate both planes; got {calls}"
+    )
+
+    # clear_mask fills both planes transparent (and recomposes internally).
+    calls = _count_conversions(canvas, canvas.clear_mask)
+    assert calls["manual"] == 1 and calls["erase"] == 1, (
+        f"clear_mask must invalidate both planes; got {calls}"
+    )
+
+    # consume_mask_display fills both planes (and recomposes internally).
+    calls = _count_conversions(canvas, canvas.consume_mask_display)
+    assert calls["manual"] == 1 and calls["erase"] == 1, (
+        f"consume_mask_display must invalidate both planes; got {calls}"
+    )
+
+    # set_image re-seeds fresh planes on EVERY page display (no recompose
+    # inside set_image — the NEXT recompose must convert both).
+    pixmap = _solid_pixmap(60, QColor("white"))
+
+    def _switch_page() -> None:
+        canvas.set_image(pixmap)
+        canvas.recompose_mask()
+
+    calls = _count_conversions(canvas, _switch_page)
+    assert calls["manual"] == 1 and calls["erase"] == 1, (
+        f"set_image's plane re-seed must invalidate both planes; got {calls}"
+    )

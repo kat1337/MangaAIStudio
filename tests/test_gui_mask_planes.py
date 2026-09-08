@@ -535,6 +535,99 @@ def test_geometry_group_undo_with_packed_mask_value(qtbot, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# quick-260907-sni Task 3 — recompose_mask per-plane binary cache (F5/S2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_recompose_cache_equivalence_across_mutation_sequences(qtbot) -> None:
+    """Through any mutation sequence (stroke commits, set_planes restores,
+    clear_mask, consume_mask_display fills), the cached-path composite is
+    byte-identical (mask_to_numpy_binary equality) to a fresh uncached
+    recompose from the same plane state."""
+    w, h = 60, 40
+    canvas = _canvas_with_page(qtbot, w, h)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+
+    def _assert_fresh_equivalence() -> None:
+        cached = mask_to_numpy_binary(canvas.get_mask())
+        canvas._invalidate_plane_bin_cache()
+        canvas.recompose_mask()
+        np.testing.assert_array_equal(
+            mask_to_numpy_binary(canvas.get_mask()), cached
+        ), "cached composite must be byte-identical to the uncached recompose"
+
+    _drive_brush_stroke(canvas, 5, 5, 25, 8)  # stroke 1 + commit
+    _assert_fresh_equivalence()
+    _drive_brush_stroke(canvas, 30, 20, 50, 30)  # stroke 2 + commit
+    _assert_fresh_equivalence()
+
+    # set_planes restore (the undo/page-restore shape: BOTH planes replaced).
+    canvas.set_planes(
+        _plane_from_bin(_rect_bin(w, h, 2, 2, 12, 10)),
+        _plane_from_bin(_rect_bin(w, h, 4, 4, 6, 6)),
+        _rect_bin(w, h, 40, 5, 55, 20),
+    )
+    _assert_fresh_equivalence()
+
+    # clear_mask (transparent fills) + stroke + commit.
+    canvas.clear_mask()
+    _assert_fresh_equivalence()
+    _drive_brush_stroke(canvas, 8, 30, 20, 36)
+    _assert_fresh_equivalence()
+
+    # consume_mask_display fills (the inpaint-consumption shape).
+    canvas.set_planes(_plane_from_bin(_rect_bin(w, h, 8, 8, 20, 18)), QImage(), None)
+    canvas.consume_mask_display()
+    _assert_fresh_equivalence()
+    assert not mask_to_numpy_binary(canvas.get_mask()).any()
+
+
+@pytest.mark.gui
+def test_recompose_cache_cross_page_set_image_equivalence(qtbot) -> None:
+    """CHECKER-BLOCKER GUARD (plane-REPLACEMENT site): a folder-session-style
+    page switch runs set_image with NO set_planes (the incoming page has no
+    persisted mask — main_window on_page_selected Step 4 is skipped). The
+    outgoing page's cached binaries must never serve the new page's first
+    stroke-commit recompose: the composite must be byte-identical to a fresh
+    uncached recompose of page B's planes (a stale cache here would silently
+    poison the composite, LaMa dispatch, and mask consumption)."""
+    w, h = 40, 30
+    canvas = _canvas_with_page(qtbot, w, h)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+
+    # Page A: stroke + commit (the cache now holds page A's binaries).
+    _drive_brush_stroke(canvas, 5, 5, 20, 8)
+    composite_a = mask_to_numpy_binary(canvas.get_mask())
+    assert composite_a.any(), "fixture: page A stroke committed"
+
+    # Page switch: set_image ONLY (no set_planes) — same dims, the
+    # adversarial case (a dims change would re-seed anyway).
+    img_b = QImage(w, h, QImage.Format.Format_RGB32)
+    img_b.fill(QColor(120, 120, 120))
+    canvas.set_image(QPixmap.fromImage(img_b))
+    assert canvas._auto_bin is None
+    assert not mask_to_numpy_binary(canvas.get_mask()).any()
+
+    # Stroke on page B + commit.
+    _drive_brush_stroke(canvas, 25, 15, 38, 22)
+    composite_b = mask_to_numpy_binary(canvas.get_mask())
+    assert composite_b.any()
+    assert not (composite_b & ~_rect_bin(w, h, 18, 8, 46, 30)).any(), (
+        "fixture: page B composite is its stroke only"
+    )
+
+    # Fresh uncached recompose of page B's planes must be byte-identical.
+    canvas._invalidate_plane_bin_cache()
+    canvas.recompose_mask()
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), composite_b
+    ), "page B's composite must never serve page A's cached binaries"
+
+
+# ---------------------------------------------------------------------------
 # Task 2 — plane-aware MASK undo + D-11 per-page persistence
 # ---------------------------------------------------------------------------
 
