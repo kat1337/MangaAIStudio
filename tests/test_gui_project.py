@@ -1739,7 +1739,9 @@ def test_open_folder_on_project_dir_loads_project_session(
 ) -> None:
     """Open Folder on a directory that IS a project loads the full project
     session — the identical end state to Open Project (project identity,
-    page count, per-page embedded images, restored title)."""
+    page count, displayed first page, restored title). quick-260907-nfq:
+    the project route is LAZY — only the DISPLAYED first page holds decoded
+    pixels at open; the rest materialize on visit."""
     project_dir = _make_project_on_disk(
         qtbot, tmp_path, monkeypatch, tmp_path / "chapter.mas-project"
     )
@@ -1751,9 +1753,10 @@ def test_open_folder_on_project_dir_loads_project_session(
     assert window._project_dir == project_dir
     assert window._project_name == "chapter"
     assert len(window.image_files) == 2
-    for imf in window.image_files:
-        assert imf.current_image is not None
-        assert imf.current_image.shape[:2] == (60, 60)
+    assert window.image_files[0].current_image is not None
+    assert window.image_files[0].current_image.shape[:2] == (60, 60)
+    assert window.image_files[1].current_image is None
+    assert window.image_files[1].source_mas == project_dir / "page_02.mas"
     assert window.windowTitle() == (
         "Manga AI Studio \u2014 chapter \u2014 page_01.png"
     )
@@ -2061,10 +2064,11 @@ def _corrupt_image_blob(mas_path: Path) -> None:
     entries = project_io.load_page_file(mas_path)
     name_b = b"image.png"
     corrupt = struct.pack("<HQ", len(name_b), 32) + name_b + b"\xff" * 32
-    parts = [_MAGIC + struct.pack("<II", 1, 2), _pack_entry("meta.json", entries["meta.json"]), corrupt]
+    records = [_pack_entry("meta.json", entries["meta.json"]), corrupt]
     for extra in ("mask.bin", "original.json"):
         if extra in entries:
-            parts.append(_pack_entry(extra, entries[extra]))
+            records.append(_pack_entry(extra, entries[extra]))
+    parts = [_MAGIC + struct.pack("<II", 1, len(records))] + records
     mas_path.write_bytes(b"".join(parts))
 
 
@@ -2075,6 +2079,27 @@ def _decode_page_pixels(mas_path: Path) -> tuple[dict, np.ndarray]:
         PILImage.open(BytesIO(parsed["image_png"])).convert("RGB")
     ).copy()
     return parsed, pixels
+
+
+def _norm_meta_boxes(meta_boxes: list[dict]) -> list[dict]:
+    """Normalize a meta.json boxes list for round-trip comparison.
+
+    ``json_to_pagebox`` restores a null style as ``TextStyle()`` defaults
+    (documented D-07 contract — "a null round-trips to the default style,
+    never None"), so a reopen+resave writes the explicit default dict where
+    the first save wrote null. PRE-EXISTING normalization of the eager flow
+    too; a null and the default dict are the same style.
+    """
+    from manga_ai_studio.core.text_style import TextStyle
+
+    default_style = TextStyle().to_dict()
+    out = []
+    for d in meta_boxes:
+        d = dict(d)
+        if d.get("style") == default_style:
+            d["style"] = None
+        out.append(d)
+    return out
 
 
 def _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir: Path) -> MainWindow:
@@ -2157,22 +2182,41 @@ def test_zero_visit_save_as_round_trip(qtbot, tmp_path, monkeypatch) -> None:
         orig_parsed, orig_px = _decode_page_pixels(orig)
         copy_parsed, copy_px = _decode_page_pixels(copy)
         assert np.array_equal(orig_px, copy_px), f"page {i + 1} pixels differ"
-        assert (
-            orig_parsed["meta"]["boxes"] == copy_parsed["meta"]["boxes"]
+        assert _norm_meta_boxes(orig_parsed["meta"]["boxes"]) == _norm_meta_boxes(
+            copy_parsed["meta"]["boxes"]
         ), f"page {i + 1} boxes differ"
         assert orig_parsed["meta"]["mask"] == copy_parsed["meta"]["mask"], (
             f"page {i + 1} mask declaration differs"
         )
+        if i == 0:
+            # Page 1 is the DISPLAYED page: the save-time canvas flush
+            # normalizes its fresh transparent composite into explicit
+            # plane entries (a zeros automask.bin) — PRE-EXISTING reopen+
+            # resave behavior of the eager flow too, semantically equal to
+            # an absent plane. Compare CONTENT, not entry presence.
+            for key in ("raw_packed", "auto_packed", "manual_packed", "erase_packed"):
+                a, b = orig_parsed[key], copy_parsed[key]
+                if a is not None and b is not None:
+                    assert np.array_equal(a, b), f"page 1 {key} bytes differ"
+                elif b is not None:
+                    assert not np.count_nonzero(b), f"page 1 {key} gained content"
+                else:
+                    assert a is None
+            continue
+        # Never-visited pages: STRICT container equality.
         for key in ("raw_packed", "auto_packed", "manual_packed", "erase_packed"):
             a, b = orig_parsed[key], copy_parsed[key]
             if a is None or b is None:
                 assert a is None and b is None, f"page {i + 1} {key} presence differs"
             else:
                 assert np.array_equal(a, b), f"page {i + 1} {key} bytes differ"
-    # The plane-bearing page really carried its plane through both saves.
-    assert window3.image_files[2].auto_mask is not None
+    # The plane-bearing page really carried its plane through both saves
+    # (checked on the copy's decoded container — window3's copy of the page
+    # is itself LAZY, its slots only fill on visit).
+    copy3_parsed, _ = _decode_page_pixels(second_dir / "page_03.mas")
+    assert copy3_parsed["auto_packed"] is not None
     assert np.array_equal(
-        unpack_binary(window3.image_files[2].auto_mask, 60, 60), auto_bin
+        unpack_binary(copy3_parsed["auto_packed"], 60, 60), auto_bin
     )
 
 

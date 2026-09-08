@@ -133,6 +133,62 @@ _FONT_STYLE_FLAGS = {
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
+# quick-260907-nfq: the entries the lazy project open decompresses per page —
+# the tiny meta head only. Pixels/planes are deferred to first visit (the
+# `_materialize_page_state` gap-fill), batch dispatch (light tier), or save
+# PREPARE (full tier). Structural corruption (malformed meta/boxes/original)
+# still aborts the open because every page's meta is parsed up front.
+_LAZY_OPEN_ENTRY_NAMES = frozenset({"meta.json", "original.json"})
+
+
+def _decode_embedded_image(parsed: dict) -> np.ndarray:
+    """Decode a parsed page container's embedded ``image.png`` (module-level).
+
+    Extracted from the eager builder (quick-260907-nfq) so the lazy
+    materialization path shares the exact same decode + validation: PIL
+    decode with ``.convert("RGB")`` normalization + ``.copy()`` detachment
+    (the (H, W, 3) uint8 contract, Pitfall 2), the ProjectFormatError wrap
+    for corrupt blobs (CR-03: PIL's DecompressionBombError included), and
+    the WR-06 declared-vs-actual dims cross-check (a crafted file declaring
+    100x100 with a 10000x10000 PNG must never load).
+    """
+    try:
+        arr = np.asarray(
+            Image.open(BytesIO(parsed["image_png"])).convert("RGB")
+        ).copy()
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise project_io.ProjectFormatError(
+            f"corrupt embedded image: {exc}"
+        ) from exc
+    img_meta = parsed["meta"].get("img") or {}
+    declared_w = img_meta.get("w")
+    declared_h = img_meta.get("h")
+    actual_h, actual_w = arr.shape[:2]
+    if declared_w != actual_w or declared_h != actual_h:
+        raise project_io.ProjectFormatError(
+            f"embedded image is {actual_w}x{actual_h} but meta.img"
+            f" declares {declared_w}x{declared_h}"
+        )
+    return arr
+
+
+def _resolve_original_ref(parsed: dict, fallback_path: Path) -> tuple[Path, bool]:
+    """Resolve a parsed page container's D-06 original reference (module-level).
+
+    Extracted from the eager builder (quick-260907-nfq): when the persisted
+    original verifies (resolve + suffix + sha256), return
+    ``(original_path, True)``; otherwise return ``(fallback_path, False)`` —
+    the placeholder with the original stem so the sidebar shows the right
+    name (the 05-05 D-06 rule, shared by the eager and lazy builders).
+    """
+    original = parsed.get("original")
+    if isinstance(original, dict) and original.get("path"):
+        if project_io.verify_original(
+            original["path"], original.get("sha256", "") or ""
+        ):
+            return Path(original["path"]), True
+    return fallback_path, False
+
 
 class MainWindow(QMainWindow):
     """Top-level application window.
@@ -2401,6 +2457,18 @@ class MainWindow(QMainWindow):
             if incoming_idx is not None and 0 <= incoming_idx < len(self.image_files)
             else None
         )
+        # quick-260907-nfq: first visit to a LAZY page materializes it from
+        # its source .mas BEFORE the branch below — on success the embedded
+        # branch runs (the placeholder path never reaches
+        # set_image_from_path, the 05-05 rule); on failure the existing
+        # path-fallback branch runs unchanged (a verified original shows
+        # pristine, a placeholder shows the "Couldn't open file" dialog).
+        if (
+            imf is not None
+            and imf.current_image is None
+            and imf.source_mas is not None
+        ):
+            self._materialize_page_state(imf, incoming_idx, want_pixels=True)
         if imf is not None and imf.current_image is not None:
             # Pitfall 2: the .copy() detaches the embedded numpy before the
             # QImage build (canvas.py:658-663); decode-time .convert("RGB")
@@ -3011,6 +3079,19 @@ class MainWindow(QMainWindow):
 
             for idx in eligible:
                 imf = self.image_files[idx]
+                # quick-260907-nfq: an ELIGIBLE LAZY page (never visited
+                # since open) materializes from its source .mas FIRST, so
+                # the save embeds the last-saved pixels — never the pristine
+                # on-disk original (the #1 pixel-loss risk of the lazy
+                # open). On failure the page lands in unresolved_names and
+                # the WR-02 whole-save abort below surfaces the honest
+                # failure instead of silently embedding different pixels.
+                if imf.source_mas is not None and imf.current_image is None:
+                    if not self._materialize_page_state(
+                        imf, idx, want_pixels=True
+                    ):
+                        unresolved_names.append(imf.path.name)
+                        continue
                 image_rgb = self._page_image_source(idx)
                 if image_rgb is None:
                     logger.warning(
@@ -3439,10 +3520,11 @@ class MainWindow(QMainWindow):
     ) -> ImageFile:
         """Build an ``ImageFile`` from a page container's parsed entries.
 
-        Shared by :meth:`_load_project_session` and
-        :meth:`_load_single_page_mas`. The D-06 rule: ``path`` = the original
-        ref when ``verify_original`` passes (sha256 match), else
-        ``fallback_path`` — a placeholder with the original stem so the
+        Shared by :meth:`_load_project_session`'s eager callers (folder
+        sessions and single-``.mas`` opens — quick-260907-nfq keeps them
+        eager) and :meth:`_load_single_page_mas`. The D-06 rule: ``path`` =
+        the original ref when ``verify_original`` passes (sha256 match),
+        else ``fallback_path`` — a placeholder with the original stem so the
         sidebar shows the right name; ``original_verified`` carries the D-06
         result. The mask restores via ``numpy_binary_to_mask_qimage`` (which
         ``.copy()``-detaches — Pitfall 2), boxes via ``json_to_pagebox``
@@ -3451,18 +3533,16 @@ class MainWindow(QMainWindow):
         page — the D-08 dims source for non-current pages AND the D-06/D-08
         navigation fallback. A corrupt embedded blob raises
         ProjectFormatError (corrupt-project dialog at the caller).
+
+        quick-260907-nfq: the D-06 original-ref block and the embedded
+        decode + WR-06 dims cross-check live in the module-level
+        :func:`_resolve_original_ref` / :func:`_decode_embedded_image` so
+        the lazy materialization path consumes the identical logic (zero
+        behavior change here).
         """
-        original_ref = None
-        original_verified = False
-        original = parsed.get("original")
-        if isinstance(original, dict) and original.get("path"):
-            if project_io.verify_original(
-                original["path"], original.get("sha256", "") or ""
-            ):
-                original_ref = Path(original["path"])
-                original_verified = True
-        if original_ref is None:
-            original_ref = fallback_path
+        original_ref, original_verified = _resolve_original_ref(
+            parsed, fallback_path
+        )
         imf = ImageFile(path=original_ref)
         imf.original_verified = original_verified
         imf.geometry_altered = bool(
@@ -3471,9 +3551,10 @@ class MainWindow(QMainWindow):
         if parsed["mask"] is not None:
             imf.mask = numpy_binary_to_mask_qimage(parsed["mask"])
         # Phase 8 (plan 08-07 Task 3): thread 08-04's parsed packed plane
-        # blobs into the ImageFile slots so ``has_mask_planes()`` restores the
-        # three planes AND the raw detection binary is retained (a post-load
-        # radius change re-dilates from it without re-detecting — D-08).
+        # blobs into the ImageFile slots so ``has_mask_planes()`` restores
+        # the three planes AND the raw detection binary is retained (a
+        # post-load radius change re-dilates from it without re-detecting —
+        # D-08).
         imf.raw_detected_mask = parsed.get("raw_packed")
         imf.auto_mask = parsed.get("auto_packed")
         imf.mask_manual = parsed.get("manual_packed")
@@ -3482,41 +3563,111 @@ class MainWindow(QMainWindow):
             project_io.json_to_pagebox(d)
             for d in parsed["meta"].get("boxes") or []
         ]
-        try:
-            # .convert("RGB") normalizes odd embedded blobs to the (H,W,3)
-            # uint8 contract set_image_from_numpy enforces (canvas.py:631-634);
-            # the .copy() detaches (Pitfall 2).
-            imf.current_image = np.asarray(
-                Image.open(BytesIO(parsed["image_png"])).convert("RGB")
-            ).copy()
-        except (OSError, ValueError, Image.DecompressionBombError) as exc:
-            # CR-03: a huge embedded PNG can also raise PIL's
-            # DecompressionBombError (not an OSError/ValueError) — it must
-            # surface as ProjectFormatError too, so _open_project's
-            # (ProjectFormatError, OSError) handler shows the corrupt-project
-            # dialog instead of an unhandled Qt-event exception (T-05-01).
-            raise project_io.ProjectFormatError(
-                f"corrupt embedded image: {exc}"
-            ) from exc
-        # WR-06: the declared ``meta.img`` dims must match the actual decoded
-        # PNG. ``validate_meta`` cross-checks declared-vs-declared and the
-        # MAX_IMAGE_DIMENSION cap but never the blob; a crafted file declaring
-        # 100x100 with a 10000x10000 PNG would otherwise reshape the mask to
-        # 100x100 while the canvas displays 10000x10000 — restored mask
-        # misaligned with the displayed image, and exported _ocr.json dims
-        # (canvas) inconsistent with the mask bbox coordinates (model). The
-        # declared dims are ints by validate_meta's _coerce_int; the .get
-        # defaults are belt-and-suspenders.
-        img_meta = parsed["meta"].get("img") or {}
-        declared_w = img_meta.get("w")
-        declared_h = img_meta.get("h")
-        actual_h, actual_w = imf.current_image.shape[:2]
-        if declared_w != actual_w or declared_h != actual_h:
-            raise project_io.ProjectFormatError(
-                f"embedded image is {actual_w}x{actual_h} but meta.img"
-                f" declares {declared_w}x{declared_h}"
-            )
+        imf.current_image = _decode_embedded_image(parsed)
         return imf
+
+    def _build_lazy_image_file(
+        self, parsed: dict, page_mas_path: Path, fallback_path: Path
+    ) -> ImageFile:
+        """Build a LAZY ``ImageFile`` from a page container's meta head only
+        (quick-260907-nfq, fix direction F1 of OOM-MEMORY-MAP.md).
+
+        The project-open meta loop's builder: it mirrors the eager builder's
+        META-DERIVED state exactly (D-06 original ref + verified flag,
+        ``geometry_altered``, eager boxes via ``json_to_pagebox``) and adds
+        the lazy slots — ``source_mas`` (the back-pointer every
+        materialization consumer reads) and ``embedded_size`` (the meta dims
+        for exports). ``current_image``/``mask``/the four packed plane slots
+        stay ``None``: the pixels/planes are decoded on demand by
+        :meth:`_materialize_page_state` (page visit / batch dispatch / save
+        PREPARE), never eagerly at open — open-time retained pixel memory is
+        O(1 pages), not O(page count).
+
+        ``parsed`` here comes from :func:`project_io.parse_page_meta` (the
+        meta head only) — it has no ``mask``/``image_png``/plane keys.
+        """
+        original_ref, original_verified = _resolve_original_ref(
+            parsed, fallback_path
+        )
+        imf = ImageFile(path=original_ref)
+        imf.original_verified = original_verified
+        imf.geometry_altered = bool(
+            parsed["meta"].get("geometry_altered", False)
+        )
+        imf.boxes = [
+            project_io.json_to_pagebox(d)
+            for d in parsed["meta"].get("boxes") or []
+        ]
+        img_meta = parsed["meta"].get("img") or {}
+        imf.embedded_size = (
+            int(img_meta.get("w", 0)),
+            int(img_meta.get("h", 0)),
+        )
+        imf.source_mas = page_mas_path
+        return imf
+
+    def _materialize_page_state(
+        self, imf: ImageFile, idx: int | None, want_pixels: bool
+    ) -> bool:
+        """Gap-fill a lazy page's still-None state from its source ``.mas``
+        (quick-260907-nfq — the single materialization seam).
+
+        Re-reads the page container and fills ONLY the slots that are still
+        ``None`` — batch-detect writes and D-11 outgoing flushes always win
+        over disk state, so this can never clobber fresher in-memory state:
+
+        - the four packed plane slots, each individually from its parsed
+          blob (manual/erase stroke survival for batch clean; the retained
+          raw for re-dilation);
+        - ``current_image`` — ONLY when ``want_pixels`` (the full tier used
+          by page visits and save PREPARE; the batch light tier must not
+          materialize pixels);
+        - the composite ``mask`` — only when still None AND (``want_pixels``
+          OR the page has no plane entries). The ``want_pixels`` leg mirrors
+          the eager builder (the composite rides along so a rewritten page's
+          ``.mas`` carries the same entry shape as today); the light-tier leg
+          restores the legacy flat composite for box-less pages whose batch
+          clean falls back to it.
+
+        Returns ``False`` immediately when ``imf.source_mas`` is None (the
+        page is not lazy — folder/image sessions and eager ``.mas`` opens)
+        or when the container fails to re-read (ProjectFormatError /
+        OSError): the caller decides the degradation (visit → path fallback,
+        save → the WR-02 unresolved abort, batch → per-page failure
+        isolation). Never touches dirty/boxes/flags. Runs on the GUI thread
+        only (QImage-touching work never leaves it — T-QHH-01).
+        """
+        if imf.source_mas is None:
+            return False
+        try:
+            entries = project_io.load_page_file(imf.source_mas)
+            parsed = project_io.parse_page_entries(entries)
+            fresh_pixels = _decode_embedded_image(parsed) if want_pixels else None
+        except (project_io.ProjectFormatError, OSError) as exc:
+            logger.warning(
+                f"Lazy page materialization failed for page {idx} "
+                f"('{imf.path.name}'): {exc}"
+            )
+            return False
+        # Gap-fill only still-None slots (never overwrite fresher state).
+        if imf.raw_detected_mask is None:
+            imf.raw_detected_mask = parsed.get("raw_packed")
+        if imf.auto_mask is None:
+            imf.auto_mask = parsed.get("auto_packed")
+        if imf.mask_manual is None:
+            imf.mask_manual = parsed.get("manual_packed")
+        if imf.mask_erase is None:
+            imf.mask_erase = parsed.get("erase_packed")
+        has_plane_entries = any(
+            parsed.get(key) is not None
+            for key in ("raw_packed", "auto_packed", "manual_packed", "erase_packed")
+        )
+        if imf.mask is None and (want_pixels or not has_plane_entries):
+            if parsed["mask"] is not None:
+                imf.mask = numpy_binary_to_mask_qimage(parsed["mask"])
+        if want_pixels and imf.current_image is None:
+            imf.current_image = fresh_pixels
+        return True
 
     def _display_page_state(self, imf: ImageFile) -> None:
         """Display a page's embedded image + mask + boxes on the canvas (D-08).
@@ -3647,32 +3798,63 @@ class MainWindow(QMainWindow):
     def _load_project_session(self, manifest_path: Path) -> None:
         """Rebuild the session from a chapter manifest (D-08).
 
-        The Unsaved-Changes gate runs first. Every page is parsed in
-        manifest order into a fully-built ``ImageFile`` (mask/boxes/text/
-        translation/geometry/current-image + the D-06 original verification)
-        BEFORE anything is swapped — a corrupt file raises and the previous
-        session stays byte-identical. On success: sidebar in manifest order,
-        the first page displayed from its embedded image (D-05), fresh undo
-        history (D-05), the project dir/name recorded, dirty cleared, and
-        the open-status transient (with the missing-original append when any
-        original failed verification).
+        The Unsaved-Changes gate runs first. quick-260907-nfq: the load is
+        LAZY — every page's meta head (meta.json/original.json via selective
+        decompression) is parsed in manifest order into a lazy ``ImageFile``
+        (boxes/flags/geometry + the D-06 verification + the ``source_mas``
+        back-pointer, no pixels/mask/planes) BEFORE anything is swapped — a
+        structurally corrupt file raises and the previous session stays
+        byte-identical. The DISPLAYED first page fully materializes before
+        the swap (a corrupt first page still aborts the open); every other
+        page's pixels/planes decode on demand via
+        :meth:`_materialize_page_state` (page visit / batch dispatch / save
+        PREPARE), so open-time retained pixel memory is O(1 pages), not
+        O(page count). On success: sidebar in manifest order, the first page
+        displayed from its embedded image (D-05), fresh undo history (D-05),
+        the project dir/name recorded, dirty cleared, and the open-status
+        transient (with the missing-original append when any original failed
+        verification).
         """
         if not self._confirm_discard_changes():
             return
         data = project_io.load_project(manifest_path)
+        # quick-260907-nfq (fix F1): the load loop is META-ONLY — per page it
+        # decompresses just meta.json/original.json (selective
+        # decompression) and builds a lazy ImageFile (source_mas +
+        # embedded_size + eager boxes/flags, NO pixels/mask/planes). The
+        # corruption gate is preserved: every page's meta is parsed +
+        # validated BEFORE the swap, so malformed meta/boxes/original still
+        # abort the open with the previous session untouched. Only the
+        # blob-level corruption is deferred — to the page-0 pre-swap
+        # materialization below (the displayed page stays all-or-nothing)
+        # and to first visit for the rest (path-fallback degradation).
         page_files: list[ImageFile] = []
         for page in data["pages"]:
             page_path = manifest_path.parent / page["file"]
-            entries = project_io.load_page_file(page_path)
-            parsed = project_io.parse_page_entries(entries)
+            entries = project_io.load_page_file(
+                page_path, names=_LAZY_OPEN_ENTRY_NAMES
+            )
+            parsed = project_io.parse_page_meta(entries)
             page_files.append(
-                self._build_image_file_from_parsed(
-                    parsed, manifest_path.parent / f"{page['name']}.mas"
+                self._build_lazy_image_file(
+                    parsed,
+                    page_path,
+                    manifest_path.parent / f"{page['name']}.mas",
                 )
             )
         if not page_files:
             # E7 zero-one-many: a manifest with zero pages is corrupt.
             raise project_io.ProjectFormatError("project contains no pages")
+
+        # The DISPLAYED page fully materializes BEFORE the session swap, so
+        # a corrupt first page still aborts the open with the existing
+        # corrupt-project dialog (the eager build-before-swap contract for
+        # the one page the user immediately sees).
+        if not self._materialize_page_state(page_files[0], 0, want_pixels=True):
+            raise project_io.ProjectFormatError(
+                "corrupt page container: "
+                f"{page_files[0].source_mas.name}"
+            )
 
         # ---- session swap (everything above succeeded) ----
         self.image_files = page_files

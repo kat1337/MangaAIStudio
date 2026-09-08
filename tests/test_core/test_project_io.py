@@ -1351,12 +1351,12 @@ def _container_with_corrupt_image_blob(tmp_path: Path) -> tuple[Path, dict]:
     entries = _valid_page_entries(tmp_path)
     name_b = b"image.png"
     corrupt = struct.pack("<HQ", len(name_b), 32) + name_b + b"\xff" * 32
-    parts = [
-        _MAGIC + struct.pack("<II", 1, 2),
+    records = [
         _pack_entry("meta.json", entries["meta.json"]),
         corrupt,
         _pack_entry("original.json", entries["original.json"]),
     ]
+    parts = [_MAGIC + struct.pack("<II", 1, len(records))] + records
     page_file = tmp_path / "corrupt_image.mas"
     page_file.write_bytes(b"".join(parts))
     return page_file, entries
