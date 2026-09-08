@@ -117,6 +117,7 @@ Output: modified mask_planes/mask_editor/canvas/main_window + regression tests; 
   <behavior>
     - During a restore stroke (press -> N mouse-moves -> release), canvas.image_item.pixmap() is the SAME object before and after the moves (no per-move QPixmap.fromImage rebuild).
     - The full-frame rebuild helper runs exactly twice per stroke: once at stroke start (seeding the display from _restore_work) and once at _finish_restore_stroke; mouse-move events never call it.
+    - Mid-stroke display correctness: one mouse-move stamps MANY interpolated discs (the _advance_paint step loop); the per-move bbox refresh must cover the union of ALL discs stamped during that move — asserted mid-stroke (between moves, BEFORE release) by sampling the persistent pixmap under an earlier disc of the same move and checking it already shows baseline pixels (a last-disc-only refresh leaves display gaps mid-stroke that post-stroke assertions cannot catch).
     - Restore semantics preserved: after the stroke, the pixmap pixels under the brushed disc equal the baseline (original) pixels, and restore_committed still emits ONCE with the correct bbox patch payload.
     - A defensive fallback: if the persistent pixmap slot is None when a move arrives, the code falls back to the full rebuild rather than crashing.
   </behavior>
@@ -125,18 +126,18 @@ Output: modified mask_planes/mask_editor/canvas/main_window + regression tests; 
 
     1. canvas.py — add a persistent slot self._restore_display_pixmap: QPixmap | None (None default). At the restore PRESS path (where _restore_pre/_restore_work are initialized): build the pixmap ONCE via the existing full-frame QImage(RGB888)+copy conversion of _restore_work into QPixmap.fromImage, store it in the slot, and image_item.setPixmap(slot) once.
 
-    2. _advance_paint RESTORE branch: replace the per-move self._refresh_restore_display() with a bbox-only refresh: take the just-stamped disc rect (x0,y0,x1,y1 from the same clamps _restore_stamp uses — either return it from _restore_stamp or recompute it), convert ONLY work[y0:y1, x0:x1] to a small RGB888 QImage, QPainter-draw it at (x0, y0) into the persistent pixmap (QPainter on a QPixmap is legal here — mouse events are GUI-thread), then self.image_item.update() to re-blit. Do NOT call setPixmap per move.
+    2. _advance_paint RESTORE branch: replace the per-move self._refresh_restore_display() with a bbox-only refresh. One mouse-move stamps MANY discs (the interpolation loop at ~1955-1965), so the refreshed rect MUST be the UNION of the rects of ALL discs stamped during THIS move — not the last disc alone. Implementation: record the stroke bbox accumulator value (or a fresh per-move rect) BEFORE the stamp loop and derive the move rect by diffing/unioning across the stamp calls (e.g., snapshot _restore_bbox before, union each stamped disc's rect into a per-move rect after) — a last-disc-only rect leaves mid-stroke display gaps between interpolated discs. Then convert that rect region of _restore_work to an RGB888 QImage — the slice work[y0:y1, x0:x1] is NON-CONTIGUOUS, so wrap np.ascontiguousarray(region) (the full-frame pattern QImage(arr.data, w, h, w*3, Format_RGB888) does NOT transfer to a strided sub-rect; per-row stride is the alternative, ascontiguousarray is simpler), QPainter-draw it at (x0, y0) into the persistent pixmap (QPainter on a QPixmap is legal here — mouse events are GUI-thread), then self.image_item.update() to re-blit. Do NOT call setPixmap per move.
 
     3. _finish_restore_stroke: keep the existing single full refresh (it lands the release-end state and re-syncs the item's pixmap), then clear the persistent slot alongside _restore_pre/_restore_work/_restore_bbox. Guard: bbox refresh with a None slot falls back to the full rebuild.
 
     4. Update the _refresh_restore_display docstring: the T-l3l-03 PERF CHOICE note is superseded — full-frame conversion is now once-per-stroke-boundary, per-move is bbox-only.
 
-    Tests in tests/test_gui_canvas.py following the existing restore-stroke simulation pattern: identity assertion on image_item.pixmap() across moves; a monkeypatch counter asserting the full rebuild fires exactly 2x per press->move->release; pixel sampling of the stroked region equals baseline; the None-slot fallback path does not raise.
+    Tests in tests/test_gui_canvas.py following the existing restore-stroke simulation pattern: identity assertion on image_item.pixmap() across moves; a monkeypatch counter asserting the full rebuild fires exactly 2x per press->move->release; a MID-STROKE assertion (after a long fast move that stamps multiple discs, before release) sampling the persistent pixmap under the FIRST disc of that move and checking baseline pixels are already displayed (catches last-disc-only refresh gaps); pixel sampling of the stroked region equals baseline after release; the None-slot fallback path does not raise.
   </action>
   <verify>
     <automated>"C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_canvas.py tests/test_gui_tools_strip.py -x -q</automated>
   </verify>
-  <done>Restore strokes keep one pixmap object across all mouse-moves; full-frame rebuild fires exactly at stroke start + finish; committed pixels and the restore_committed payload are unchanged; listed suites green.</done>
+  <done>Restore strokes keep one pixmap object across all mouse-moves; full-frame rebuild fires exactly at stroke start + finish; every disc stamped within a mouse-move is already visible mid-stroke (union-rect refresh, no inter-disc display gaps); committed pixels and the restore_committed payload are unchanged; listed suites green.</done>
 </task>
 
 <task type="auto" tdd="true">
@@ -147,6 +148,7 @@ Output: modified mask_planes/mask_editor/canvas/main_window + regression tests; 
     - Composite equivalence: after any mutation sequence (stroke -> recompose -> second stroke -> recompose -> clear_mask -> stroke -> recompose, and the same through set_planes/undo restores and consume_mask_display), the composite is byte-identical (mask_to_numpy_binary equality) to a fresh uncached recompose from the same plane state.
     - Cache effectiveness: after a brush stroke commit that mutated ONLY the manual plane, the next recompose converts manual exactly once and erase ZERO times (monkeypatch call-count on mask_to_numpy_binary in the canvas module namespace).
     - Invalidation correctness: after set_planes (undo/page restore), clear_mask, or consume_mask_display fills, the next recompose converts BOTH planes (stale cache can never serve).
+    - Cross-page replacement equivalence: stroke on page A (commit recompose) -> set_image page B (a folder-session-style page switch with NO set_planes — the incoming page has no persisted mask) -> stroke on page B -> recompose is byte-identical to a fresh uncached recompose of page B's planes. The outgoing page's cached binaries must never serve the new page (set_image re-seeds _mask_manual/_mask_erase, so a stale cache here silently poisons the composite, LaMa dispatch, and consume paths).
     - recompose_mask stays signal-silent (no mask_modified emission from the cache path).
   </behavior>
   <action>
@@ -154,7 +156,7 @@ Output: modified mask_planes/mask_editor/canvas/main_window + regression tests; 
 
     1. canvas.py — add self._plane_bin_cache: dict[str, np.ndarray] (keys "manual"/"erase", values (h,w) uint8 0/255) plus a small _invalidate_plane_bin_cache() helper that clears it. In recompose_mask: manual_bin = cache.get("manual") or mask_to_numpy_binary(self._mask_manual) stored back on miss; same for erase; auto path unchanged. Keep the existing null-manual early return.
 
-    2. Invalidation call sites — EVERY place the manual/erase planes mutate or are replaced (enumerate by grepping QPainter/paint/fill writes to _mask_manual/_mask_erase): the brush/rect/lasso/eraser press and move paint paths (where mask_editor paint helpers and _dual_write_stroke run), set_planes (after the incoming copies land), clear_mask's transparent fills, and consume_mask_display's fills. A missed site = stale composite corruption — the equivalence tests above are the guard; when in doubt, invalidate (an extra invalidation only costs one rebuild).
+    2. Invalidation call sites — EVERY place the manual/erase planes MUTATE or are REPLACED (enumerate by grepping BOTH QPainter/paint/fill writes AND direct assignments to _mask_manual/_mask_erase). Mutation sites: the brush/rect/lasso/eraser press and move paint paths (where mask_editor paint helpers and _dual_write_stroke run), set_planes (after the incoming copies land), clear_mask's transparent fills, and consume_mask_display's fills. REPLACEMENT sites (equally mandatory — a stale cache here survives until the next commit): set_image's fresh-plane re-seed (canvas.py ~502-510, runs on EVERY page display), clear()'s plane nulling (canvas.py ~554-557), and _set_image_from_numpy's dims-change re-seed branch (canvas.py ~1147-1158). CONCRETE FAILURE being guarded: a folder-session page switch runs set_image with NO set_planes (main_window on_page_selected Step 4 is skipped when the incoming page has no persisted mask), so the first stroke-commit recompose on the new page would serve the OUTGOING page's cached binaries — a silent wrong composite that also poisons LaMa dispatch and mask consumption. A missed site = stale composite corruption — the equivalence tests above (including the cross-page one) are the guard; when in doubt, invalidate (an extra invalidation only costs one rebuild).
 
     3. Do NOT wire planes_snapshot through the cache in this task (Task 1's snapshot path is independent and already merged); do NOT touch update_mask_display's per-move pixmap refresh (explicitly deferred — see Deferred list).
 
@@ -163,7 +165,7 @@ Output: modified mask_planes/mask_editor/canvas/main_window + regression tests; 
   <verify>
     <automated>"C:\Users\Stella\.pyenv\pyenv-win\versions\3.14.2\python.exe" -m pytest tests/test_gui_mask_planes.py tests/test_gui_canvas.py -x -q</automated>
   </verify>
-  <done>Composites are byte-identical to the uncached path across all mutation sequences; a manual-only stroke commit converts exactly one plane; every plane-replacement site invalidates; listed suites green.</done>
+  <done>Composites are byte-identical to the uncached path across all mutation sequences INCLUDING a set_image page switch with no set_planes (cross-page test); a manual-only stroke commit converts exactly one plane; every mutation AND replacement site (set_image, clear, _set_image_from_numpy dims branch) invalidates; listed suites green.</done>
 </task>
 
 </tasks>
