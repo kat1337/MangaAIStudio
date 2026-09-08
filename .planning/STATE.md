@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-07 - Completed quick task 260907-m4u: Ctrl+click a bubble with the Move tool (V) copies its detected text to the clipboard (recognized text only, never translation; empty boxes leave the clipboard untouched); full suite 1303 passed
+Last activity: 2026-09-07 - Completed quick task 260907-nfq: lazy project open — meta-only .mas open (selective decompression), lazy ImageFiles materialized on visit/save-PREPARE/batch-dispatch; kills the >6GB eager-load baseline on high-res projects; save round-trip byte-faithful (WR-02 loud abort); full suite 1322 passed; Needs Review (real-project RSS spot-check)
 
 ## Performance Metrics
 
@@ -372,8 +372,8 @@ None yet.
 
 ### Quick Tasks Completed
 
-| # | Description | Date | Commit | Directory |
-|---|-------------|------|--------|-----------|
+| # | Description | Date | Commit | Directory | Status |
+|---|-------------|------|--------|-----------|--------|
 | 260822-1yu | Fix masker/filler pipeline: C runs filler for std-dev-0 boxes then inpainter; standalone Fill Boxes action (F) | 2026-08-22 | 99cec83 | [260822-1yu-fix-masker-filler-pipeline-c-key-should-](./quick/260822-1yu-fix-masker-filler-pipeline-c-key-should-/)
 | 260822-347 | Change default text overlay style to black text without an outline | 2026-08-22 | a39df29 | [260822-347-change-default-text-overlay-style-from-w](./quick/260822-347-change-default-text-overlay-style-from-w/)
 | 260822-gnq | Fix box-move auto re-detect annoyance + brush ghost on scroll + pan tool brush cursor | 2026-08-22 | ed00312 | [260822-gnq-fix-box-move-auto-re-detect-annoyance-br](./quick/260822-gnq-fix-box-move-auto-re-detect-annoyance-br/)
@@ -399,6 +399,7 @@ None yet.
 | 260904-wn0 | Fix flat-white corner fill after resize+clean (C): the fit-time box-cropped mask was pasted at the CURRENT post-resize box origin with stale low std_dev keeping the box on the fill route — `_has_auto_mask_content` now requires `mask.size == (box_w, box_h)` (project_io save-side stale invariant, quick-260825-u9q, lifted into the live path); compose_fill_specs/fill_binary/auto_binary + the worker auto_contrib loop consume that single predicate, so resized boxes route gate_skipped exactly like post-save/reload (re-derive via the amber re-detect affordance); pure box moves regression-guarded; batch_runner inherits unchanged | 2026-09-05 | 9860048 | [260904-wn0-fix-intermittent-bug-sometimes-when-clea](./quick/260904-wn0-fix-intermittent-bug-sometimes-when-clea/) |
 | 260907-l3w | Open Folder detects project vs plain folder: `project_io.find_project_manifest` (direct manifest.json → one-level subdir scan, natsorted-first; corrupt manifest raises, never falls through) + `_open_folder_session` single router (open_folder + folder drag-drop share it; project route gated inside `_load_project_session`, folder route gates once in the router; corrupt dialogs mirror `_open_project`); `_load_folder` gains .mas page files (mixed image+mas natsorted sessions, build-before-swap all-or-nothing, corrupt .mas aborts; zero-.mas folders keep the byte-identical `_set_pages` route) | 2026-09-07 | 3fb36bf | [260907-l3w-open-folder-option-detects-project-vs-pl](./quick/260907-l3w-open-folder-option-detects-project-vs-pl/) |
 | 260907-m4u | Ctrl+click a bubble with the Move tool (V) copies its DETECTED (OCR) text to the OS clipboard + "Copied N chars" transient — `text_renderer.detected_text(pb)` (recognized-only, never translation), `EditorCanvas.copy_text_requested` dumb-emitter signal + Ctrl branch before the Shift check (handles/paint tools untouched), `MainWindow._on_box_text_copy_requested` mirrors the grab handler's empty-rule ("No text recognized", sentinel survives); Move tooltip gains the Ctrl+click clause; full suite 1303 passed | 2026-09-07 | be7cf11 | [260907-m4u-ctrl-click-a-bubble-with-the-move-tool-v](./quick/260907-m4u-ctrl-click-a-bubble-with-the-move-tool-v/) |
+| 260907-nfq | Lazy project open (OOM fix, ~35MP×25p project was 6→18GB): `load_page_file(names=)` selective decompression + `parse_page_meta` + `ImageFile.source_mas/embedded_size` slots; meta-only `_load_project_session` loop builds lazy ImageFiles (pixels/mask/planes None) with page 0 materialized pre-swap; `_materialize_page_state` gap-fill at visit (on_page_selected) + save-PREPARE (WR-02 loud abort, never silent pixel loss; untouched pages save by .mas non-rewrite) + batch light tier (planes only, no pixels) + OCR-export `embedded_size` dims arm; full suite 1322 passed; verification human_needed (real-project RSS spot-check) | 2026-09-07 | ab6ae4a | [260907-nfq-lazy-project-open-stop-eagerly-decoding-](./quick/260907-nfq-lazy-project-open-stop-eagerly-decoding-/) | Needs Review |
 
 ## Deferred Items
 
