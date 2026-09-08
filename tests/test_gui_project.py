@@ -16,16 +16,21 @@ tests must never touch the user's real registry settings.
 
 from __future__ import annotations
 
+import struct
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image as PILImage
-from PySide6.QtCore import QSettings
-from PySide6.QtGui import QColor, QImage, QKeySequence
+from PySide6.QtCore import QRect, QSettings
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from manga_ai_studio.config.profile_manager import ProfileManager
+from manga_ai_studio.core import project_io
+from manga_ai_studio.core.mask_editor import mask_to_numpy_binary
+from manga_ai_studio.core.mask_planes import pack_binary, unpack_binary
 from manga_ai_studio.core.project_io import load_project
 from manga_ai_studio.gui.main_window import MainWindow
 
@@ -402,10 +407,13 @@ def test_project_open_hides_empty_state_trio(qtbot, tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.gui
-def test_open_project_populates_all_current_images(qtbot, tmp_path, monkeypatch) -> None:
-    """BOTH pages get their embedded image decoded into current_image — incl.
-    the non-displayed second page whose original was deleted (the 05-08 batch
-    dims fallback); the open-status flash notes the missing original."""
+def test_open_project_lazy_open_contract(qtbot, tmp_path, monkeypatch) -> None:
+    """quick-260907-nfq LAZY contract (rewrites the old eager-open pin, whose
+    every-page-populated assertion was the intentional contract change):
+    project open decodes pixels for ONLY the displayed first page — the other
+    pages stay lazy (current_image/mask None) but fully described by their
+    meta (source_mas back-pointer, embedded_size, eager boxes, D-06 flag);
+    the open-status flash still notes the missing original."""
     chapter = tmp_path / "chapter"
     window = _make_window(qtbot, tmp_path, folder=chapter)
     _dirty(window)
@@ -420,11 +428,27 @@ def test_open_project_populates_all_current_images(qtbot, tmp_path, monkeypatch)
     window2._open_project()
     QApplication.processEvents()
 
-    for imf in window2.image_files:
-        assert imf.current_image is not None
-        assert imf.current_image.shape[:2] == (60, 60)
-    assert not window2.image_files[1].original_verified
+    # Residency probe: EXACTLY ONE page holds decoded pixels at open
+    # (open-time retained pixel memory is O(1 pages), not O(page count)).
+    populated = [
+        i
+        for i, imf in enumerate(window2.image_files)
+        if imf.current_image is not None
+    ]
+    assert populated == [0]
+    assert window2.image_files[0].current_image.shape[:2] == (60, 60)
+
+    # The non-displayed page is lazy but carries the meta-derived state.
+    lazy = window2.image_files[1]
+    assert lazy.current_image is None
+    assert lazy.mask is None
+    assert lazy.source_mas == project_dir / "page_02.mas"
+    assert lazy.embedded_size == (60, 60)
+    assert not lazy.original_verified  # D-06: its original is gone
     assert "Original file not found" in window2.status_bar_left.text()
+
+    # The first page still displays immediately (open behavior unchanged).
+    assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
 
 
 @pytest.mark.gui
@@ -2003,3 +2027,344 @@ def test_open_folder_corrupt_mas_aborts_whole_open(
     assert window._session_dirty()  # no partial swap, flags untouched
     assert window._project_dir is None
     assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+# ===========================================================================
+# quick-260907-nfq — lazy project open: visit materialization + save fidelity
+# ===========================================================================
+#
+# Project open decodes pixels for ONLY the displayed first page (the OOM
+# fix direction F1 of OOM-MEMORY-MAP.md). Every other page is a lazy
+# ImageFile (source_mas back-pointer + embedded_size) materialized on
+# demand: page visit (full tier), batch dispatch (light tier), save PREPARE
+# (full tier for eligible pages). The load-bearing constraint is #1: a
+# never-visited page must round-trip BYTE-FAITHFULLY through a save.
+
+
+def _imf_mask_rect(size: int = 60, rect=(10, 10, 40, 40)) -> QImage:
+    """A mask QImage with an opaque red rect (real mask content)."""
+    mask = QImage(size, size, QImage.Format.Format_ARGB32)
+    mask.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(mask)
+    painter.fillRect(QRect(*rect), QColor(255, 0, 0, 255))
+    painter.end()
+    return mask
+
+
+def _corrupt_image_blob(mas_path: Path) -> None:
+    """Rewrite ``mas_path`` so its image.png PAYLOAD (the compressed stream
+    itself) is garbage while meta.json/original.json stay intact — the
+    deferred-corruption fixture (save_page_file would compress whatever it
+    is handed, so the corruption must be applied at the container level)."""
+    from manga_ai_studio.core.project_io import _MAGIC, _pack_entry
+
+    entries = project_io.load_page_file(mas_path)
+    name_b = b"image.png"
+    corrupt = struct.pack("<HQ", len(name_b), 32) + name_b + b"\xff" * 32
+    parts = [_MAGIC + struct.pack("<II", 1, 2), _pack_entry("meta.json", entries["meta.json"]), corrupt]
+    for extra in ("mask.bin", "original.json"):
+        if extra in entries:
+            parts.append(_pack_entry(extra, entries[extra]))
+    mas_path.write_bytes(b"".join(parts))
+
+
+def _decode_page_pixels(mas_path: Path) -> tuple[dict, np.ndarray]:
+    """Fresh headless decode of a page container's embedded pixels."""
+    parsed = project_io.parse_page_entries(project_io.load_page_file(mas_path))
+    pixels = np.asarray(
+        PILImage.open(BytesIO(parsed["image_png"])).convert("RGB")
+    ).copy()
+    return parsed, pixels
+
+
+def _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir: Path) -> MainWindow:
+    """Open a saved project in a fresh window through the real dialog route."""
+    window = _make_window(qtbot, tmp_path)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window._open_project()
+    QApplication.processEvents()
+    return window
+
+
+@pytest.mark.gui
+def test_lazy_visit_materializes_page_identically(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """First navigation to a never-visited page materializes it from its
+    source .mas: current_image equals a fresh project_io decode, the canvas
+    displays the embedded pixels, the persisted composite mask restores, and
+    the eagerly-parsed boxes appear — visually identical to the eager open."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    expected_mask_bin = mask_to_numpy_binary(_imf_mask_rect())
+    window.image_files[1].mask = _imf_mask_rect()
+    _dirty_page_idx(window, 1)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].current_image is None  # still lazy
+
+    second = window2.image_files[1]
+    window2.file_table.select_path(second.path)
+    window2.on_page_selected(second.path)
+    QApplication.processEvents()
+
+    imf2 = window2.image_files[1]
+    assert imf2.current_image is not None
+    _parsed, fresh = _decode_page_pixels(imf2.source_mas)
+    assert np.array_equal(imf2.current_image, fresh)
+    # The canvas displays the embedded pixels (never the placeholder path).
+    assert np.array_equal(window2.canvas.get_image_numpy(), fresh)
+    # The persisted composite mask restored onto the canvas.
+    assert window2.canvas.has_mask_content()
+    assert np.array_equal(
+        mask_to_numpy_binary(window2.canvas.get_mask()), expected_mask_bin
+    )
+    # The eagerly-parsed box appears on the canvas.
+    assert len(window2.canvas._box_items) == 1
+    assert window2.canvas._box_items[0].pagebox.origin == "user"
+
+
+@pytest.mark.gui
+def test_zero_visit_save_as_round_trip(qtbot, tmp_path, monkeypatch) -> None:
+    """Constraint #1 gate: Save As… with ZERO page visits writes every page
+    and reopening shows identical images, planes, and boxes — a lazy page
+    saves from its source .mas embedded pixels, never the pristine original."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    # Distinct persisted state per page: a composite mask + user box on
+    # page 2, an auto plane on page 3.
+    window.image_files[1].mask = _imf_mask_rect()
+    _dirty_page_idx(window, 1)
+    auto_bin = np.zeros((60, 60), dtype=np.uint8)
+    auto_bin[20:35, 5:25] = 255
+    window.image_files[2].auto_mask = pack_binary(auto_bin)
+    window.image_files[2].dirty = True
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    # Reopen LAZILY — ZERO navigation — then Save As… to a fresh folder.
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert [imf.current_image for imf in window2.image_files[1:]] == [None, None]
+    second_dir = tmp_path / "copy.mas-project"
+    _save_as(window2, second_dir, monkeypatch, qtbot=qtbot)
+
+    # Reopen the copy and compare per-page containers against the ORIGINAL.
+    window3 = _open_saved_project(qtbot, tmp_path, monkeypatch, second_dir)
+    assert len(window3.image_files) == 3
+    for i in range(3):
+        orig = project_dir / f"page_{i + 1:02d}.mas"
+        copy = second_dir / f"page_{i + 1:02d}.mas"
+        orig_parsed, orig_px = _decode_page_pixels(orig)
+        copy_parsed, copy_px = _decode_page_pixels(copy)
+        assert np.array_equal(orig_px, copy_px), f"page {i + 1} pixels differ"
+        assert (
+            orig_parsed["meta"]["boxes"] == copy_parsed["meta"]["boxes"]
+        ), f"page {i + 1} boxes differ"
+        assert orig_parsed["meta"]["mask"] == copy_parsed["meta"]["mask"], (
+            f"page {i + 1} mask declaration differs"
+        )
+        for key in ("raw_packed", "auto_packed", "manual_packed", "erase_packed"):
+            a, b = orig_parsed[key], copy_parsed[key]
+            if a is None or b is None:
+                assert a is None and b is None, f"page {i + 1} {key} presence differs"
+            else:
+                assert np.array_equal(a, b), f"page {i + 1} {key} bytes differ"
+    # The plane-bearing page really carried its plane through both saves.
+    assert window3.image_files[2].auto_mask is not None
+    assert np.array_equal(
+        unpack_binary(window3.image_files[2].auto_mask, 60, 60), auto_bin
+    )
+
+
+@pytest.mark.gui
+def test_portable_project_save_as_round_trip(qtbot, tmp_path, monkeypatch) -> None:
+    """Portable embedded-only project (originals deleted, verification fails
+    at open, paths are the .mas placeholders): Save As… still round-trips
+    identical pixels — the embedded pixels flow through the source .mas."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    for p in chapter.glob("*.png"):
+        p.unlink()  # the embedded pixels are now the ONLY source
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert all(not imf.original_verified for imf in window2.image_files)
+    assert all(imf.path.suffix == ".mas" for imf in window2.image_files)
+
+    second_dir = tmp_path / "portable-copy.mas-project"
+    _save_as(window2, second_dir, monkeypatch, qtbot=qtbot)
+
+    for i in range(3):
+        _, orig_px = _decode_page_pixels(project_dir / f"page_{i + 1:02d}.mas")
+        _, copy_px = _decode_page_pixels(second_dir / f"page_{i + 1:02d}.mas")
+        assert np.array_equal(orig_px, copy_px), f"page {i + 1} pixels differ"
+
+
+@pytest.mark.gui
+def test_save_with_missing_lazy_mas_aborts(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A lazy page whose source .mas went missing/corrupt at save time
+    aborts the WHOLE save via the existing WR-02 unresolved dialog — no
+    silent pristine-pixel embed, no crash."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    _dirty_page_idx(window, 0, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].current_image is None  # never visited
+
+    (project_dir / "page_02.mas").unlink()  # the lazy page's source is gone
+
+    criticals = _capture_critical(monkeypatch)
+    second_dir = tmp_path / "abort.mas-project"
+    _stub_dir_dialog(monkeypatch, second_dir)
+    saved = window2._save_project(force_as=True)
+    QApplication.processEvents()
+
+    assert saved is False
+    assert criticals, "the unresolved-source failure dialog was shown"
+    assert "No page could be read for saving." in criticals[0][1]
+    assert not any(second_dir.glob("*.mas"))  # NOTHING was written
+
+
+@pytest.mark.gui
+def test_lazy_incremental_save_untouched_mas_bytes_identical(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Visiting + editing ONLY page 2 of a lazy session leaves pages 1/3
+    .mas files byte-identical on disk — untouched lazy pages save by
+    non-action (their .mas files are never rewritten)."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    _dirty_page_idx(window, 0, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].current_image is None  # lazy open
+
+    second = window2.image_files[1]
+    window2.file_table.select_path(second.path)
+    window2.on_page_selected(second.path)
+    QApplication.processEvents()
+    _dirty_page_idx(window2, 1)
+
+    b1 = (project_dir / "page_01.mas").read_bytes()
+    b2 = (project_dir / "page_02.mas").read_bytes()
+    b3 = (project_dir / "page_03.mas").read_bytes()
+
+    window2._save_project()
+    _wait_save_done(qtbot, window2)
+
+    assert (project_dir / "page_01.mas").read_bytes() == b1
+    assert (project_dir / "page_03.mas").read_bytes() == b3
+    assert (project_dir / "page_02.mas").read_bytes() != b2
+    assert not window2._session_dirty()
+
+
+@pytest.mark.gui
+def test_lazy_visit_state_round_trip_no_bleed(qtbot, tmp_path, monkeypatch) -> None:
+    """The outgoing-flush round trip works through a materialized page:
+    visit page 2 (persisted mask restores), navigate to page 3 (no page-2
+    planes bleed onto it), navigate back (the mask state persists), and
+    per-page history resets on every switch (260826-1by guards hold)."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    expected_mask_bin = mask_to_numpy_binary(_imf_mask_rect())
+    window.image_files[1].mask = _imf_mask_rect()
+    _dirty_page_idx(window, 1)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].current_image is None  # lazy open
+
+    def _visit(idx: int) -> None:
+        target = window2.image_files[idx]
+        window2.file_table.select_path(target.path)
+        window2.on_page_selected(target.path)
+        QApplication.processEvents()
+
+    # Visit page 2: the persisted mask materializes and restores.
+    _visit(1)
+    assert np.array_equal(
+        mask_to_numpy_binary(window2.canvas.get_mask()), expected_mask_bin
+    )
+    # Navigate to page 3: no page-2 planes bleed onto it.
+    _visit(2)
+    assert not window2.canvas.has_mask_content()
+    # Back to page 2: the mask state persists (outgoing flush round trip).
+    _visit(1)
+    assert np.array_equal(
+        mask_to_numpy_binary(window2.canvas.get_mask()), expected_mask_bin
+    )
+    # Every switch reset the per-page undo history.
+    assert not window2.history.can_undo()
+
+
+@pytest.mark.gui
+def test_corrupt_first_page_aborts_open(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A FIRST page whose embedded image blob is corrupt fails the open with
+    the corrupt-project dialog — page 0 fully materializes BEFORE the swap
+    (all-or-nothing for the displayed page is preserved)."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    _dirty_page_idx(window, 0, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+    before = [imf.path for imf in window.image_files]
+
+    _corrupt_image_blob(project_dir / "page_01.mas")
+
+    # The seeding window is dirty -> the D-07 gate fires inside
+    # _load_project_session; stub it to Discard (the existing
+    # corrupt-folder-open test pattern).
+    _stub_messagebox_exec(
+        monkeypatch, role=QMessageBox.ButtonRole.DestructiveRole
+    )
+    captured = _capture_critical(monkeypatch)
+    _stub_open_dialog(monkeypatch, project_dir / "manifest.json")
+    window._open_project()
+    QApplication.processEvents()
+
+    assert captured and "Couldn't open" in captured[0][0]
+    assert "corrupt or from a newer version" in captured[0][1]
+    assert [imf.path for imf in window.image_files] == before
+    assert window.canvas.get_image_numpy().shape[:2] == (60, 60)
+
+
+@pytest.mark.gui
+def test_corrupt_later_page_opens_then_degrades_on_visit(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """A corrupt blob on a LATER page opens fine (meta-only parse) and
+    degrades on visit to the existing path-fallback UX: the verified
+    original displays, no 'Couldn't open file' warning, no crash."""
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    _dirty_page_idx(window, 0, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_as(window, project_dir, monkeypatch, qtbot=qtbot)
+
+    _corrupt_image_blob(project_dir / "page_03.mas")
+
+    # The seeding window is dirty -> the D-07 gate fires inside
+    # _load_project_session; stub it to Discard (same pattern as the
+    # corrupt-first-page test above).
+    _stub_messagebox_exec(
+        monkeypatch, role=QMessageBox.ButtonRole.DestructiveRole
+    )
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert len(window2.image_files) == 3
+    assert window2.image_files[2].current_image is None  # lazily deferred
+
+    warnings = _capture_warning(monkeypatch)
+    third = window2.image_files[2]
+    window2.file_table.select_path(third.path)
+    window2.on_page_selected(third.path)
+    QApplication.processEvents()
+
+    # Materialization failed; the verified-original path fallback displayed.
+    assert window2.canvas.get_image_numpy().shape[:2] == (60, 60)
+    assert warnings == []  # the verified original opened — no warning dialog
