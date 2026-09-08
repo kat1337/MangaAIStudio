@@ -5276,13 +5276,19 @@ def test_no_ghost_after_undo_and_scroll(qtbot) -> None:
     ))
     assert pre.green() < 200 and pre.blue() < 200, "stroke should be visible"
 
-    # Restore a CLEAN plane snapshot via the real undo application path.
-    clean_manual = QImage(200, 200, QImage.Format.Format_ARGB32)
-    clean_manual.fill(Qt.GlobalColor.transparent)
-    clean_erase = QImage(200, 200, QImage.Format.Format_ARGB32)
-    clean_erase.fill(Qt.GlobalColor.transparent)
+    # Restore a CLEAN plane snapshot via the real undo application path
+    # (quick-260907-sni: the snapshot value is the packed triple — zeros
+    # packed manual/erase + dims).
+    import numpy as np
+
+    n_packed = (200 * 200 + 7) // 8
     canvas.apply_undo_mask(
-        MaskPlanesSnapshot(manual=clean_manual, erase=clean_erase, auto_packed=None)
+        MaskPlanesSnapshot(
+            manual_packed=np.zeros(n_packed, dtype=np.uint8),
+            erase_packed=np.zeros(n_packed, dtype=np.uint8),
+            auto_packed=None,
+            dims=(200, 200),
+        )
     )
 
     def _wheel(angle: int, ctrl: bool) -> None:

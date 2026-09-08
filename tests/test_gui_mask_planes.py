@@ -148,25 +148,84 @@ def test_unpack_binary_rejects_mismatched_length() -> None:
 
 @pytest.mark.unit
 def test_snapshot_copy_detaches_planes() -> None:
-    """MaskPlanesSnapshot.copy() detaches manual/erase QImages + the packed
-    auto array — mutating the originals after the copy never reaches it."""
-    manual = _plane_from_bin(_rect_bin(10, 10, 0, 0, 5, 5))
-    erase = _plane_from_bin(_rect_bin(10, 10, 5, 5, 10, 10))
+    """MaskPlanesSnapshot.copy() detaches the packed manual/erase arrays + the
+    packed auto array — mutating the originals after the copy never reaches it.
+
+    quick-260907-sni: the snapshot value is the packed triple — manual/erase
+    as 1-bit packed uint8 arrays + ``dims`` (lossless because both planes are
+    binary: alpha>0 == painted, ``mask_to_numpy_binary`` already thresholds
+    them)."""
+    manual_packed = pack_binary(_rect_bin(10, 10, 0, 0, 5, 5))
+    erase_packed = pack_binary(_rect_bin(10, 10, 5, 5, 10, 10))
     auto_packed = pack_binary(_rect_bin(10, 10, 2, 2, 8, 8))
-    snap = MaskPlanesSnapshot(manual=manual, erase=erase, auto_packed=auto_packed)
+    snap = MaskPlanesSnapshot(
+        manual_packed=manual_packed,
+        erase_packed=erase_packed,
+        auto_packed=auto_packed,
+        dims=(10, 10),
+    )
     copied = snap.copy()
     # Mutate every original after the copy.
-    manual.fill(QColor(255, 0, 0, 255))
-    erase.fill(QColor(255, 0, 0, 255))
+    manual_packed[:] = 0
+    erase_packed[:] = 0
     auto_packed[:] = 0
-    assert mask_to_numpy_binary(copied.manual).sum() == 255 * 25
-    assert mask_to_numpy_binary(copied.erase).sum() == 255 * 25
+    assert copied.manual_packed.nbytes == (10 * 10 + 7) // 8
+    np.testing.assert_array_equal(
+        unpack_binary(copied.manual_packed, 10, 10), _rect_bin(10, 10, 0, 0, 5, 5)
+    )
+    np.testing.assert_array_equal(
+        unpack_binary(copied.erase_packed, 10, 10), _rect_bin(10, 10, 5, 5, 10, 10)
+    )
     np.testing.assert_array_equal(
         unpack_binary(copied.auto_packed, 10, 10), _rect_bin(10, 10, 2, 2, 8, 8)
     )
     # None auto_packed copies to None (no auto content).
-    none_snap = MaskPlanesSnapshot(manual=manual, erase=erase, auto_packed=None)
+    none_snap = MaskPlanesSnapshot(
+        manual_packed=manual_packed,
+        erase_packed=erase_packed,
+        auto_packed=None,
+        dims=(10, 10),
+    )
     assert none_snap.copy().auto_packed is None
+
+
+@pytest.mark.unit
+def test_history_manager_mask_stack_packed_round_trip() -> None:
+    """The HistoryManager duck-typed ``.copy()`` contract with the packed
+    value type: push detaches the packed arrays (the caller's later mutation
+    never reaches the stack), pop returns a detached copy, and undo+redo
+    round-trips the packed snapshot bytes exactly."""
+    from manga_ai_studio.core.history_manager import HistoryManager
+
+    hist = HistoryManager(limit=5)
+    manual_packed = pack_binary(_rect_bin(16, 12, 0, 0, 8, 6))
+    snap_before = MaskPlanesSnapshot(
+        manual_packed=manual_packed,
+        erase_packed=pack_binary(np.zeros((12, 16), np.uint8)),
+        auto_packed=None,
+        dims=(12, 16),
+    )
+    hist.push_mask_state(snap_before)
+    manual_packed[:] = 0  # the caller mutates its array after the push
+
+    snap_after = MaskPlanesSnapshot(
+        manual_packed=pack_binary(_rect_bin(16, 12, 8, 6, 16, 12)),
+        erase_packed=pack_binary(np.zeros((12, 16), np.uint8)),
+        auto_packed=None,
+        dims=(12, 16),
+    )
+    popped = hist.pop_mask_undo(snap_after)
+    assert popped is not None and popped is not snap_before
+    np.testing.assert_array_equal(
+        popped.manual_packed, pack_binary(_rect_bin(16, 12, 0, 0, 8, 6))
+    ), "push captured a detached copy; the caller's mutation never reached it"
+    # The current (post-stroke) snapshot was stashed into the redo branch.
+    assert hist.can_redo_mask()
+    redo_next = hist.pop_mask_redo(snap_before)
+    assert redo_next is not None
+    np.testing.assert_array_equal(
+        redo_next.manual_packed, pack_binary(_rect_bin(16, 12, 8, 6, 16, 12))
+    ), "pop_mask_undo -> pop_mask_redo round-trips the packed snapshot byte-exact"
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +399,139 @@ def test_planes_snapshot_round_trips_through_set_planes(qtbot) -> None:
     # Detach the snapshot from the canvas, then wipe the canvas planes.
     canvas.set_planes(QImage(), QImage(), None)
     assert not mask_to_numpy_binary(canvas.get_mask()).any()
+    from manga_ai_studio.core.mask_editor import packed_to_mask_qimage
+
     with qtbot.assertNotEmitted(canvas.mask_modified):
-        canvas.set_planes(snap.manual, snap.erase, unpack_binary(snap.auto_packed, h, w))
+        canvas.set_planes(
+            packed_to_mask_qimage(snap.manual_packed, snap.dims),
+            packed_to_mask_qimage(snap.erase_packed, snap.dims),
+            unpack_binary(snap.auto_packed, h, w),
+        )
     np.testing.assert_array_equal(
         mask_to_numpy_binary(canvas.get_mask()),
         (manual_bin | auto_bin) & ~erase_bin,
     )
+
+
+# ---------------------------------------------------------------------------
+# quick-260907-sni Task 1 — packed MaskPlanesSnapshot (F3/S1 history slimming)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gui
+def test_planes_snapshot_packed_representation(qtbot) -> None:
+    """planes_snapshot() on a painted page returns a MaskPlanesSnapshot whose
+    manual/erase planes are 1-bit packed uint8 arrays of ceil(h*w/8) bytes
+    plus ``dims`` — NOT QImages. The byte math is the contract: ~HW/8 per
+    plane vs 4HW ARGB32 (~32x smaller history entries; at 35 MP one entry
+    drops from ~280 MB to ~13 MB)."""
+    w, h = 40, 30
+    canvas = _canvas_with_page(qtbot, w, h)
+    canvas.set_planes(
+        _plane_from_bin(_rect_bin(w, h, 2, 2, 12, 10)),
+        _plane_from_bin(_rect_bin(w, h, 4, 4, 6, 6)),
+        _rect_bin(w, h, 20, 10, 30, 20),
+    )
+    snap = canvas.planes_snapshot()
+    expected = (w * h + 7) // 8
+    assert isinstance(snap.manual_packed, np.ndarray)
+    assert isinstance(snap.erase_packed, np.ndarray)
+    assert snap.manual_packed.dtype == np.uint8 and snap.manual_packed.ndim == 1
+    assert snap.erase_packed.dtype == np.uint8 and snap.erase_packed.ndim == 1
+    assert snap.manual_packed.nbytes == expected
+    assert snap.erase_packed.nbytes == expected
+    assert snap.dims == (h, w)
+    assert not isinstance(snap.manual_packed, QImage), (
+        "the packed array is not a QImage (the old representation is gone)"
+    )
+
+
+@pytest.mark.gui
+def test_packed_snapshot_round_trips_through_apply_undo_mask(qtbot) -> None:
+    """stroke -> planes_snapshot() -> apply_undo_mask(snapshot) reproduces a
+    composite pixel-equal (mask_to_numpy_binary equality) to the post-stroke
+    composite; the auto plane survives identically (the packed representation
+    is lossless for the binary planes)."""
+    w, h = 60, 40
+    canvas = _canvas_with_page(qtbot, w, h)
+    auto_bin = _rect_bin(w, h, 45, 5, 58, 18)
+    canvas.set_auto_binary(auto_bin)
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _drive_brush_stroke(canvas, 10, 12, 30, 12)
+    post = mask_to_numpy_binary(canvas.get_mask())
+    assert post.any(), "fixture: the stroke painted"
+
+    snap = canvas.planes_snapshot()
+    # Wipe the live planes, then restore from the packed snapshot.
+    canvas.set_planes(QImage(), QImage(), None)
+    assert not mask_to_numpy_binary(canvas.get_mask()).any()
+    canvas.apply_undo_mask(snap)
+    np.testing.assert_array_equal(
+        mask_to_numpy_binary(canvas.get_mask()), post
+    ), "apply_undo_mask restores the packed snapshot pixel-equal"
+    np.testing.assert_array_equal(canvas._auto_bin, auto_bin)
+
+
+@pytest.mark.gui
+def test_apply_undo_mask_hard_rejects_bare_qimage(qtbot) -> None:
+    """The hard-reject contract: apply_undo_mask raises TypeError on a bare
+    QImage (or any non-MaskPlanesSnapshot value) — the MASK stack value type
+    is the packed snapshot only."""
+    canvas = _canvas_with_page(qtbot, 40, 30)
+    with pytest.raises(TypeError):
+        canvas.apply_undo_mask(QImage(40, 30, QImage.Format.Format_ARGB32))
+    with pytest.raises(TypeError):
+        canvas.apply_undo_mask("not a snapshot")
+
+
+@pytest.mark.gui
+def test_first_stroke_seed_is_zeros_packed(qtbot, tmp_path) -> None:
+    """_clean_plane_seed() returns zeros-filled packed arrays of ceil(h*w/8)
+    bytes with dims — no QImage allocation at all — so undoing the first
+    stroke restores the transparent manual+erase baseline."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path, size=48)
+    seed = window._clean_plane_seed()
+    expected = (48 * 48 + 7) // 8
+    assert seed.dims == (48, 48)
+    assert seed.manual_packed.dtype == np.uint8
+    assert seed.erase_packed.dtype == np.uint8
+    assert seed.manual_packed.nbytes == expected
+    assert seed.erase_packed.nbytes == expected
+    assert not seed.manual_packed.any() and not seed.erase_packed.any()
+
+
+@pytest.mark.gui
+def test_geometry_group_undo_with_packed_mask_value(qtbot, tmp_path) -> None:
+    """One-press geometry undo with the packed snapshot as the MASK value:
+    ``push_geometry_state`` stamps IMAGE+MASK+BOXES with ONE shared stamp, so
+    the unified ``undo()`` pops all three stores in ONE press (the group-pop
+    contract, duck-typed over the packed snapshot), and the popped MASK value
+    applies cleanly through ``apply_undo_mask``."""
+    window = _make_window(qtbot, tmp_path)
+    _open_page(window, tmp_path)
+    canvas = window.canvas
+    canvas.set_tool(ToolMode.BRUSH)
+    canvas.set_brush_size(6)
+    _drive_brush_stroke(canvas, 8, 10, 20, 10)  # ordinary stroke (own entry)
+
+    # The geometry record: pre-op planes (packed) + image + boxes, ONE stamp.
+    pre_planes = canvas.planes_snapshot()
+    pre_boxes = canvas.boxes_snapshot()
+    pre_img = canvas.get_image_numpy().copy()
+    window.history.push_geometry_state(pre_img, pre_planes, pre_boxes)
+
+    entries = window.history.undo(*window._current_undo_state())
+    kinds = sorted(kind for kind, _value in entries)
+    assert kinds == ["boxes", "image", "mask"], (
+        f"ONE press must pop all three stores (group pop); got {kinds}"
+    )
+    mask_val = dict(entries)["mask"]
+    assert isinstance(mask_val, MaskPlanesSnapshot), (
+        "the MASK value of the geometry record is the packed snapshot"
+    )
+    canvas.apply_undo_mask(mask_val)  # the packed snapshot applies cleanly
 
 
 # ---------------------------------------------------------------------------
