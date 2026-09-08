@@ -260,9 +260,15 @@ def test_erase_ledger_survives_redilate(qtbot) -> None:
     canvas = _canvas_with_page(qtbot, w, h)
     auto_bin = _rect_bin(w, h, 10, 10, 20, 20)
     canvas.set_planes(_plane_from_bin(np.zeros((h, w), np.uint8)), QImage(), auto_bin)
-    # Erase one pixel inside the auto content (a false positive).
+    # Erase one pixel inside the auto content (a false positive). Routed
+    # through set_planes (quick-260907-sni: direct private-slot assignment
+    # would bypass the recompose plane-bin cache invalidation).
     erased = (15, 15)
-    canvas._mask_erase = _plane_from_bin(_rect_bin(w, h, 15, 15, 16, 16))
+    canvas.set_planes(
+        _plane_from_bin(np.zeros((h, w), np.uint8)),
+        _plane_from_bin(_rect_bin(w, h, 15, 15, 16, 16)),
+        auto_bin,
+    )
     canvas.recompose_mask()
     composite = mask_to_numpy_binary(canvas.get_mask())
     assert composite[erased[1], erased[0]] == 0, "erased pixel must be gone"

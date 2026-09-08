@@ -465,6 +465,12 @@ class EditorCanvas(QGraphicsView):
         self._mask_manual: QImage | None = None
         self._mask_erase: QImage | None = None
         self._auto_bin: np.ndarray | None = None
+        # quick-260907-sni (F5/S2 churn): per-plane binary cache for
+        # recompose_mask — keys "manual"/"erase", values (h, w) uint8 0/255.
+        # Filled by recompose_mask on miss; dropped by
+        # _invalidate_plane_bin_cache at EVERY plane mutation/replacement
+        # site (a stale entry would silently poison the composite).
+        self._plane_bin_cache: dict[str, np.ndarray] = {}
         self._is_painting = False
         self._last_pt = QPointF()
         self._start_pt = QPointF()
@@ -538,6 +544,11 @@ class EditorCanvas(QGraphicsView):
         erase.fill(Qt.GlobalColor.transparent)
         self._mask_erase = erase
         self._auto_bin = None
+        # quick-260907-sni: REPLACEMENT site — the outgoing page's cached
+        # binaries must never serve the new page (a folder-session page
+        # switch runs set_image with NO set_planes, so the next stroke-commit
+        # recompose would otherwise reuse them).
+        self._invalidate_plane_bin_cache()
 
         # A new page clears the inpaint preview history (plan 05 UI-SPEC surface 7).
         self._original_image_numpy = None
@@ -585,6 +596,8 @@ class EditorCanvas(QGraphicsView):
         self._mask_manual = None
         self._mask_erase = None
         self._auto_bin = None
+        # quick-260907-sni: REPLACEMENT site (plane nulling).
+        self._invalidate_plane_bin_cache()
         self._original_image_numpy = None
         self._inpainted_qimage = None
         self._showing_original = False
@@ -686,6 +699,26 @@ class EditorCanvas(QGraphicsView):
         self._auto_bin = bin_arr
         self.recompose_mask()
 
+    def _invalidate_plane_bin_cache(self, plane: str | None = None) -> None:
+        """Drop the cached per-plane binaries (quick-260907-sni, F5/S2).
+
+        ``plane`` ("manual"/"erase") drops just that entry — the in-stroke
+        paint paths mutate ONE plane, and the stroke-commit recompose must
+        still serve the untouched plane from cache (one-plane conversion per
+        stroke commit instead of both). ``None`` drops BOTH — mandatory at
+        every plane REPLACEMENT site (``set_image``'s fresh-plane re-seed on
+        every page display, ``clear``'s plane nulling,
+        ``_set_image_from_numpy``'s dims-change re-seed, ``set_planes``,
+        ``clear_mask``/``consume_mask_display`` fills): a stale entry there
+        would silently poison the composite, LaMa dispatch, and mask
+        consumption until the next commit. When in doubt, invalidate — an
+        extra invalidation only costs one rebuild.
+        """
+        if plane is None:
+            self._plane_bin_cache.clear()
+        else:
+            self._plane_bin_cache.pop(plane, None)
+
     def recompose_mask(self) -> None:
         """Rebuild the composite ``_mask`` from the three planes (plan 08-02).
 
@@ -695,6 +728,15 @@ class EditorCanvas(QGraphicsView):
         :meth:`update_mask_display` path. Signal-SILENT (Pitfall 13-1 —
         detection/re-dilate/restore recompositions are non-undoable and must
         not re-push onto the history stack).
+
+        quick-260907-sni (F5/S2): ``manual_bin``/``erase_bin`` come from the
+        per-plane cache when valid — a stroke-commit recompose converts only
+        the mutated plane(s) from QImage instead of both. The cache is
+        dropped at every mutation/replacement site
+        (:meth:`_invalidate_plane_bin_cache`), so the composite is
+        byte-identical to the uncached path (``mask_to_numpy_binary`` is
+        deterministic for identical plane content). The shape re-check is a
+        defensive backstop, never the primary guard.
 
         Call sites (Pitfall 13-14 — NEVER from mouseMoveEvent; live feedback
         during a stroke paints the display composite directly and the commit
@@ -707,8 +749,14 @@ class EditorCanvas(QGraphicsView):
             return
         h = self._mask_manual.height()
         w = self._mask_manual.width()
-        manual_bin = mask_to_numpy_binary(self._mask_manual)
-        erase_bin = mask_to_numpy_binary(self._mask_erase)
+        manual_bin = self._plane_bin_cache.get("manual")
+        if manual_bin is None or manual_bin.shape != (h, w):
+            manual_bin = mask_to_numpy_binary(self._mask_manual)
+            self._plane_bin_cache["manual"] = manual_bin
+        erase_bin = self._plane_bin_cache.get("erase")
+        if erase_bin is None or erase_bin.shape != (h, w):
+            erase_bin = mask_to_numpy_binary(self._mask_erase)
+            self._plane_bin_cache["erase"] = erase_bin
         auto_bin = (
             self._auto_bin
             if self._auto_bin is not None
@@ -792,6 +840,9 @@ class EditorCanvas(QGraphicsView):
             if auto_bin is not None
             else None
         )
+        # quick-260907-sni: REPLACEMENT site (incoming copies land — the
+        # undo/page-restore counterpart of planes_snapshot).
+        self._invalidate_plane_bin_cache()
         self.recompose_mask()
 
     def consume_mask_display(self) -> None:
@@ -818,10 +869,15 @@ class EditorCanvas(QGraphicsView):
             if self._mask is not None and not self._mask.isNull():
                 self._mask.fill(Qt.GlobalColor.transparent)
                 self.update_mask_display()
+            # quick-260907-sni: defensive — the display-only branch leaves no
+            # live planes, so no cached binaries may survive it.
+            self._invalidate_plane_bin_cache()
             return
         self._mask_manual.fill(Qt.GlobalColor.transparent)
         self._mask_erase.fill(Qt.GlobalColor.transparent)
         self._auto_bin = None
+        # quick-260907-sni: MUTATION site (both planes filled transparent).
+        self._invalidate_plane_bin_cache()
         self.recompose_mask()
 
     def toggle_mask_overlay(self) -> None:
@@ -868,6 +924,8 @@ class EditorCanvas(QGraphicsView):
         if self._mask_erase is not None and not self._mask_erase.isNull():
             self._mask_erase.fill(Qt.GlobalColor.transparent)
         self._auto_bin = None
+        # quick-260907-sni: MUTATION site (both planes filled transparent).
+        self._invalidate_plane_bin_cache()
         self.recompose_mask()
         self.mask_modified.emit()
 
@@ -1206,6 +1264,8 @@ class EditorCanvas(QGraphicsView):
             erase.fill(Qt.GlobalColor.transparent)
             self._mask_erase = erase
             self._auto_bin = None
+            # quick-260907-sni: REPLACEMENT site (dims-change re-seed).
+            self._invalidate_plane_bin_cache()
         qimg = QImage(full_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
         # CRITICAL: .copy() detaches the QImage from the numpy buffer before
         # storage. Without this the QImage points at a buffer that GCs and
@@ -1837,6 +1897,9 @@ class EditorCanvas(QGraphicsView):
         plane = self._active_stroke_plane(eraser)
         if plane is not None and not plane.isNull():
             paint_mask_stroke(plane, p1, p2, self.brush_size, False)
+            # quick-260907-sni: MUTATION site — per-plane invalidation, so
+            # the stroke-commit recompose converts only the mutated plane.
+            self._invalidate_plane_bin_cache("erase" if eraser else "manual")
 
     def _begin_paint(self, event) -> None:
         """Start a stroke/rect/lasso on left-press (UI-SPEC surface 6)."""
@@ -2108,6 +2171,9 @@ class EditorCanvas(QGraphicsView):
             plane = self._active_stroke_plane(eraser)
             if plane is not None and not plane.isNull():
                 paint_mask_rect(plane, self._start_pt, curr, False)
+                self._invalidate_plane_bin_cache(
+                    "erase" if eraser else "manual"
+                )
             self.update_mask_display()
         elif self.current_tool == ToolMode.LASSO:
             self._lasso_path.closeSubpath()
@@ -2115,6 +2181,9 @@ class EditorCanvas(QGraphicsView):
             plane = self._active_stroke_plane(eraser)
             if plane is not None and not plane.isNull():
                 paint_mask_lasso(plane, self._lasso_path, False)
+                self._invalidate_plane_bin_cache(
+                    "erase" if eraser else "manual"
+                )
             self.update_mask_display()
         self._is_painting = False
         self.preview_item.setPath(QPainterPath())  # clear the dashed preview
