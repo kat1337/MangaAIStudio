@@ -2926,20 +2926,40 @@ class MainWindow(QMainWindow):
     def _page_image_source(self, idx: int) -> np.ndarray | None:
         """Resolve the per-page image to embed at save time (RESEARCH A3).
 
-        CR-01: ``ImageFile.current_image`` is the AUTHORITATIVE state — it is
-        refreshed by every image op / undo and by the save-side flush
-        (``_snapshot_current_page``), so a non-current page that was edited
-        embeds its POST-op image (the D-05 "resume exactly where you left
-        off" contract). Pages never touched in memory (``current_image`` is
-        None) fall back to ``cleaned/<stem>`` in their source dir when that
-        file exists (the Phase 2 convention), else the source file at
-        ``ImageFile.path``, else None (the page is skipped by the caller with
-        a warning). Reads are ``.copy()``-detached (Pitfall 2). Returns None
-        when no source exists at all.
+        Tier order (quick-260907-nfq inserted tier 2):
+          1. ``current_image`` — the AUTHORITATIVE in-memory state (CR-01):
+             refreshed by every image op / undo, the save-side flush
+             (``_snapshot_current_page``), and the visit/save
+             materialization, so a visited page embeds its POST-op image
+             (the D-05 "resume exactly where you left off" contract).
+          2. the page's ``source_mas`` embedded entry — a lazy page's
+             last-saved pixels, decoded fresh from its page container (the
+             primary lazy-page source for typeset export and defense-in-
+             depth for saves: a page whose PREPARE materialization was
+             skipped still resolves to its saved pixels, never the pristine
+             on-disk original).
+          3. ``cleaned/<stem>`` in the source dir (the Phase 2 convention).
+          4. the source file at ``ImageFile.path``, else None (the page is
+             skipped by the caller with a warning).
+
+        Tier 2 failures (corrupt container / missing file) fall through to
+        the existing chain. Reads are ``.copy()``-detached (Pitfall 2).
         """
         imf = self.image_files[idx]
         if imf.current_image is not None:
             return imf.current_image
+        if imf.source_mas is not None:
+            try:
+                return _decode_embedded_image(
+                    project_io.parse_page_entries(
+                        project_io.load_page_file(Path(imf.source_mas))
+                    )
+                )
+            except (project_io.ProjectFormatError, OSError) as exc:
+                logger.warning(
+                    f"Page '{imf.path.name}': source .mas pixel extraction"
+                    f" failed ({exc}) — falling back to the file chain"
+                )
         cleaned = imf.path.parent / "cleaned" / imf.path.name
         if cleaned.is_file():
             return np.asarray(Image.open(cleaned).convert("RGB")).copy()
@@ -8066,6 +8086,11 @@ class MainWindow(QMainWindow):
                 img_h, img_w = img_np.shape[:2]
             elif imf.current_image is not None:
                 img_h, img_w = imf.current_image.shape[:2]
+            elif imf.embedded_size is not None:
+                # quick-260907-nfq: a lazy page's dims come from the embedded
+                # meta recorded at open — exact for geometry-altered pages
+                # (the on-disk original would report the PRISTINE dims).
+                img_w, img_h = imf.embedded_size
             else:
                 # D-22: dims describe the CURRENT page state — for a never-
                 # flushed page that is the source image's dims (read via PIL).
@@ -8394,9 +8419,9 @@ class MainWindow(QMainWindow):
 
         # Bug D (checkpoint rework / D-02 "edits are sacred" + D-11 contract):
         # the only place the canvas mask is normally flushed to ImageFile.mask
-        # is ``on_page_selected`` (the D-11 seam). Dispatching a batch from the
-        # current page WITHOUT first navigating away skips that flush, so the
-        # batch would read the STALE ImageFile.mask and silently ignore the
+        # is ``on_page_selected`` (the D-11 seam). Dispatching a batch from
+        # the current page WITHOUT first navigating away skips that flush, so
+        # the batch would read the STALE ImageFile.mask and silently ignore the
         # user's in-canvas mask edits (erase/refine). Flush the current page's
         # canvas mask into its ImageFile.mask here, BEFORE handing the pages to
         # the batch entry point — the exact operation on_page_selected step 1
@@ -8404,6 +8429,18 @@ class MainWindow(QMainWindow):
         # then overwrites it with the freshly-detected mask; batch_clean reads
         # the user's edited mask. This is the cross-plan integration fix.
         self._flush_current_canvas_mask_to_data_model()
+
+        # quick-260907-nfq: LIGHT materialization for never-visited lazy
+        # pages — their persisted mask planes (manual/erase stroke survival,
+        # plus the legacy flat composite for box-less pages) must reach the
+        # batch worker, while NO page pixels decode here (the worker reads
+        # pixels from disk itself). The tier runs on THIS (GUI) thread —
+        # QImage-touching work never leaves it (T-QHH-01). A False return is
+        # non-fatal: the page proceeds with whatever mask state it has,
+        # matching batch's per-page failure isolation.
+        for i, imf in enumerate(self.image_files):
+            if imf.source_mas is not None and imf.current_image is None:
+                self._materialize_page_state(imf, i, want_pixels=False)
 
         # Resolve model paths + backends. The cache short-circuits inside the
         # _resolve_* helpers mean a 30-page batch does not re-download.
