@@ -36,7 +36,7 @@ from weakref import ref as _weakref
 import numpy as np
 
 from PySide6 import Shiboken
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -171,6 +171,28 @@ def validate_image_path(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     return resolved.suffix.lower() in ALLOWED_IMAGE_SUFFIXES
+
+
+def _union_stroke_rect(
+    acc: list[int] | None,
+    rect: list[int] | tuple[int, int, int, int] | None,
+) -> list[int] | None:
+    """Union a stamped ``[x0, y0, x1, y1)`` rect into an accumulator.
+
+    quick-260907-sni: the Restore per-move display refresh unions the rects
+    of ALL discs stamped during one mouse-move (``_restore_stamp`` returns
+    each clipped rect). ``None`` inputs pass through (a disc fully outside
+    the page, or no stamped rect yet).
+    """
+    if rect is None:
+        return acc
+    if acc is None:
+        return [int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])]
+    acc[0] = min(acc[0], int(rect[0]))
+    acc[1] = min(acc[1], int(rect[1]))
+    acc[2] = max(acc[2], int(rect[2]))
+    acc[3] = max(acc[3], int(rect[3]))
+    return acc
 
 
 class EditorCanvas(QGraphicsView):
@@ -479,6 +501,12 @@ class EditorCanvas(QGraphicsView):
         self._restore_pre: np.ndarray | None = None
         self._restore_work: np.ndarray | None = None
         self._restore_bbox: list[int] | None = None
+        # quick-260907-sni (F4 restore half): the persistent per-stroke
+        # display pixmap. Built ONCE per stroke boundary (press seeds it from
+        # _restore_work, finish re-lands the release-end state); mouse-move
+        # refreshes QPainter-draw only the stamped bbox into it. None
+        # outside a stroke.
+        self._restore_display_pixmap: QPixmap | None = None
         # Cursor follows the pointer even without a held button.
         self.setMouseTracking(True)
         self._update_cursor_visuals()
@@ -1872,18 +1900,21 @@ class EditorCanvas(QGraphicsView):
             return False
         return baseline.shape[:2] == (pix.height(), pix.width())
 
-    def _restore_stamp(self, curr: QPointF) -> None:
+    def _restore_stamp(self, curr: QPointF) -> list[int] | None:
         """Stamp a baseline disc of radius ``brush_size / 2`` at ``curr``.
 
         Copies the disc region from ``_original_image_numpy`` into the
         per-stroke working array through a boolean circular mask (pure numpy
         — no PIL, no QImage painting). The integer disc bbox is clipped to
-        the image dims and grows the stroke bbox accumulator.
+        the image dims and grows the stroke bbox accumulator. Returns the
+        stamped (clipped) ``[x0, y0, x1, y1)`` rect, or ``None`` when the
+        disc fell entirely outside the page — the per-move bbox display
+        refresh unions these (quick-260907-sni).
         """
         baseline = self._original_image_numpy
         work = self._restore_work
         if baseline is None or work is None:
-            return
+            return None
         h, w = work.shape[:2]
         cx = int(round(curr.x()))
         cy = int(round(curr.y()))
@@ -1893,7 +1924,7 @@ class EditorCanvas(QGraphicsView):
         x1 = min(w, int(math.ceil(cx + r)) + 1)
         y1 = min(h, int(math.ceil(cy + r)) + 1)
         if x0 >= x1 or y0 >= y1:
-            return
+            return None
         yy, xx = np.ogrid[y0:y1, x0:x1]
         disc = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
         region = work[y0:y1, x0:x1]
@@ -1907,20 +1938,25 @@ class EditorCanvas(QGraphicsView):
             acc[1] = min(acc[1], y0)
             acc[2] = max(acc[2], x1)
             acc[3] = max(acc[3], y1)
+        return [x0, y0, x1, y1]
 
     def _refresh_restore_display(self) -> None:
-        """Rebuild the image-layer pixmap from the restore working array.
+        """Full-frame rebuild of the restore display pixmap (stroke boundary).
 
-        PERF CHOICE (T-l3l-03, accepted): a full-frame numpy->QImage per move
-        event at page scale (~1500x2000, ~3MP) is acceptable and keeps the
-        code on ONE display path. This deliberately does NOT route through
-        ``set_image_from_numpy``/``_set_image_from_numpy`` per move — that
-        path mutates ``_inpainted_qimage`` / baseline-capture state (the
-        capture-when-None gate) and would poison the P-preview claim
-        mid-stroke. The MainWindow commit handler does use the bbox display
-        refresh ONCE per stroke (post-commit) so the P-preview side stays
-        coherent. The ``.copy()`` detaches the QImage from the working-array
-        buffer before storage (RESEARCH Pitfall 2).
+        quick-260907-sni: supersedes the T-l3l-03 PERF CHOICE — the
+        full-frame numpy->QImage->QPixmap conversion now runs ONCE per
+        stroke boundary (press: seed the display from ``_restore_work``;
+        finish: land the release-end state and re-sync the item's pixmap).
+        Mouse-move refreshes are bbox-only
+        (:meth:`_refresh_restore_display_bbox`), converting just the stamped
+        sub-rect — no full-frame QImage+QPixmap churn per move event. The
+        pixmap is kept in ``_restore_display_pixmap`` for the stroke's
+        lifetime and cleared at finish. This still deliberately does NOT
+        route through ``set_image_from_numpy``/``_set_image_from_numpy`` —
+        that path mutates ``_inpainted_qimage`` / baseline-capture state
+        (the capture-when-None gate) and would poison the P-preview claim
+        mid-stroke. The ``.copy()`` detaches the QImage from the
+        working-array buffer before storage (RESEARCH Pitfall 2).
         """
         arr = self._restore_work
         if arr is None:
@@ -1928,7 +1964,50 @@ class EditorCanvas(QGraphicsView):
         h, w = arr.shape[:2]
         qimg = QImage(arr.data, w, h, w * 3, QImage.Format.Format_RGB888)
         qimg = qimg.copy()
-        self.image_item.setPixmap(QPixmap.fromImage(qimg))
+        pix = QPixmap.fromImage(qimg)
+        self._restore_display_pixmap = pix
+        self.image_item.setPixmap(pix)
+
+    def _refresh_restore_display_bbox(
+        self, rect: list[int] | tuple[int, int, int, int] | None
+    ) -> None:
+        """Bbox-only display refresh during a Restore stroke (quick-260907-sni).
+
+        Converts ONLY the ``rect`` sub-rect of ``_restore_work`` to an RGB888
+        QImage and QPainter-draws it into the persistent display pixmap, then
+        re-shares the painted buffer with the item via ``setPixmap`` — the
+        re-sync is REQUIRED (not a rebuild): painting detached our pixmap
+        from the item's implicit-sharing copy, and ``setPixmap(same
+        wrapper)`` is a shallow copy with no raster re-allocation. The
+        sub-rect slice is NON-CONTIGUOUS, so ``np.ascontiguousarray``
+        materializes an owning copy first (the full-frame
+        ``QImage(arr.data, w, h, w*3, ...)`` pattern does NOT transfer to a
+        strided sub-rect). QPainter on a QPixmap is legal here — mouse
+        events run on the GUI thread (T-sni-02: clamped rect, same clamps as
+        ``_restore_stamp``). A None slot (lost stroke state) falls back to
+        the full rebuild instead of crashing.
+        """
+        if self._restore_display_pixmap is None or self._restore_work is None:
+            self._refresh_restore_display()
+            return
+        if rect is None:
+            return
+        arr = self._restore_work
+        h, w = arr.shape[:2]
+        x0 = max(0, int(rect[0]))
+        y0 = max(0, int(rect[1]))
+        x1 = min(w, int(rect[2]))
+        y1 = min(h, int(rect[3]))
+        if x0 >= x1 or y0 >= y1:
+            return
+        region = np.ascontiguousarray(arr[y0:y1, x0:x1])
+        rh, rw = region.shape[:2]
+        qimg = QImage(region.data, rw, rh, rw * 3, QImage.Format.Format_RGB888)
+        painter = QPainter(self._restore_display_pixmap)
+        painter.drawImage(QPoint(x0, y0), qimg)
+        painter.end()
+        self.image_item.setPixmap(self._restore_display_pixmap)
+        self.image_item.update()
 
     def _finish_restore_stroke(self) -> None:
         """Finalize a Restore stroke: display, bbox payload, one emission.
@@ -1944,6 +2023,7 @@ class EditorCanvas(QGraphicsView):
         self._restore_pre = None
         self._restore_work = None
         self._restore_bbox = None
+        self._restore_display_pixmap = None
         if pre is None or acc is None:
             return
         h, w = pre.shape[:2]
@@ -1969,24 +2049,32 @@ class EditorCanvas(QGraphicsView):
         # paint_mask_stroke at 4x-sub-brush spacing so fast strokes stay
         # gapless), stamping at each interpolated point plus the endpoint.
         if self.current_tool == ToolMode.RESTORE:
+            move_rect: list[int] | None = None
             last = self._last_pt
             dx = curr.x() - last.x()
             dy = curr.y() - last.y()
             dist = math.hypot(dx, dy)
             if dist <= 0.0:
-                self._restore_stamp(curr)
+                move_rect = _union_stroke_rect(move_rect, self._restore_stamp(curr))
             else:
                 step = max(1.0, self.brush_size / 4.0)
                 n_steps = max(1, int(dist / step))
                 for i in range(1, n_steps + 1):
                     t = min(1.0, (i * step) / dist)
-                    self._restore_stamp(
-                        QPointF(last.x() + dx * t, last.y() + dy * t)
+                    move_rect = _union_stroke_rect(
+                        move_rect,
+                        self._restore_stamp(
+                            QPointF(last.x() + dx * t, last.y() + dy * t)
+                        ),
                     )
                 # Endpoint stamp (RoundCap coverage at the release end).
-                self._restore_stamp(curr)
+                move_rect = _union_stroke_rect(move_rect, self._restore_stamp(curr))
             self._last_pt = curr
-            self._refresh_restore_display()
+            # One move stamps MANY interpolated discs — the per-move display
+            # refresh must cover the UNION of ALL rects stamped during THIS
+            # move (quick-260907-sni): a last-disc-only rect would leave
+            # mid-stroke display gaps between interpolated discs.
+            self._refresh_restore_display_bbox(move_rect)
             return
         eraser = self._effective_eraser()
         if self.current_tool in (ToolMode.BRUSH, ToolMode.ERASER):
