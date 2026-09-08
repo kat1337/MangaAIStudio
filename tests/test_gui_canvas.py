@@ -1113,3 +1113,132 @@ def test_restore_emits_once_per_stroke(qtbot) -> None:
     assert np.all(p["pre_patch"] == 77)  # the pre-stroke (mangled) state
     p["pre_patch"][:] = 0  # mutating the payload must not corrupt the canvas
     assert np.all(canvas.get_image_numpy()[50, 45:56] == 255)
+
+
+# ---------------------------------------------------------------------------
+# quick-260907-sni Task 2 — Restore display: one persistent pixmap per
+# stroke, bbox-only per-move refresh (F4 restore half / S3 churn). The old
+# path allocated a full-frame QImage+QPixmap PER MOUSE-MOVE (~30 MB/event).
+# ---------------------------------------------------------------------------
+
+
+def _wrap_refresh_counter(canvas: EditorCanvas) -> dict:
+    """Replace ``canvas._refresh_restore_display`` with a counting wrapper."""
+    counter = {"n": 0}
+    orig = canvas._refresh_restore_display
+
+    def _counting() -> None:
+        counter["n"] += 1
+        orig()
+
+    canvas._refresh_restore_display = _counting
+    return counter
+
+
+@pytest.mark.gui
+def test_restore_stroke_rebuilds_display_exactly_twice(qtbot) -> None:
+    """The full-frame rebuild helper runs exactly TWICE per stroke — once at
+    stroke start (seeding the display from ``_restore_work``) and once at
+    finish. Mouse-move events never call it (they refresh bbox-only)."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 10, 40, 80, 20)
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+
+    counter = _wrap_refresh_counter(canvas)
+    canvas.mousePressEvent(_press(canvas, 15, 50))
+    after_press = counter["n"]
+    canvas.mouseMoveEvent(_move(canvas, 45, 50))
+    canvas.mouseMoveEvent(_move(canvas, 85, 50))
+    during_moves = counter["n"] - after_press
+    canvas.mouseReleaseEvent(_release(canvas, 85, 50))
+    QApplication.processEvents()
+
+    assert after_press == 1, "stroke start seeds the display with one rebuild"
+    assert during_moves == 0, (
+        f"mouse moves must not full-frame rebuild; got {during_moves}"
+    )
+    assert counter["n"] == 2, (
+        f"exactly two full rebuilds per stroke (start + finish); got {counter['n']}"
+    )
+
+
+@pytest.mark.gui
+def test_restore_stroke_persistent_pixmap_built_once_and_propagates(qtbot) -> None:
+    """The persistent display pixmap object is built ONCE at stroke start and
+    reused for every move (no per-move QPixmap.fromImage rebuild), and the
+    item's displayed pixmap shares data with the painted slot after moves
+    (cacheKey equality — the bbox refresh actually reaches the display)."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 10, 40, 80, 20)
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)
+
+    canvas.mousePressEvent(_press(canvas, 15, 50))
+    slot = canvas._restore_display_pixmap
+    assert slot is not None, "stroke start seeds the persistent display pixmap"
+    assert canvas.image_item.pixmap().cacheKey() == slot.cacheKey(), (
+        "the item displays the persistent pixmap at stroke start"
+    )
+    canvas.mouseMoveEvent(_move(canvas, 85, 50))
+    assert canvas._restore_display_pixmap is slot, (
+        "one pixmap OBJECT for the whole stroke (moves never rebuild it)"
+    )
+    assert canvas.image_item.pixmap().cacheKey() == slot.cacheKey(), (
+        "the painted bbox refresh is visible to the item (re-synced, not stale)"
+    )
+    canvas.mouseReleaseEvent(_release(canvas, 85, 50))
+    QApplication.processEvents()
+    assert canvas._restore_display_pixmap is None, "finish clears the slot"
+    assert canvas.image_item.pixmap().cacheKey() is not None
+
+
+@pytest.mark.gui
+def test_restore_midstroke_move_shows_all_interpolated_discs(qtbot) -> None:
+    """One fast mouse-move stamps MANY interpolated discs (the _advance_paint
+    step loop); the per-move bbox refresh must cover the UNION of ALL discs
+    stamped during that move. Asserted MID-STROKE (between moves, BEFORE
+    release) by sampling the persistent pixmap ~8 scene px past the previous
+    endpoint — a point inside the move's early discs but outside the
+    previous endpoint's disc radius. A last-disc-only refresh leaves that
+    point showing the mutated (77) pixels mid-stroke."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 10, 40, 80, 20)  # rows [40:60], cols [10:90] = 77
+    canvas.set_tool(ToolMode.RESTORE)
+    canvas.set_brush_size(10)  # radius 5; move step 2.5 px
+
+    canvas.mousePressEvent(_press(canvas, 15, 50))
+    QApplication.processEvents()
+    canvas.mouseMoveEvent(_move(canvas, 85, 50))  # ~29 interpolated discs
+    slot = canvas._restore_display_pixmap
+    assert slot is not None
+    img = slot.toImage()
+    # (23, 50): 8 px past the press point — stamped by the move's early
+    # discs only (the press disc reaches x<=20, the last disc x>=80).
+    assert img.pixelColor(23, 50).red() == 255, (
+        "the move's early discs must already show baseline pixels mid-stroke "
+        "(union-rect refresh; last-disc-only leaves a display gap here)"
+    )
+    # Under the last disc of the same move: baseline too.
+    assert img.pixelColor(84, 50).red() == 255
+    canvas.mouseReleaseEvent(_release(canvas, 85, 50))
+    QApplication.processEvents()
+    # Committed pixels: the whole stroke path shows baseline after release.
+    arr = canvas.get_image_numpy()
+    assert np.all(arr[50, 16:86] == 255)
+
+
+@pytest.mark.gui
+def test_restore_bbox_refresh_none_slot_falls_back_to_full_rebuild(qtbot) -> None:
+    """Defensive fallback: a bbox refresh arriving with the persistent slot
+    cleared (lost stroke state) falls back to the full rebuild instead of
+    crashing on a null pixmap."""
+    canvas = _canvas_with_baseline(qtbot, 100)
+    _mutate_patch(canvas, 10, 40, 80, 20)
+    canvas._restore_work = canvas.get_image_numpy().copy()
+    canvas._restore_display_pixmap = None  # slot lost
+
+    counter = _wrap_refresh_counter(canvas)
+    canvas._refresh_restore_display_bbox((10, 40, 50, 60))  # must not raise
+    assert counter["n"] == 1, "None slot -> the full-rebuild fallback ran"
+    canvas._restore_work = None
