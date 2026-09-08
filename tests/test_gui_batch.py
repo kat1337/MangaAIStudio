@@ -1205,3 +1205,214 @@ def test_batch_clean_refresh_branch_unchanged(qtbot, tmp_path) -> None:
     assert abs(float(after.mean()) - 123) < 2
     # …and cleared the consumed mask overlay.
     assert window.canvas.has_mask_content() is False
+
+
+# ===========================================================================
+# quick-260907-nfq — batch + export seams over LAZY project pages
+#
+# Project open is lazy (pixels only for the displayed page). The batch seams
+# must keep never-visited pages' MASK state available (light tier, GUI
+# thread — T-QHH-01) without materializing any pixels, and the exports must
+# resolve dims/pixels for lazy pages from the embedded meta / source .mas.
+# ===========================================================================
+
+
+def _open_lazy_project_session(qtbot, tmp_path, monkeypatch):
+    """A saved 3-page chapter reopened LAZILY (page 0 displayed; pages 2-3
+    never visited). Returns (window, project_dir)."""
+    from tests.test_gui_project import _open_three_page_session, _open_saved_project
+
+    _chapter, seed = _open_three_page_session(qtbot, tmp_path)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_project_as_seed(qtbot, seed, monkeypatch, project_dir)
+    window = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window.image_files[1].current_image is None
+    assert window.image_files[2].current_image is None
+    return window, project_dir
+
+
+def _save_project_as_seed(qtbot, seed_window, monkeypatch, project_dir) -> None:
+    """Save the seeding session into ``project_dir`` (Save As… flow)."""
+    from tests.test_gui_project import _save_as
+
+    _save_as(seed_window, project_dir, monkeypatch, qtbot=qtbot)
+
+
+@pytest.mark.gui
+def test_batch_clean_dispatch_light_materializes_lazy_planes(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Dispatching batch clean on a project whose page 2 was never visited:
+    the worker receives page 2 with has_mask_planes() True (persisted
+    manual/erase strokes reach the batch) and current_image still None (no
+    pixels materialized at dispatch)."""
+    from tests.test_gui_project import (
+        _dirty_page_idx,
+        _open_three_page_session,
+        _open_saved_project,
+    )
+
+    from manga_ai_studio.core.mask_planes import pack_binary
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    manual_bin = np.zeros((60, 60), dtype=np.uint8)
+    manual_bin[10:30, 5:25] = 255
+    erase_bin = np.zeros((60, 60), dtype=np.uint8)
+    erase_bin[40:55, 40:55] = 255
+    window.image_files[1].mask_manual = pack_binary(manual_bin)
+    window.image_files[1].mask_erase = pack_binary(erase_bin)
+    _dirty_page_idx(window, 1, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_project_as_seed(qtbot, window, monkeypatch, project_dir)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].mask_manual is None  # still lazy
+
+    captured: dict = {}
+
+    def _fake_batch_clean(
+        pages,
+        inp_model_path,
+        inp_backend,
+        cleaned_dir,
+        masker_conf,
+        max_inpaint_size=(2048, 2048),
+        progress_callback=None,
+        abort_flag=None,
+    ):  # noqa: ARG001
+        captured["pages"] = pages
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    monkeypatch.setattr(batch_runner, "batch_clean", _fake_batch_clean)
+
+    window2.batch_clean()
+    qtbot.waitUntil(lambda: window2._op_running is False, timeout=5000)
+
+    assert "pages" in captured
+    lazy = captured["pages"][1]
+    assert lazy.has_mask_planes(), "manual/erase strokes must reach the batch"
+    assert lazy.current_image is None, "the light tier must not decode pixels"
+    assert np.array_equal(unpack_binary(lazy.mask_manual, 60, 60), manual_bin)
+    assert np.array_equal(unpack_binary(lazy.mask_erase, 60, 60), erase_bin)
+    # The other lazy page materialized its (empty) mask state too — no
+    # pixels anywhere.
+    assert captured["pages"][2].current_image is None
+
+
+@pytest.mark.gui
+def test_batch_ocr_export_uses_embedded_dims_for_lazy_pages(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Batch OCR export for a never-visited GEOMETRY-ALTERED page reports
+    img_w/img_h from embedded_size (the meta dims), not the on-disk
+    original's dims (the pre-lazy PIL fallback would report 60x60)."""
+    from manga_ai_studio.core.ocr_export import ExportPage
+
+    from tests.test_gui_project import (
+        _dirty_page_idx,
+        _open_three_page_session,
+        _open_saved_project,
+    )
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    # Page 2's embedded page state is a 60x40 crop; the on-disk original is
+    # 60x60 — the exported dims must describe the EMBEDDED (current) state.
+    cropped = np.full((40, 60, 3), 77, dtype=np.uint8)
+    window.image_files[1].current_image = cropped
+    window.image_files[1].geometry_altered = True
+    _dirty_page_idx(window, 1, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_project_as_seed(qtbot, window, monkeypatch, project_dir)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[1].current_image is None  # never visited
+
+    captured: dict = {}
+
+    def _fake_batch_export_ocr(pages, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        captured["pages"] = pages
+        return {"ok": len(pages), "failed": [], "total": len(pages)}
+
+    import manga_ai_studio.core.ocr_export as ocr_export_mod
+
+    monkeypatch.setattr(
+        "manga_ai_studio.gui.main_window.batch_export_ocr",
+        _fake_batch_export_ocr,
+        raising=False,
+    )
+    # _dispatch_batch_ocr_export imports batch_export_ocr locally from the
+    # module — patch the SOURCE module attribute.
+    monkeypatch.setattr(ocr_export_mod, "batch_export_ocr", _fake_batch_export_ocr)
+
+    window2._dispatch_batch_ocr_export()
+    qtbot.waitUntil(lambda: window2._op_running is False, timeout=5000)
+
+    assert "pages" in captured
+    page2 = captured["pages"][1]
+    assert isinstance(page2, ExportPage)
+    assert (page2.img_w, page2.img_h) == (60, 40)  # embedded meta dims
+    assert page2.geometry_altered is True
+
+
+@pytest.mark.gui
+def test_batch_typeset_export_gets_embedded_pixels_for_lazy_pages(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Batch typeset export for a never-visited page receives image pixels
+    decoded from the source .mas (equal to the embedded image) — not None
+    and not the pristine on-disk original."""
+    from PySide6.QtWidgets import QDialog
+
+    from manga_ai_studio.gui import main_window as mw_mod
+
+    from tests.test_gui_project import (
+        _dirty_page_idx,
+        _open_three_page_session,
+        _open_saved_project,
+    )
+
+    chapter, window = _open_three_page_session(qtbot, tmp_path)
+    # Page 3's embedded page state differs from its pristine original.
+    embedded = np.zeros((60, 60, 3), dtype=np.uint8)
+    embedded[5:40, 5:40] = 200
+    window.image_files[2].current_image = embedded
+    _dirty_page_idx(window, 2, add_box=False)
+    project_dir = tmp_path / "chapter.mas-project"
+    _save_project_as_seed(qtbot, window, monkeypatch, project_dir)
+
+    window2 = _open_saved_project(qtbot, tmp_path, monkeypatch, project_dir)
+    assert window2.image_files[2].current_image is None  # never visited
+
+    class _FakePageDialog:
+        def __init__(self, parent, names):  # noqa: ARG002
+            self._names = names
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_indices(self):
+            return list(range(len(self._names)))
+
+    monkeypatch.setattr(mw_mod, "PageSelectionDialog", _FakePageDialog)
+
+    captured: dict = {}
+
+    def _fake_batch_export_typeset(items, progress_callback=None, abort_flag=None):  # noqa: ARG001
+        captured["items"] = items
+        return {"ok": len(items), "failed": [], "total": len(items)}
+
+    import manga_ai_studio.core.ocr_export as ocr_export_mod
+
+    monkeypatch.setattr(
+        ocr_export_mod, "batch_export_typeset", _fake_batch_export_typeset
+    )
+
+    window2._dispatch_batch_typeset_export()
+    qtbot.waitUntil(lambda: window2._op_running is False, timeout=5000)
+
+    assert "items" in captured
+    item3 = captured["items"][2]
+    assert item3.image is not None, "the lazy page's pixels must resolve"
+    assert np.array_equal(item3.image, embedded), (
+        "typeset must receive the embedded pixels, not the pristine original"
+    )
