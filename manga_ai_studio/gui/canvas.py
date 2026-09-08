@@ -67,8 +67,10 @@ from manga_ai_studio.core.mask_editor import (
     MASK_PAINT_COLOR,
     ToolMode,
     clamp_brush_size,
+    mask_qimage_to_packed,
     mask_to_numpy_binary,
     numpy_binary_to_mask_qimage,
+    packed_to_mask_qimage,
     paint_mask_lasso,
     paint_mask_rect,
     paint_mask_stroke,
@@ -691,20 +693,24 @@ class EditorCanvas(QGraphicsView):
     def planes_snapshot(self) -> MaskPlanesSnapshot:
         """Return a detached snapshot of the live three planes (plan 08-02).
 
-        The manual/erase QImages are ``.copy()``-detached and the auto plane
-        is ``pack_binary``-packed (~H*W/8 bytes). Consumed by the MainWindow
-        mask push hook (the MASK stack value type) and the D-11 persistence
-        seam. Raises RuntimeError when no page is loaded (callers guard on
-        page presence — ``_current_undo_state`` / ``_on_mask_modified``).
+        quick-260907-sni: the manual/erase planes are stored as 1-bit packed
+        uint8 arrays (~H*W/8 bytes each vs 4HW ARGB32 — the ~32x smaller
+        history entries; lossless because both planes are binary:
+        alpha>0 == painted) plus the page ``dims``; the auto plane keeps the
+        ``pack_binary`` path (~H*W/8 bytes). Consumed by the MainWindow mask
+        push hook (the MASK stack value type) and the D-11 persistence seam.
+        Raises RuntimeError when no page is loaded (callers guard on page
+        presence — ``_current_undo_state`` / ``_on_mask_modified``).
         """
         if self._mask_manual is None or self._mask_manual.isNull():
             raise RuntimeError("planes_snapshot requires a loaded page")
         return MaskPlanesSnapshot(
-            manual=self._mask_manual.copy(),
-            erase=self._mask_erase.copy(),
+            manual_packed=mask_qimage_to_packed(self._mask_manual),
+            erase_packed=mask_qimage_to_packed(self._mask_erase),
             auto_packed=(
                 pack_binary(self._auto_bin) if self._auto_bin is not None else None
             ),
+            dims=(self._mask_manual.height(), self._mask_manual.width()),
         )
 
     def set_planes(
@@ -864,28 +870,44 @@ class EditorCanvas(QGraphicsView):
     def apply_undo_mask(self, snapshot: "MaskPlanesSnapshot") -> None:
         """Restore a plane snapshot from the history (plan 06/08-02, surface 8).
 
-        REDEFINED in Phase 8 (plan 08-02 Task 2): the MASK stack values are
-        now ``MaskPlanesSnapshot`` (manual/erase QImages + the packed auto
-        binary). Restores all three planes via :meth:`set_planes` (which
+        quick-260907-sni: the MASK stack values are ``MaskPlanesSnapshot``
+        with the manual/erase planes as 1-bit packed arrays + ``dims``. The
+        planes are rebuilt via :func:`packed_to_mask_qimage` (whose
+        ``unpack_binary`` ceil(h*w/8) length check is the in-depth backstop,
+        T-08-02) and restored through :meth:`set_planes` (which
         ``.copy()``-detaches every value from the history's internal copy so
-        subsequent strokes cannot mutate the entry) and recomposes — the
+        subsequent strokes cannot mutate the entry) and recomposed — the
         displayed composite becomes exactly the snapshot's
         ``(manual | auto) & ~erase``. NO ``mask_modified`` emission — undo
         must NOT re-push onto the stack (``test_undo_does_not_repush`` /
         ``test_undo_does_not_repush_planes`` are the regression guards;
         UI-SPEC surface 8 prohibition).
+
+        Lazy-open invariant (quick-260907-nfq): history entries only exist
+        for visited/materialized pages — a stroke can only fire on the
+        CURRENT page — so an undo restore never materializes another page and
+        ``_materialize_page_state`` + the D-11 outgoing flush stay untouched.
+
+        Hard-reject contract: a bare QImage (or ANY non-MaskPlanesSnapshot
+        value) raises TypeError — the MASK stack value type is the packed
+        snapshot only.
         """
         if not isinstance(snapshot, MaskPlanesSnapshot):
             raise TypeError(
                 f"apply_undo_mask expects a MaskPlanesSnapshot (Phase 8 mask "
                 f"stack value), got {type(snapshot).__name__}"
             )
+        h, w = snapshot.dims
         auto_bin = (
-            unpack_binary(snapshot.auto_packed, snapshot.manual.height(), snapshot.manual.width())
+            unpack_binary(snapshot.auto_packed, h, w)
             if snapshot.auto_packed is not None
             else None
         )
-        self.set_planes(snapshot.manual, snapshot.erase, auto_bin)
+        self.set_planes(
+            packed_to_mask_qimage(snapshot.manual_packed, snapshot.dims),
+            packed_to_mask_qimage(snapshot.erase_packed, snapshot.dims),
+            auto_bin,
+        )
 
     def apply_undo_image(self, x: int, y: int, patch_np: np.ndarray) -> None:
         """Composite a numpy patch into the displayed image (plan 06 undo).

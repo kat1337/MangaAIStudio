@@ -16,28 +16,33 @@ push hook, and the HistoryManager MASK stack (values are
 ``.copy()``-duck-typed — the history mechanics are unchanged; plan 08-02
 Task 2).
 
-Qt-free at runtime (RESEARCH Pitfall 13-12): the QImage annotations resolve
-lazily under ``from __future__ import annotations`` and the import is guarded
-by ``TYPE_CHECKING``, so the worker/batch path (numpy-only) can import the
-pack/unpack helpers without pulling Qt.
+quick-260907-sni (F3/S1 history slimming): the snapshot stores the manual and
+erase planes as 1-bit PACKED arrays (~H*W/8 bytes each) + the page ``dims``,
+not as page-sized ARGB32 QImages (4HW each). The representation is LOSSLESS
+for these planes because both are binary — alpha>0 == painted, and
+``mask_editor.mask_to_numpy_binary`` already thresholds them — so one history
+entry shrinks ~32x (~2 x 4HW + HW/8 -> 3 x HW/8 bytes; at 35 MP ~280 MB ->
+~13 MB per entry, the difference between a ~1 GB and a tens-of-MB per-page
+history).
+
+Qt-free at runtime (RESEARCH Pitfall 13-12): every field is a numpy array or
+a tuple, so the worker/batch path (numpy-only) can import the pack/unpack
+helpers without pulling Qt.
 
 Security:
     - ``unpack_binary`` (T-08-02, tampering): the packed blob is untrusted
       once it crosses a persistence boundary (``.mas`` load, plan 08-04). The
       blob length is validated against the caller-declared ``(h, w)`` — a
       crafted short (or padded) blob raises ``ValueError`` instead of being
-      silently mis-shaped into a wrong-dimension mask.
+      silently mis-shaped into a wrong-dimension mask. The snapshot restore
+      path shares this guard (``mask_editor.packed_to_mask_qimage``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
-
-if TYPE_CHECKING:  # Qt-free at runtime (worker path imports this module)
-    from PySide6.QtGui import QImage
 
 
 def pack_binary(arr: np.ndarray) -> np.ndarray:
@@ -79,28 +84,35 @@ def unpack_binary(packed: np.ndarray, h: int, w: int) -> np.ndarray:
 class MaskPlanesSnapshot:
     """An immutable-by-convention snapshot of the three mask planes.
 
-    Fields:
-        manual: the manual-stroke plane QImage (page-sized ARGB32-family;
-            alpha > 0 == painted).
-        erase: the erase-ledger plane QImage (RED marks — erased pixels,
-            never CompositionMode_Clear; the ledger SUBTRACTS on recompose).
+    Fields (quick-260907-sni packed representation):
+        manual_packed: the manual-stroke plane as a 1-bit packed 1-D uint8
+            array of ``ceil(h*w/8)`` bytes (alpha>0 == painted — lossless
+            for the binary plane; ~HW/8 bytes vs 4HW ARGB32).
+        erase_packed: the erase-ledger plane, packed the same way (RED marks
+            — erased pixels, never CompositionMode_Clear; the ledger
+            SUBTRACTS on recompose).
         auto_packed: the derived auto binary, ``pack_binary``-packed (1-D
             uint8), or ``None`` when the page has no auto content.
+        dims: the ``(h, w)`` page dims the packed blobs were built from —
+            the restore-side key for :func:`unpack_binary` (whose
+            ceil(h*w/8) length check is the in-depth backstop, T-08-02).
 
     ``copy()`` (Pitfall 2 discipline — the HistoryManager MASK stack and the
     MainWindow push hook rely on it, duck-typed like the Phase 1 QImage
-    values) returns a new snapshot whose QImages and packed array are
-    detached from the originals.
+    values) returns a new snapshot whose packed arrays are detached from the
+    originals.
     """
 
-    manual: "QImage"
-    erase: "QImage"
+    manual_packed: np.ndarray
+    erase_packed: np.ndarray
     auto_packed: np.ndarray | None = None
+    dims: tuple[int, int] = (0, 0)
 
     def copy(self) -> "MaskPlanesSnapshot":
-        """Return a fully detached copy of all three planes."""
+        """Return a fully detached copy of all three packed planes."""
         return MaskPlanesSnapshot(
-            manual=self.manual.copy(),
-            erase=self.erase.copy(),
+            manual_packed=self.manual_packed.copy(),
+            erase_packed=self.erase_packed.copy(),
             auto_packed=self.auto_packed.copy() if self.auto_packed is not None else None,
+            dims=self.dims,
         )

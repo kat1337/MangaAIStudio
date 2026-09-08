@@ -40,6 +40,8 @@ from PySide6.QtGui import (
     QPen,
 )
 
+from manga_ai_studio.core.mask_planes import pack_binary, unpack_binary
+
 # Mask paint content color — the rgba(255, 0, 0, 0.63) overlay (UI-SPEC §Color
 # mask overlay token; 160/255 ~= 0.63). Fixed/semantic in Phase 1.
 MASK_PAINT_COLOR = QColor(255, 0, 0, 160)
@@ -222,3 +224,32 @@ def numpy_binary_to_mask_qimage(arr: np.ndarray) -> QImage:
     rgba[arr > 0] = [255, 0, 0, 160]
     qimg = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
     return qimg.copy()
+
+
+def mask_qimage_to_packed(qimg: QImage) -> np.ndarray:
+    """Pack a mask plane QImage into a 1-bit packed array (quick-260907-sni).
+
+    The Qt-side boundary helper between the canvas's ARGB32-family plane
+    QImages and the packed ``MaskPlanesSnapshot`` history representation:
+    alpha>0 == painted (``mask_to_numpy_binary`` already thresholds both
+    planes to a true 0/255 binary), so packing is LOSSLESS for the
+    manual/erase planes. Returns a 1-D uint8 array of ``ceil(H*W/8)`` bytes
+    (~HW/8 vs 4HW for the ARGB32 QImage — the ~32x smaller history entries).
+    """
+    return pack_binary(mask_to_numpy_binary(qimg))
+
+
+def packed_to_mask_qimage(packed: np.ndarray, dims: tuple[int, int]) -> QImage:
+    """Rebuild a mask plane QImage from a 1-bit packed array (quick-260907-sni).
+
+    Inverse of :func:`mask_qimage_to_packed` (the snapshot-restore side of
+    ``apply_undo_mask``). The rebuild lands as the ``MASK_PAINT_COLOR``
+    rgba(255,0,0,160) plane in RGBA8888 format — NOT the original ARGB32 —
+    which is acceptable because every plane consumer thresholds alpha
+    (``mask_to_numpy_binary``) and QPainter paints fine on RGBA8888.
+    ``unpack_binary``'s ceil(h*w/8) length check stays the in-depth backstop
+    (T-08-02): a snapshot blob that does not fit ``dims`` raises ValueError
+    instead of silently mis-shaping.
+    """
+    h, w = int(dims[0]), int(dims[1])
+    return numpy_binary_to_mask_qimage(unpack_binary(packed, h, w))

@@ -4443,27 +4443,29 @@ class MainWindow(QMainWindow):
         self._update_undo_redo_actions()
 
     def _clean_plane_seed(self) -> MaskPlanesSnapshot:
-        """The first-stroke before-state: transparent manual/erase + CURRENT auto.
+        """The first-stroke before-state: zeros-packed manual/erase + CURRENT auto.
 
         The plan 03-08 clean-baseline rule generalized to planes (08-02): a
         fresh page's first stroke pushes against "no manual work yet, whatever
         the detection left" — undoing it removes only the stroke's manual
-        contribution and leaves the auto plane untouched.
+        contribution and leaves the auto plane untouched. quick-260907-sni:
+        the seed is zeros-filled packed arrays of ceil(h*w/8) bytes + dims —
+        no QImage allocation at all (the packed representation is lossless
+        for the transparent baseline).
         """
         current = self.canvas.get_mask()
         assert current is not None  # guarded by has_mask() at the call site
-        manual = QImage(current.size(), QImage.Format.Format_ARGB32)
-        manual.fill(Qt.GlobalColor.transparent)
-        erase = QImage(current.size(), QImage.Format.Format_ARGB32)
-        erase.fill(Qt.GlobalColor.transparent)
+        h, w = current.height(), current.width()
+        n_packed = (h * w + 7) // 8
         return MaskPlanesSnapshot(
-            manual=manual,
-            erase=erase,
+            manual_packed=np.zeros(n_packed, dtype=np.uint8),
+            erase_packed=np.zeros(n_packed, dtype=np.uint8),
             auto_packed=(
                 pack_binary(self.canvas._auto_bin)
                 if self.canvas._auto_bin is not None
                 else None
             ),
+            dims=(h, w),
         )
 
     def _on_mask_modified(self) -> None:

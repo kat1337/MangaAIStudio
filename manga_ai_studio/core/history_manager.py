@@ -14,9 +14,10 @@ the 3rd BOXES stack; STATE.md "two logical stacks not four" extended to "three
 not seven" — BOXES is ONE stack, op-type lives inside each record's metadata):
 - MASK stack: one snapshot per completed stroke (the ``canvas.mask_modified``
   signal from plan 04 is the push hook). Phase 8 (plan 08-02) WIDENS the value
-  type from a flat mask ``QImage`` to ``MaskPlanesSnapshot``
-  (``core/mask_planes.py`` — manual/erase QImages + the packbits-packed auto
-  binary). The stack mechanics are UNCHANGED: values are duck-typed
+  type from a flat mask ``QImage`` to ``MaskPlanesSnapshot``; quick-260907-sni
+  re-packs that snapshot (``core/mask_planes.py`` — manual/erase as 1-bit
+  packed arrays + dims + the packbits-packed auto binary). The stack mechanics
+  are UNCHANGED: values are duck-typed
   ``.copy()`` objects (the snapshot's ``copy()`` detaches all three planes),
   so ``push_mask_state`` / ``pop_mask_undo`` / ``pop_mask_redo`` and the
   unified timeline operate exactly as in Phase 3 — the module keeps handling
@@ -84,7 +85,8 @@ class HistoryManager:
     Internal layout (6 lists representing 3 logical stacks per UI-SPEC surface
     8 + Phase 3 D-10/D-11; BOXES is ONE logical stack — op-type lives inside
     each record's metadata, not as separate per-op-type lists):
-    - ``_mask_undo`` / ``_mask_redo``: ``(stamp, QImage)`` snapshots of the mask.
+    - ``_mask_undo`` / ``_mask_redo``: ``(stamp, MaskPlanesSnapshot)`` plane
+      snapshots (packed manual/erase + auto; quick-260907-sni).
     - ``_image_undo`` / ``_image_redo``: ``(stamp, (x, y, patch_np))`` tuples.
     - ``_boxes_undo`` / ``_boxes_redo``: ``(stamp, snapshot_list)`` tuples.
 
@@ -108,9 +110,12 @@ class HistoryManager:
         # timestamps across all three stores.
         self._seq: int = 0
         # Phase 1's MASK + IMAGE stacks (Phase 3 widens each entry to
-        # (stamp, value) so the unified pop can order across stores).
-        self._mask_undo: list[tuple[int, QImage]] = []
-        self._mask_redo: list[tuple[int, QImage]] = []
+        # (stamp, value) so the unified pop can order across stores). MASK
+        # values are duck-typed .copy() objects — MaskPlanesSnapshot since
+        # plan 08-02 (packed since quick-260907-sni); the module never
+        # inspects plane contents.
+        self._mask_undo: list[tuple[int, object]] = []
+        self._mask_redo: list[tuple[int, object]] = []
         self._image_undo: list[tuple[int, ImageAction]] = []
         self._image_redo: list[tuple[int, ImageAction]] = []
         # Phase 3 D-10 — the third BOXES stack (ONE logical stack).
@@ -129,32 +134,36 @@ class HistoryManager:
         return self._seq
 
     # ---------------------------------------------------------- mask stack
-    def push_mask_state(self, mask_qimage: QImage) -> None:
+    def push_mask_state(self, mask_snapshot: object) -> None:
         """Push a mask snapshot onto the mask undo stack.
 
-        The ``.copy()`` detaches from the live canvas mask (RESEARCH Pitfall 2;
-        ``test_mask_snapshot_is_copied`` is the regression guard). A new edit
-        invalidates the redo branch (``test_mask_push_clears_redo``). The
-        oldest entry is dropped on overflow (T-01-16). Phase 3 widens the entry
-        shape to ``(stamp, QImage)`` (Pitfall 4) so the unified pop can order
-        across stores.
+        The value is duck-typed ``.copy()``-able (a ``MaskPlanesSnapshot``
+        since plan 08-02 — packed manual/erase + auto since
+        quick-260907-sni). The ``.copy()`` detaches from the live canvas
+        planes (RESEARCH Pitfall 2; ``test_mask_snapshot_is_copied`` is the
+        regression guard). A new edit invalidates the redo branch
+        (``test_mask_push_clears_redo``). The oldest entry is dropped on
+        overflow (T-01-16). Phase 3 widens the entry shape to
+        ``(stamp, value)`` (Pitfall 4) so the unified pop can order across
+        stores.
         """
-        self._mask_undo.append((self._stamp(), mask_qimage.copy()))
+        self._mask_undo.append((self._stamp(), mask_snapshot.copy()))
         self._mask_redo.clear()
         if len(self._mask_undo) > self.limit:
             self._mask_undo.pop(0)
 
     def pop_mask_undo(
-        self, current_mask: QImage, stash_stamp: int | None = None
-    ) -> QImage | None:
+        self, current_mask: object, stash_stamp: int | None = None
+    ) -> object | None:
         """Pop the previous mask snapshot, stashing the current for redo.
 
         Returns ``None`` when the undo stack is empty. The returned snapshot is
         ``.copy()``-detached from the internal list so subsequent pushes/pops
         cannot mutate it (``test_mask_pop_returns_copy`` is the regression
-        guard). The current mask is captured (``.copy()``) into the redo stack
-        so a redo reverses the undo. Phase 3: the ``(stamp, value)`` unwrap is
-        internal — callers still receive a bare ``QImage``.
+        guard). The current mask state is captured (``.copy()``) into the redo
+        stack so a redo reverses the undo. Phase 3: the ``(stamp, value)``
+        unwrap is internal — callers still receive the duck-typed snapshot
+        value (a packed ``MaskPlanesSnapshot`` since quick-260907-sni).
 
         ``stash_stamp`` (plan 05-04): optional shared stamp for the redo stash.
         ``None`` (the default) keeps the Phase 3 behavior — the stash gets a
@@ -183,12 +192,12 @@ class HistoryManager:
         return previous.copy()
 
     def pop_mask_redo(
-        self, current_mask: QImage, stash_stamp: int | None = None
-    ) -> QImage | None:
+        self, current_mask: object, stash_stamp: int | None = None
+    ) -> object | None:
         """Pop the next mask snapshot (reverses :meth:`pop_mask_undo`).
 
-        The current mask is captured (``.copy()``) into the undo stack so a
-        subsequent undo reverses the redo. The returned snapshot is
+        The current mask state is captured (``.copy()``) into the undo stack
+        so a subsequent undo reverses the redo. The returned snapshot is
         ``.copy()``-detached from the internal list. Phase 3: the
         ``(stamp, value)`` unwrap is internal.
 
@@ -409,7 +418,7 @@ class HistoryManager:
     def push_geometry_state(
         self,
         image_patch: np.ndarray,
-        mask_qimage: QImage | None = None,
+        mask_qimage: object | None = None,
         boxes: list | None = None,
     ) -> None:
         """Push ONE image op across IMAGE + MASK + BOXES with a SINGLE stamp.
@@ -427,7 +436,9 @@ class HistoryManager:
           T-05-08).
         - ``mask_qimage`` / ``boxes`` are OPTIONAL: ``levels`` is
           geometry-free (D-15) and pushes image-only; a geometry op on a
-          maskless page pushes image+boxes.
+          maskless page pushes image+boxes. ``mask_qimage`` is duck-typed
+          ``.copy()``-able — the packed ``MaskPlanesSnapshot`` on the real
+          push path (main_window passes ``canvas.planes_snapshot()``).
         - Push-side detachment (Pitfall 2/3, T-05-11): the image patch is
           ``.copy()``-detached, the mask is ``.copy()``-detached, the boxes
           snapshot is materialized fresh via ``_materialize_snapshot``.
@@ -457,7 +468,7 @@ class HistoryManager:
     # -------------------------------------------------- unified timeline
     def undo(
         self,
-        current_mask: QImage,
+        current_mask: object,
         current_img: np.ndarray,
         current_boxes: list,
     ):
@@ -514,7 +525,7 @@ class HistoryManager:
 
     def redo(
         self,
-        current_mask: QImage,
+        current_mask: object,
         current_img: np.ndarray,
         current_boxes: list,
     ):
