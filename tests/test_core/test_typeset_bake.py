@@ -309,3 +309,41 @@ def test_placement_writes_sidecar_through_writer(tmp_path) -> None:
     assert dest.is_file(), "the cleaned/ sidecar must exist after the write"
     with PILImage.open(dest) as im:
         assert im.size == (12, 12)
+
+
+# ---------------------------------------------------------------------------
+# quick-260909-nj9 — the bake composites the style's ALPHA (export parity)
+# ---------------------------------------------------------------------------
+
+
+def _bake_brighest_grey(color: str) -> int:
+    """Bake a black page with one box whose fill is ``color`` (50%-alpha
+    white vs opaque white) and return the BRIGHTEST pixel value inside the
+    box region — the composited ink luminance probe."""
+    from dataclasses import replace
+
+    page = np.zeros((24, 24, 3), dtype=np.uint8)  # a black page
+    style = replace(_PIXEL_STYLE, color=color)
+    baked = bake_typeset_page(page, [_box_with_text(recognized="Hi", style=style)])
+    region = baked[2:22, 2:62].reshape(-1, 3)
+    return int(region.max())
+
+
+@pytest.mark.unit
+def test_bake_composites_alpha_fill_wysiwyg(qapp) -> None:
+    """WYSIWYG export parity (quick-260909-nj9): ``bake_typeset_page``
+    composites the style's alpha — 50%-opacity white over a BLACK page reads
+    ~50% grey ink (~128; range-based for antialiasing/premultiplied
+    rounding), while the identical style with the opaque spelling reads
+    ~255. The bake shares text_renderer's ONE fill path with the canvas
+    overlay (D-01), so this pins the export surface only."""
+    half = _bake_brighest_grey("#80ffffff")
+    assert 105 <= half <= 150, (
+        "50%-alpha white over a black page must composite to ~50% grey "
+        f"ink (105..150), got {half} — the bake dropped the fill alpha"
+    )
+    full = _bake_brighest_grey("#ffffff")
+    assert full >= 240, (
+        f"the opaque spelling must bake at full ink (~255), got {full}"
+    )
+    assert half < full, "the alpha spelling must bake DIMMER than the opaque one"

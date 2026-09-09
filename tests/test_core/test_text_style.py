@@ -427,3 +427,37 @@ def test_effect_geom_boundary_value_round_trips_unclamped() -> None:
     r = TextStyle.from_dict(s.to_dict())
     assert r.glow["radius_px"] == 256.0
     assert r == s
+
+
+# ---------------------------------------------------------------------------
+# quick-260909-nj9 — the color field carries ALPHA (#AARRGGBB)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_alpha_color_round_trips_verbatim() -> None:
+    """quick-260909-nj9: an alpha-carrying ``#AARRGGBB`` color survives the
+    D-07 serialization spelling VERBATIM — no clamping, no spelling
+    normalization, no alpha stripping (``_coerce_str`` passes any string
+    through untouched; ``to_dict`` writes the field back as-is)."""
+    s = TextStyle(color="#80ff0000")
+    assert s.to_dict()["color"] == "#80ff0000"
+    r = TextStyle.from_dict({"color": "#80ff0000"})
+    assert r.color == "#80ff0000"
+    # The full round-trip preserves the 9-char spelling exactly.
+    assert TextStyle.from_dict(s.to_dict()).color == "#80ff0000"
+
+
+@pytest.mark.unit
+def test_legacy_opaque_color_spelling_preserved_as_is() -> None:
+    """A legacy 7-char ``#RRGGBB`` color loads as-is — the model NEVER
+    rewrites the spelling to 9-char (opacity comes from QColor's default
+    alpha 255 at parse time, not from a load-time rewrite)."""
+    assert TextStyle.from_dict({"color": "#ff0000"}).color == "#ff0000"
+
+
+@pytest.mark.unit
+def test_default_color_spelling_unchanged() -> None:
+    """The default color spelling is untouched by the alpha work — existing
+    projects see zero churn (no 7->9-char rewrite of the default)."""
+    assert TextStyle().to_dict()["color"] == "#000000"

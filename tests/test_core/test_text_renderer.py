@@ -32,7 +32,15 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QTextDocument  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    QTextCursor,
+    QTextDocument,
+)
 
 pytest.importorskip("pytestqt")  # qapp fixture
 
@@ -48,6 +56,7 @@ from manga_ai_studio.gui.text_renderer import (  # noqa: E402
     _OVERLAY_FIT_STEP,
     _build_document,
     _style_font,
+    _valid_color,
     _vertical_placements,
     bake_typeset_page,
     layout,
@@ -326,3 +335,37 @@ def test_auto_fit_shrink_endpoint_matches_legacy_budget(qapp) -> None:
     assert expected_size >= _OVERLAY_FIT_FLOOR_PX
     assert result.used_font_size_px == float(max(1, int(round(expected_size))))
     assert result.overflow is True
+
+
+# ---------------------------------------------------------------------------
+# quick-260909-nj9 — alpha fill reaches the ONE shared render path (D-01)
+# ---------------------------------------------------------------------------
+
+
+def test_build_document_fill_brush_carries_alpha_horizontal(qapp) -> None:
+    """The horizontal fill path parses ``#AARRGGBB`` — the merged char
+    format's foreground brush color carries alpha 128 for ``#80ff0000``
+    (``_build_document`` -> ``_valid_color(style.color, ...)`` ->
+    ``fmt.setForeground(QBrush(fill))``). The document IS the fill pass,
+    so alpha rides it unchanged (quick-260909-nj9). Read back through a
+    cursor at the text start — ``QTextBlock.charFormat()`` is the BLOCK
+    format, which never reflects the merged character format."""
+    style = TextStyle(auto_fit=False, font_size_px=12.0, color="#80ff0000")
+    doc = _build_document("X", style, 12.0, 100.0)
+    cur = QTextCursor(doc)
+    cur.movePosition(QTextCursor.MoveOperation.Start)
+    brush_color = cur.charFormat().foreground().color()
+    assert brush_color.alpha() == 128
+    assert (brush_color.red(), brush_color.green(), brush_color.blue()) == (255, 0, 0)
+
+
+def test_valid_color_parses_argb_for_vertical_fill(qapp) -> None:
+    """The vertical branch's exact fill input —
+    ``_valid_color(style.color, "#000000")`` at the ``_paint_fill_pass``
+    vertical call site — carries alpha 128 for ``#80ff0000``. QColor natively
+    parses Qt's HexArgb spelling; the legacy opaque default is untouched."""
+    assert _valid_color("#80ff0000", "#000000").alpha() == 128
+    opaque = _valid_color("#ff0000", "#000000")  # 7-char legacy spelling
+    assert opaque.alpha() == 255
+    fallback = _valid_color("not-a-color", "#000000")
+    assert fallback.alpha() == 255 and fallback.name() == "#000000"

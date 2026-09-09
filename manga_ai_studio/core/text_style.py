@@ -15,6 +15,12 @@ center/middle alignment, horizontal.
 ``font_size_px=None`` means Auto (D-15) — the 04-09 fit-in-box machinery
 governs.
 
+Since quick-260909-nj9 the glyph fill ``color`` carries ALPHA: both the
+legacy ``#RRGGBB`` (opaque) and Qt's ``#AARRGGBB`` HexArgb spellings are
+accepted and stored verbatim (alpha ``ff`` = opaque, the legacy default —
+QColor applies it automatically at parse time, so old projects load and
+render byte-compatibly with zero spelling rewrite).
+
 Serialization (``to_dict`` / ``from_dict``) is the SINGLE spelling shared by
 the persistence writers (D-07 — one dict builder under test). ``from_dict``
 is the V5 input boundary: every numeric is type-checked and clamped
@@ -152,8 +158,10 @@ class TextStyle:
             ``auto_fit`` governs which path the renderer takes.
         auto_fit: ``True`` (default) runs the 04-09 bounded fit-in-box loop;
             ``False`` renders at exactly ``font_size_px`` (may overflow).
-        color: The opaque glyph fill (D-01 — user-chosen fills MAY be
-            saturated; the documented Phase 7 exception).
+        color: The glyph fill (D-01 — user-chosen fills MAY be saturated;
+            the documented Phase 7 exception). ``#RRGGBB`` or ``#AARRGGBB``
+            (Qt HexArgb spelling; alpha ``ff`` = opaque, the legacy default)
+            — quick-260909-nj9.
         align_h: "left" | "center" | "right".
         align_v: "top" | "middle" | "bottom".
         vertical: Render tategaki (D-11/D-13). The 07-01 horizontal renderer
@@ -178,6 +186,10 @@ class TextStyle:
     italic: bool = False
     font_size_px: float | None = None  # None = Auto (D-15)
     auto_fit: bool = True
+    # Glyph fill: "#RRGGBB" or "#AARRGGBB" (Qt HexArgb; alpha ff = opaque,
+    # the legacy default — quick-260909-nj9). Stored verbatim — no clamp,
+    # no spelling rewrite; invalid hex falls back at RENDER time
+    # (_valid_color), never at load (V5 tolerance).
     color: str = DEFAULT_COLOR
     align_h: str = "center"
     align_v: str = "middle"
