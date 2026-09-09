@@ -13,6 +13,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from manga_ai_studio import diagnostics
 from manga_ai_studio.app import create_app
 from manga_ai_studio.config.profile_manager import ProfileManager
 from manga_ai_studio.gui.main_window import MainWindow
@@ -20,7 +21,17 @@ from manga_ai_studio.gui.main_window import MainWindow
 
 def main() -> None:
     """Launch the Manga AI Studio application."""
+    # quick-260909-ke1: diagnostics FIRST, before anything else can fail — the
+    # rotating file sink, the excepthooks and the faulthandler watchdog make a
+    # crash or freeze self-reporting (mas.log / mas-hang.log), which is the
+    # whole point: the app previously had no logs at all.
+    log_path = diagnostics.install()
+
     app = create_app(sys.argv)
+    diagnostics.install_qt_message_handler()
+    diagnostics.heartbeat(app)
+    # The user must always be able to find and paste the log path.
+    print(f"[manga-ai-studio] log file: {log_path}", file=sys.stderr)
 
     config_dir = Path.home() / ".manga_ai_studio"
     config_dir.mkdir(parents=True, exist_ok=True)

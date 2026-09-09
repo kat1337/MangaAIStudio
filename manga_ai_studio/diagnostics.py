@@ -189,15 +189,108 @@ def cancel_hang_watchdog() -> None:
     faulthandler.cancel_dump_traceback_later()
 
 
+# ----------------------------------------------------------------- Qt layer
+# (lazily imported — module scope stays PySide6-free)
+_prev_qt_handler = None
+
+
+def install_qt_message_handler() -> None:
+    """Route Qt's own messages (qWarning/qCritical, ...) into loguru.
+
+    Maps QtMsgType -> loguru levels (QtDebugMsg->DEBUG, QtInfoMsg->INFO,
+    QtWarningMsg->WARNING, QtCriticalMsg->ERROR, QtFatalMsg->CRITICAL) and
+    includes the message context (file/line/function) when present. The
+    previous handler is remembered so :func:`reset` can restore it; a fatal
+    message is logged at CRITICAL then handed to the previous handler (the
+    default one aborts, preserving Qt's fatal semantics).
+    """
+    global _prev_qt_handler
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    level_map = {
+        QtMsgType.QtDebugMsg: "DEBUG",
+        QtMsgType.QtInfoMsg: "INFO",
+        QtMsgType.QtWarningMsg: "WARNING",
+        QtMsgType.QtCriticalMsg: "ERROR",
+        QtMsgType.QtFatalMsg: "CRITICAL",
+    }
+
+    def _on_qt_message(mode, context, message) -> None:  # noqa: ANN001 (Qt API)
+        level = level_map.get(mode, "WARNING")
+        where = ""
+        if context is not None and getattr(context, "file", ""):
+            where = f" [{context.file}:{context.line} {context.function}]"
+        log = getattr(logger, level.lower())
+        log(f"[Qt] {message}{where}")
+        if mode == QtMsgType.QtFatalMsg and _prev_qt_handler is not None:
+            _prev_qt_handler(mode, context, message)
+
+    _prev_qt_handler = qInstallMessageHandler(_on_qt_message)
+
+
+def heartbeat(app, interval_s: float = 15.0) -> None:  # noqa: ANN001 (QApplication)
+    """Arm the event-loop heartbeat that keeps the hang watchdog disarmed.
+
+    A QTimer PARENTED TO THE QApplication (garbage-safe) ticks every
+    ``interval_s``; each tick cancels the outstanding ``dump_traceback_later``
+    deadline and re-arms it — a live loop resets the deadline forever, a wedged
+    loop stops ticking and the all-thread stack dump fires ~``HANG_TIMEOUT_S``
+    in (the watchdog thread needs no cooperation from the frozen main thread).
+    Expected long operations run on the Worker thread, so the main loop keeps
+    ticking through them.
+    """
+    from PySide6.QtCore import QTimer
+
+    global _heartbeat_timer
+    stop_heartbeat()
+    if _hang_fh is None:
+        return  # install() never ran — nothing to keep alive
+    timer = QTimer(app)
+    timer.setInterval(max(1, int(interval_s * 1000)))
+    timer.timeout.connect(_heartbeat_tick)
+    timer.start()
+    _heartbeat_timer = timer
+
+
+def _heartbeat_tick() -> None:
+    """The heartbeat slot: reset the watchdog deadline."""
+    if _hang_fh is None:
+        return
+    faulthandler.cancel_dump_traceback_later()
+    faulthandler.dump_traceback_later(_hang_timeout, repeat=True, file=_hang_fh)
+
+
+def stop_heartbeat() -> None:
+    """Stop the heartbeat timer (tests, and reset() teardown)."""
+    global _heartbeat_timer
+    timer = _heartbeat_timer
+    if timer is not None:
+        try:
+            timer.stop()
+            timer.timeout.disconnect(_heartbeat_tick)
+        except RuntimeError:
+            pass  # the underlying C++ QTimer may already be gone at teardown
+        _heartbeat_timer = None
+
+
 def reset() -> None:
     """Undo everything :func:`install` did — tests only.
 
     Safe to call when nothing is installed (the autouse teardown relies on it).
     """
     global _is_installed, _sink_id, _log_path, _hang_path, _hang_fh
-    global _prev_sys_excepthook, _prev_threading_excepthook
+    global _prev_sys_excepthook, _prev_threading_excepthook, _prev_qt_handler
 
+    stop_heartbeat()
     faulthandler.cancel_dump_traceback_later()
+    if _prev_qt_handler is not None:
+        try:
+            from PySide6.QtCore import qInstallMessageHandler
+
+            qInstallMessageHandler(_prev_qt_handler)
+        except Exception:  # noqa: BLE001 — a diagnostics restore must never raise
+            pass
+        _prev_qt_handler = None
     if _sink_id is not None:
         try:
             logger.remove(_sink_id)
