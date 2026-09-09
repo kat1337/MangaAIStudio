@@ -264,6 +264,54 @@ def test_legacy_mas_without_style_loads_with_defaults() -> None:
     assert out.style == TextStyle()
 
 
+# ---------------------------------------------------------------------------
+# quick-260909-nj9 — the color field's ALPHA survives .mas persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_alpha_color_round_trips_mas_verbatim() -> None:
+    """quick-260909-nj9: an alpha-carrying ``#AARRGGBB`` style color
+    survives the .mas persistence mapping BYTE-VERBATIM —
+    ``pagebox_to_json`` writes ``style.to_dict()`` verbatim and
+    ``json_to_pagebox`` reads ``TextStyle.from_dict`` (any string through
+    ``_coerce_str``), so no persistence layer change was needed; this test
+    is the PROOF. The spelling also survives a full ``json.dumps``/
+    ``json.loads`` pass (the UTF-8 JSON the container entry carries)."""
+    pb = PageBox(
+        box=Box(10, 20, 200, 300),
+        origin=USER,
+        payload=None,
+        style=TextStyle(color="#80ff0000"),
+    )
+
+    d = pagebox_to_json(pb)
+    assert d["style"]["color"] == "#80ff0000"
+    serialized = json.loads(json.dumps(d, ensure_ascii=False))
+    out = json_to_pagebox(serialized)
+    assert out.style is not None
+    assert out.style.color == "#80ff0000", (
+        "the 9-char ARGB spelling must round-trip the .mas mapping exactly"
+    )
+
+
+@pytest.mark.unit
+def test_legacy_opaque_color_spelling_unchanged_by_persistence() -> None:
+    """A legacy 7-char ``#RRGGBB`` color round-trips AS-IS — the
+    persistence layer never rewrites it to the 9-char spelling (legacy
+    projects load byte-compatibly; opacity comes from QColor's default
+    alpha 255 at parse time, never a model rewrite)."""
+    pb = PageBox(
+        box=Box(0, 0, 100, 40),
+        origin=USER,
+        payload=None,
+        style=TextStyle(color="#ff0000"),
+    )
+
+    out = json_to_pagebox(pagebox_to_json(pb))
+    assert out.style.color == "#ff0000"
+
+
 @pytest.mark.unit
 def test_style_none_round_trip() -> None:
     """A style-None box writes "style": None and reloads with the DEFAULT
