@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Masker & Selective Inpaint + UI Rework
 status: Awaiting next milestone
-stopped_at: Completed quick task 260826-09m — canvas text clipping fix (two-pass measured render in TypesetOverlayItem; Mango no-clip regression tests)
-last_updated: "2026-08-26T00:55:00.000Z"
-last_activity: 2026-08-26
-last_activity_desc: Completed quick task 260826-09m — TypesetOverlayItem now renders into an oversized scratch and crops to the MEASURED alpha bbox (+1px margin), offsets derived from the measured box (D-01 pixel-parity preserved at 0/40 deg); full suite 1159 passed
+stopped_at: Completed quick task 260909-fa9 — textbox overlay fixes (zoom-adaptive border, corner-anchored handles/buttons, arrow-key nudge)
+last_updated: "2026-09-09T16:45:00.000Z"
+last_activity: 2026-09-09
+last_activity_desc: Completed quick task 260909-fa9 — zoom-adaptive border pen, zoom-divided handle/button/badge anchoring + creation-time zoom seeding, arrow-key nudge with burst-coalesced undo; full suite 1410 passed (74 new)
 progress:
   total_phases: 10
   completed_phases: 10
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-19)
 Phase: Milestone v1.2 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-08 - Completed quick task 260907-sni: RAM climb fix — mask-undo snapshots packed lossless 1-bit (284→13 MB/entry @35MP), Restore tool 2 rebuilds/stroke (was per-mouse-move), recompose cache with full invalidation; suite 1336 = 1322 + 14 new; Needs Review (real-session RAM + restore visuals)
+Last activity: 2026-09-09 - Completed quick task 260909-fa9: textbox overlay fixes — zoom-adaptive border pen (2/3 vp px on-screen at any zoom), corner-exact handle/button/badge anchoring + fit-zoom creation seeding, arrow-key nudge (1px, key-repeat, one undo entry per burst); suite 1410 = 1336 + 74 new; Needs Review (visual spot-check)
 
 ## Performance Metrics
 
@@ -401,6 +401,7 @@ None yet.
 | 260907-m4u | Ctrl+click a bubble with the Move tool (V) copies its DETECTED (OCR) text to the OS clipboard + "Copied N chars" transient — `text_renderer.detected_text(pb)` (recognized-only, never translation), `EditorCanvas.copy_text_requested` dumb-emitter signal + Ctrl branch before the Shift check (handles/paint tools untouched), `MainWindow._on_box_text_copy_requested` mirrors the grab handler's empty-rule ("No text recognized", sentinel survives); Move tooltip gains the Ctrl+click clause; full suite 1303 passed | 2026-09-07 | be7cf11 | [260907-m4u-ctrl-click-a-bubble-with-the-move-tool-v](./quick/260907-m4u-ctrl-click-a-bubble-with-the-move-tool-v/) |
 | 260907-nfq | Lazy project open (OOM fix, ~35MP×25p project was 6→18GB): `load_page_file(names=)` selective decompression + `parse_page_meta` + `ImageFile.source_mas/embedded_size` slots; meta-only `_load_project_session` loop builds lazy ImageFiles (pixels/mask/planes None) with page 0 materialized pre-swap; `_materialize_page_state` gap-fill at visit (on_page_selected) + save-PREPARE (WR-02 loud abort, never silent pixel loss; untouched pages save by .mas non-rewrite) + batch light tier (planes only, no pixels) + OCR-export `embedded_size` dims arm; full suite 1322 passed; verification human_needed (real-project RSS spot-check) | 2026-09-07 | ab6ae4a | [260907-nfq-lazy-project-open-stop-eagerly-decoding-](./quick/260907-nfq-lazy-project-open-stop-eagerly-decoding-/) | Needs Review |
 | 260907-sni | RAM climb fix (6→18GB ratchet while editing): mask-undo history snapshots packed to lossless 1-bit planes (284MB→13MB/entry @35MP, 21.7×; page worst case 11.4GB→0.5GB) with undo/redo/geometry-record/clean-seed round-trips pixel-equal; Restore tool persistent pixmap — full rebuild exactly 2×/stroke, bbox-only union-of-discs per-move refresh, ascontiguousarray stride guard, undo + P-preview preserved; recompose_mask cached per-plane binaries with invalidation at all 10 mutation+replacement sites incl. the folder-session page-switch adversarial case (cross-page byte-identical test); full suite 1336 = 1322 baseline + 14 new, failures triaged to pre-existing environmental flakes (repro'd at 52252e7 worktree); verification human_needed (real-session RAM + restore mid-stroke visuals) | 2026-09-08 | e6c4d3e | [260907-sni-slim-mask-undo-history-snapshots-and-per](./quick/260907-sni-slim-mask-undo-history-snapshots-and-per/) | Needs Review |
+| 260909-fa9 | Textbox overlay fixes: zoom-adaptive border pen (_zoom_pen_width base/zoom — ~2/~3 viewport px on-screen at ANY zoom, zoom-1.0 byte-identical); zoom-divided anchoring for corner handles / rotation handle / re-detect button / badge + hit-rect centre (4/zoom) so decorations sit exactly on their corners at every zoom, _register_box_item seeds the live canvas zoom at creation (fit-zoom drift fix), zoom slot applies zoom BEFORE _sync_handles; arrow-key nudge under V tool — 1 scene px per press, auto-repeat, ONE boxes_modified per burst with the BEFORE-burst payload ('Nudged N boxes' op name for multi-select), flush safety nets (any key release / mouse press / set_boxes); full suite 1410 = 1409 + new 74-test battery, 1 clipboard flake passes in isolation | 2026-09-09 | 3bea8a8 | [260909-fa9-fix-textbox-overlay-bugs-zoom-adaptive-b](./quick/260909-fa9-fix-textbox-overlay-bugs-zoom-adaptive-b/) | Needs Review (visual spot-check) |
 
 ## Deferred Items
 
