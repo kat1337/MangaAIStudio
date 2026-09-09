@@ -98,6 +98,30 @@ _TINT_ALPHA = 31
 # UI-SPEC §Spacing exceptions: unselected stroke 2px, selected 3px.
 _UNSELECTED_PEN_WIDTH = 2
 _SELECTED_PEN_WIDTH = 3
+# quick-260909-fa9 BUG-1: the border pen width is compensated by the live
+# zoom so the ON-SCREEN thickness stays ~constant at every zoom — clearly
+# visible when zoomed out (the old fixed scene-px 2/3 rendered as ~0 exact-
+# colour pixels at 0.25x) and proportionally thinner on screen when zoomed
+# in. Degenerate cap: an absurd zoom-out input must not balloon the scene
+# width unboundedly.
+_PEN_MAX_SCENE_WIDTH = 24.0
+
+
+def _zoom_pen_width(base: float, zoom: float) -> float:
+    """The scene-unit pen width that renders ``base`` VIEWPORT px at ``zoom``.
+
+    quick-260909-fa9 BUG-1: the border is drawn in scene units, so its
+    on-screen thickness is ``width * zoom``. Dividing the base by the live
+    zoom makes that product constant (~2 vp px unselected / ~3 selected at
+    every zoom). NO lower floor: ``base / MAX_ZOOM`` (2/100 scene px) is the
+    intended constant on-screen minimum. Guards a non-positive / non-numeric
+    zoom to 1.0 exactly like :meth:`CornerHandle.set_hit_zoom` (the division
+    -safety precedent); caps the result at :data:`_PEN_MAX_SCENE_WIDTH` so a
+    degenerate zoom-in argument cannot produce an unusable pen.
+    """
+    if not isinstance(zoom, (int, float)) or zoom <= 0:
+        zoom = 1.0
+    return min(float(base) / float(zoom), _PEN_MAX_SCENE_WIDTH)
 # Phase 8 border-state palette (UI-SPEC §Color — the border-state contract table).
 # ZERO new hex values: both override-state colours reuse existing palette
 # members (Text primary ``#e8e8ea`` / Text muted ``#9a9aa2``) as semantic
@@ -113,6 +137,8 @@ _INPAINT_GREY_STATES = frozenset({"forced", "forced_fill", "forced_inpaint", "ne
 # 6/4 scene px dash (UI-SPEC §Spacing/§Color): dash lengths ~3x the 2px stroke
 # so the pattern reads as a dash (not dots, not mush) at 100% zoom; scene units
 # match how the Phase 3 border scales with zoom (the border-state high-DPI note).
+# quick-260909-fa9: the VALUES stay fixed — Qt dash units are multiples of the
+# pen width, so the rendered dash automatically rides the zoom-compensated width.
 _INPAINT_DASH_PATTERN = [6.0, 4.0]
 # The two states that render DASHED ("C won't inpaint this box's detected
 # text" — reading rule 1 encodes the outcome in pattern, never hue alone).
@@ -1094,7 +1120,10 @@ class BoxItem(QGraphicsRectItem):
         hue = origin_hue(self.pagebox.origin)
         pen_color = self._inpaint_pen_color(hue)
         selected = self.isSelected()
-        width = _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH
+        width = _zoom_pen_width(
+            _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH,
+            self._overlay_zoom,
+        )
         pen = QPen(pen_color, width)
         if self._inpaint_state in _INPAINT_DASHED_STATES:
             pen.setStyle(Qt.PenStyle.CustomDashLine)
@@ -1245,7 +1274,10 @@ class BoxItem(QGraphicsRectItem):
         """
         hue = origin_hue(self.pagebox.origin)
         pen_color = self._inpaint_pen_color(hue)
-        width = _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH
+        width = _zoom_pen_width(
+            _SELECTED_PEN_WIDTH if selected else _UNSELECTED_PEN_WIDTH,
+            self._overlay_zoom,
+        )
         pen = QPen(pen_color, width)
         if self._inpaint_state in _INPAINT_DASHED_STATES:
             pen.setStyle(Qt.PenStyle.CustomDashLine)
@@ -1362,8 +1394,10 @@ class BoxItem(QGraphicsRectItem):
         viewport-px font clamp + ``2/zoom`` outline for OPAQUE text: the
         overlay renders at the style's scene-px size and scales with the
         canvas zoom like the artwork itself — a zoom change must NOT re-derive
-        the style (WYSIWYG, D-01). The stored zoom remains for API
-        compatibility with the canvas ``zoom_changed`` slot (canvas.py:1790).
+        the style (WYSIWYG, D-01). The stored zoom remains the SINGLE zoom
+        source for the zoom-compensated chrome (quick-260909-fa9: the border
+        pen re-derives here; the handle/badge anchors consume it via
+        ``_sync_handles``) for the canvas ``zoom_changed`` slot (canvas.py).
 
         Defensive guard: a non-positive zoom falls back to 1.0 (the old
         division safety — kept for the stored value's invariants).
@@ -1378,6 +1412,15 @@ class BoxItem(QGraphicsRectItem):
         # are invisible and thus unhittable — lazily corrected at next sync).
         for handle in self.handles.values():
             handle.set_hit_zoom(zoom)
+        # quick-260909-fa9 BUG-1: the border pen is zoom-compensated, so a
+        # stored-zoom change must re-derive it through the SAME selected-aware
+        # path set_inpaint_state uses (2 vp px unselected / 3 selected at any
+        # zoom). The canvas slot and _register_box_item seeding are the only
+        # callers — both already follow up with _sync_handles for decorations.
+        if self.isSelected():
+            self._apply_look_for(True)
+        else:
+            self._apply_origin_pen()
 
     def refresh_badge(self) -> None:
         """Re-render the bubble-number badge (D-15/D-16, UI-SPEC §17).
