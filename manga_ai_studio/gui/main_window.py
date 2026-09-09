@@ -7605,6 +7605,8 @@ class MainWindow(QMainWindow):
             self.status_bar_left.setText("No text recognized")
             return
         QGuiApplication.clipboard().setText(text)
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug(f"clipboard_write: chars={len(text)}")
         self._show_transient_status(f"Copied {len(text)} chars to clipboard")
 
     def _on_ocr_grab_error(self, worker_error) -> None:

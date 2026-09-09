@@ -35,6 +35,7 @@ from weakref import ref as _weakref
 
 import numpy as np
 
+from loguru import logger
 from PySide6 import Shiboken
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -1664,7 +1665,12 @@ class EditorCanvas(QGraphicsView):
                         if not item.isSelected():
                             self._deselect_box()
                             item.setSelected(True)
-                        self.copy_text_requested.emit(detected_text(item.pagebox))
+                        text = detected_text(item.pagebox)
+                        # quick-260909-ke1: breadcrumb (gui namespace -> file
+                        # sink at DEBUG) — one line per user action, never
+                        # per-paint/per-mouse-move.
+                        logger.debug(f"copy_text_requested: chars={len(text)}")
+                        self.copy_text_requested.emit(text)
                         event.accept()
                         return
                     if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -2385,6 +2391,16 @@ class EditorCanvas(QGraphicsView):
         # plan 07-02 D-09 grouped delete + Esc deselect-ALL).
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             selected_items = [it for it in self._box_items if it.isSelected()]
+            # quick-260909-ke1: commit the active inline edit FIRST when its
+            # box is among the items about to be removed — the same
+            # commit-before-removal seam set_boxes enforces (a stale editor
+            # never dangles over a retired BoxItem).
+            self._commit_inline_editor_if_retiring(selected_items)
+            # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+            logger.debug(
+                f"delete_key: selected={len(selected_items)} "
+                f"editor_active={self._inline_editor.is_active()}"
+            )
             if len(selected_items) > 1:
                 before = self.boxes_snapshot()
                 for it in selected_items:
@@ -2650,6 +2666,8 @@ class EditorCanvas(QGraphicsView):
         """
         if not Shiboken.isValid(self):
             return
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug(f"graveyard_release: held={len(self._box_graveyard)}")
         self._graveyard_pending = False
         self._box_graveyard.clear()
 
@@ -2984,6 +3002,27 @@ class EditorCanvas(QGraphicsView):
         """
         if self._inline_editor.is_active():
             self._inline_editor.commit()
+
+    def _commit_inline_editor_if_retiring(self, items: list) -> None:
+        """Commit the active inline edit when its box is among ``items`` to remove.
+
+        quick-260909-ke1: the delete paths (Delete/Backspace branch,
+        :meth:`_remove_box`) previously skipped the commit-first seam every
+        layer rebuild enforces (``set_boxes`` ->
+        :meth:`_commit_inline_editor_if_active`), leaving the editor dangling
+        over a retired BoxItem — a later commit then wrote text into a removed
+        PageBox and emitted a bogus ``boxes_modified`` AFTER the removal
+        emission (undo corruption), inside a Qt slot in the real app. Mirrors
+        the set_boxes precedent: the edit lands through the normal
+        boxes_modified seam BEFORE the removal emission. Partial removal
+        commits ONLY when the editor's own box is going away — an open edit on
+        box B survives deleting box A.
+        """
+        editor = self._inline_editor
+        if not editor.is_active():
+            return
+        if editor.active_box_item in items:
+            editor.commit()
 
     def _deselect_box(self) -> None:
         """Deselect the currently selected box, if any (UI-SPEC §12c deselect)."""
@@ -3365,6 +3404,8 @@ class EditorCanvas(QGraphicsView):
         selected = [it for it in self._box_items if it.isSelected()]
         if not selected:
             return
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug(f"copy_boxes: n={len(selected)}")
         self.box_clipboard = [it.pagebox.copy() for it in selected]
 
     def _paste_boxes(self) -> None:
@@ -3382,6 +3423,8 @@ class EditorCanvas(QGraphicsView):
         """
         if not self.box_clipboard:
             return
+        # quick-260909-ke1: breadcrumbs (gui namespace -> file sink at DEBUG).
+        logger.debug(f"paste_entry: clipboard={len(self.box_clipboard)}")
         page = self.sceneRect()
         page_w = page.width()
         page_h = page.height()
@@ -3413,6 +3456,8 @@ class EditorCanvas(QGraphicsView):
             pasted_items.append(item)
 
         n = len(pasted_items)
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug(f"paste_done: pasted={n}")
         self._clear_selection()
         for it in pasted_items:
             it.setSelected(True)
@@ -3493,7 +3538,12 @@ class EditorCanvas(QGraphicsView):
         (deferred release) — the Delete key is hit mid-event-loop with the
         same queued-update precondition as the undo path, so a synchronous
         last-ref drop would delete the C++ item before the pending flush.
+
+        quick-260909-ke1: the inline-editor staleness guard — when the editor
+        is open on THIS box, commit it first (the set_boxes commit-first
+        precedent); the editor never dangles over the retired item.
         """
+        self._commit_inline_editor_if_retiring([item])
         if item not in self._box_items:
             return
         # CR-01 fix: capture the PRE-delete snapshot (with the box still present)

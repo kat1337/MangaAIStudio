@@ -54,6 +54,7 @@ from __future__ import annotations
 import copy as _copy
 from typing import TYPE_CHECKING
 
+from loguru import logger
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QFont, QKeyEvent
 from PySide6.QtWidgets import QGraphicsProxyWidget, QTextEdit
@@ -221,6 +222,10 @@ class InlineEditor:
         box_item = self._active_box_item
         new_text = self._text_edit.toPlainText()
         changed = new_text != self._entry_text
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug(
+            f"inline_editor_commit: field={self._focus_field} chars={len(new_text)} changed={changed}"
+        )
         if changed:
             # CR-01 pre-state pattern: capture the snapshot BEFORE the
             # mutation. The snapshot PageBoxes share the live TextBlock by
@@ -252,11 +257,25 @@ class InlineEditor:
         """
         if self._active_box_item is None:
             return
+        # quick-260909-ke1: breadcrumb (gui namespace -> file sink at DEBUG).
+        logger.debug("inline_editor_cancel")
         self._teardown()
 
     def is_active(self) -> bool:
         """True while an edit session is open."""
         return self._active_box_item is not None
+
+    @property
+    def active_box_item(self) -> "BoxItem | None":
+        """The BoxItem the editor is currently open on, else None (ke1).
+
+        The SINGLE staleness surface the canvas delete branches consult: the
+        commit-first guard compares this item against the items about to be
+        removed so the editor can never dangle over a retired BoxItem (the
+        ``set_boxes`` commit-first precedent, canvas.py). Read-only by design
+        — session state changes only through enter/commit/cancel/_teardown.
+        """
+        return self._active_box_item
 
     def proxy_scene_rect(self) -> QRectF:
         """The proxy's scene-space rect — the canvas guard's hit-test target
