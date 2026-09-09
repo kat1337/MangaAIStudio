@@ -434,3 +434,175 @@ def test_zoom_changed_slot_applies_zoom_before_syncing_handles(qtbot) -> None:
         rect.top() - (_ROTATE_ABOVE_TL + _ROTATE_SIZE / 2.0) / zoom, abs=1e-6
     )
 
+
+# ===========================================================================
+# BUG-3 — arrow-key nudging with the Move (V) tool (Task 3)
+# ===========================================================================
+
+
+def _nudge_canvas_with_box(
+    qtbot, tool: ToolMode = ToolMode.MOVE
+) -> tuple[EditorCanvas, BoxItem]:
+    """A shown canvas + one selected USER box under the given tool."""
+    canvas = _canvas_with_image(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[PageBox(box=Box(20, 20, 100, 100), origin=USER)],
+        detected_pageboxes=[],
+    )
+    canvas.set_tool(tool)
+    item = canvas._box_items[0]
+    canvas._scene.clearSelection()
+    item.setSelected(True)
+    return canvas, item
+
+
+def _nudge_emissions(canvas: EditorCanvas) -> list:
+    """Collect boxes_modified payloads onto a fresh list."""
+    emitted: list = []
+    canvas.boxes_modified.connect(lambda before: emitted.append(before))
+    return emitted
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize(
+    "key,dx,dy",
+    [
+        (Qt.Key.Key_Right, 1.0, 0.0),
+        (Qt.Key.Key_Left, -1.0, 0.0),
+        (Qt.Key.Key_Up, 0.0, -1.0),
+        (Qt.Key.Key_Down, 0.0, 1.0),
+    ],
+)
+def test_arrow_key_nudges_selected_box_one_scene_px(qtbot, key, dx, dy) -> None:
+    """Move tool + selected box + arrow key = 1 scene px in that direction."""
+    canvas, item = _nudge_canvas_with_box(qtbot)
+    r0 = item.rect()
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, key))
+    r1 = item.rect()
+    assert r1.x() == pytest.approx(r0.x() + dx)
+    assert r1.y() == pytest.approx(r0.y() + dy)
+    assert r1.width() == pytest.approx(r0.width())
+    assert r1.height() == pytest.approx(r0.height())
+
+
+@pytest.mark.gui
+def test_arrow_key_auto_repeat_keeps_nudging(qtbot) -> None:
+    """A second (auto-repeat) press moves another pixel — repeats accumulate."""
+    canvas, item = _nudge_canvas_with_box(qtbot)
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right))
+    assert item.rect().x() == pytest.approx(21.0)
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right, auto_repeat=True))
+    assert item.rect().x() == pytest.approx(22.0)
+
+
+@pytest.mark.gui
+def test_nudge_corner_handles_track_the_rect(qtbot) -> None:
+    """The corner handles re-sync after a nudge (TL = new corner - 4/zoom)."""
+    canvas, item = _nudge_canvas_with_box(qtbot)
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right))
+    r = item.rect()
+    zoom = item._overlay_zoom
+    tl = item.handles["TL"].scenePos()
+    assert tl.x() == pytest.approx(r.left() - _HANDLE_SIZE / 2.0 / zoom, abs=1e-6)
+    assert tl.y() == pytest.approx(r.top() - _HANDLE_SIZE / 2.0 / zoom, abs=1e-6)
+
+
+@pytest.mark.gui
+def test_nudge_noop_under_brush_tool(qtbot) -> None:
+    """With the Brush tool active, arrow keys move nothing."""
+    canvas, item = _nudge_canvas_with_box(qtbot, tool=ToolMode.BRUSH)
+    r0 = item.rect()
+    for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+        canvas.keyPressEvent(_key(QEvent.Type.KeyPress, key))
+    assert item.rect() == r0
+
+
+@pytest.mark.gui
+def test_nudge_noop_without_selection(qtbot) -> None:
+    """With no selected box, arrow keys move nothing (rect unchanged)."""
+    canvas = _canvas_with_image(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[PageBox(box=Box(20, 20, 100, 100), origin=USER)],
+        detected_pageboxes=[],
+    )
+    canvas.set_tool(ToolMode.MOVE)
+    item = canvas._box_items[0]
+    assert item.isSelected() is False
+    r0 = item.rect()
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right))
+    assert item.rect() == r0
+
+
+@pytest.mark.gui
+def test_nudge_burst_emits_boxes_modified_once_with_before_payload(qtbot) -> None:
+    """Two presses + one non-auto-repeat release = ONE boxes_modified whose
+    payload is the PRE-burst snapshot (one undo entry per burst)."""
+    canvas, item = _nudge_canvas_with_box(qtbot)
+    emitted = _nudge_emissions(canvas)
+
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right))
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right, auto_repeat=True))
+    assert len(emitted) == 0, "no emission until the burst flushes"
+
+    canvas.keyReleaseEvent(
+        _key(QEvent.Type.KeyRelease, Qt.Key.Key_Right, auto_repeat=False)
+    )
+    assert len(emitted) == 1, "exactly one boxes_modified per burst"
+    payload = emitted[0]
+    assert len(payload) == 1
+    # The payload carries the BEFORE-burst position (the undo restore state).
+    assert payload[0].box.as_tuple == (20, 20, 100, 100)
+    # The live rect moved the full +2.
+    assert item.rect().x() == pytest.approx(22.0)
+    # Single-box nudge keeps the default op name (the move-commit rule).
+    assert canvas._pending_boxes_op_name is None
+
+
+@pytest.mark.gui
+def test_nudge_multi_selection_moves_every_box_with_op_name(qtbot) -> None:
+    """Each selected box in a multi-selection nudges; the flush op-name reads
+    'Nudged N boxes' (the move-commit rule for n > 1)."""
+    canvas = _canvas_with_image(qtbot)
+    canvas.set_boxes(
+        user_pageboxes=[
+            PageBox(box=Box(20, 20, 100, 100), origin=USER),
+            PageBox(box=Box(120, 20, 200, 100), origin=USER),
+        ],
+        detected_pageboxes=[],
+    )
+    canvas.set_tool(ToolMode.MOVE)
+    a, b = canvas._box_items
+    canvas._scene.clearSelection()
+    a.setSelected(True)
+    b.setSelected(True)
+    emitted = _nudge_emissions(canvas)
+
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Down))
+    assert a.rect().y() == pytest.approx(21.0)
+    assert b.rect().y() == pytest.approx(21.0)
+
+    canvas.keyReleaseEvent(
+        _key(QEvent.Type.KeyRelease, Qt.Key.Key_Down, auto_repeat=False)
+    )
+    assert len(emitted) == 1
+    assert len(emitted[0]) == 2
+    assert canvas._pending_boxes_op_name == "Nudged 2 boxes"
+
+
+@pytest.mark.gui
+def test_nudge_mouse_press_flushes_pending_burst(qtbot) -> None:
+    """A mouse press between nudges flushes the pending burst (the missed-
+    release safety net): the emission fires exactly once."""
+    canvas, item = _nudge_canvas_with_box(qtbot)
+    emitted = _nudge_emissions(canvas)
+
+    canvas.keyPressEvent(_key(QEvent.Type.KeyPress, Qt.Key.Key_Right))
+    assert len(emitted) == 0
+    # A press on empty canvas (outside the image) flushes the burst and clears
+    # the selection — the nudge is committed before the press's own dispatch.
+    canvas.mousePressEvent(_press_at(canvas, 350, 350))
+    assert len(emitted) == 1
+    assert emitted[0][0].box.as_tuple == (20, 20, 100, 100)
+    assert item.rect().x() == pytest.approx(21.0)
+
+
