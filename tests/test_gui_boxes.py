@@ -748,11 +748,13 @@ def test_corner_handle_hit_zone_constant_in_viewport_px(qtbot, corner, zoom) -> 
 
     # BL sanity probe at low zoom: a point inside the widened zone around the
     # BL corner hits the handle via the real scene.itemAt identity path. The
-    # probe anchors on the handle's TRUE corner (mapToScene(4,4)) — not
+    # probe anchors on the handle's TRUE corner — local (4/zoom, 4/zoom) since
+    # quick-260909-fa9 divides the reposition offset AND the hit-rect centre
+    # by the zoom (mapToScene is a pure translation by pos here) — not
     # sceneBoundingRect(), whose pen-width inflation would push the probe
     # outside the zone.
     if corner == "BL":
-        corner_pt = handle.mapToScene(QPointF(4, 4))
+        corner_pt = handle.mapToScene(QPointF(4.0 / zoom, 4.0 / zoom))
         half = (_HANDLE_HIT_SIZE / zoom) / 2.0
         probe = corner_pt + QPointF(half - 1, half - 1)
         hit = scene.itemAt(probe, QTransform())

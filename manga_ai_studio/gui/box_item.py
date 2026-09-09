@@ -269,16 +269,25 @@ class RedetectHandle(QGraphicsEllipseItem):
             return
         super().mousePressEvent(event)
 
-    def reposition(self, parent_rect: QRectF) -> None:
+    def reposition(self, parent_rect: QRectF, zoom: float = 1.0) -> None:
         """Place the affordance just OUTSIDE the parent rect's top-right corner.
 
         Ignores-transformations child: ``pos()`` is in scene coords (the
         CornerHandle reposition precedent). The 2px-outside placement keeps
         the TR resize handle's hit area clear.
+
+        quick-260909-fa9 BUG-2: the device-px offsets are divided by ``zoom``
+        so the button sits exactly 2 VIEWPORT px outside the TR corner at
+        every zoom (the anchor scales with the view transform while the
+        fixed-size content does not — un-divided offsets drifted by
+        ``offset * (1 - zoom)`` device px). Non-positive zoom guards to 1.0
+        (the set_hit_zoom precedent); zoom 1.0 reduces to today's values.
         """
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
         self.setPos(
-            parent_rect.right() + _REDETECT_OFFSET,
-            parent_rect.top() - _REDETECT_SIZE - _REDETECT_OFFSET,
+            parent_rect.right() + _REDETECT_OFFSET / zoom,
+            parent_rect.top() - (_REDETECT_SIZE + _REDETECT_OFFSET) / zoom,
         )
 
 
@@ -328,17 +337,24 @@ class RotationHandle(QGraphicsEllipseItem):
             return
         super().mousePressEvent(event)
 
-    def reposition(self, parent_rect: QRectF) -> None:
+    def reposition(self, parent_rect: QRectF, zoom: float = 1.0) -> None:
         """Place the handle's CENTER 18 px ABOVE the parent rect's top-left.
 
         Ignores-transformations child: ``pos()`` is in scene coords. The
         above-the-corner placement keeps it clear of the TL CornerHandle's
         ~9px-radius hit zone and of the TL-outside bubble badge.
+
+        quick-260909-fa9 BUG-2: the device-px offsets are divided by ``zoom``
+        so the handle's center sits exactly 18 VIEWPORT px above the TL corner
+        at every zoom. Non-positive zoom guards to 1.0 (the set_hit_zoom
+        precedent); zoom 1.0 reduces to today's values.
         """
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
         half = _ROTATE_SIZE / 2.0
         self.setPos(
-            parent_rect.left() - half,
-            parent_rect.top() - _ROTATE_ABOVE_TL - half,
+            parent_rect.left() - half / zoom,
+            parent_rect.top() - (_ROTATE_ABOVE_TL + half) / zoom,
         )
 
 
@@ -361,9 +377,12 @@ _HANDLE_HIT_HALF = _HANDLE_HIT_SIZE / 2.0
 def _handle_hit_rect(zoom: float = 1.0) -> QRectF:
     """The enlarged invisible hit rect for a :class:`CornerHandle` (local coords).
 
-    Centred on the corner point at local ``(4, 4)`` (the handle is constructed
-    as ``QGraphicsRectItem(0,0,8,8)``; local ``(4,4)`` maps to the exact scene
-    corner after :meth:`CornerHandle.reposition` sets ``pos = scene corner - 4``).
+    Centred on the corner point at local ``(4/zoom, 4/zoom)`` — the handle is
+    constructed as ``QGraphicsRectItem(0,0,8,8)`` and quick-260909-fa9 BUG-2
+    repositions it at ``pos = scene corner - 4/zoom``, so the zoom-divided
+    local centre keeps the SCENE-space hit centre exactly on the true corner
+    (``pos + 4/zoom``) while the painted 8x8 square stays centred on the
+    VISIBLE corner. (At zoom 1.0 this is exactly today's local ``(4, 4)``.)
 
     quick-260824-t64 Task 2: ``zoom`` divides the hit size so the zone stays
     constant in VIEWPORT px. The canvas hit-test queries
@@ -375,9 +394,10 @@ def _handle_hit_rect(zoom: float = 1.0) -> QRectF:
     if not isinstance(zoom, (int, float)) or zoom <= 0:
         zoom = 1.0
     half = max(4.0, _HANDLE_HIT_SIZE / zoom) / 2.0
+    center = _HANDLE_OFFSET / zoom
     return QRectF(
-        _HANDLE_OFFSET - half,
-        _HANDLE_OFFSET - half,
+        center - half,
+        center - half,
         half * 2.0,
         half * 2.0,
     )
@@ -450,22 +470,32 @@ class CornerHandle(QGraphicsRectItem):
         self.prepareGeometryChange()
         self._hit_zoom = float(zoom)
 
-    def reposition(self, parent_rect: QRectF) -> None:
+    def reposition(self, parent_rect: QRectF, zoom: float = 1.0) -> None:
         """Centre this handle on its matching corner of ``parent_rect``.
 
         ``parent_rect`` is the parent ``BoxItem``'s scene-space rect. Because
         the handle ignores transformations, its ``pos()`` is in scene coords,
         so we place it directly at the scene-space corner (minus the half-size
         offset so the 8x8 square is centred on the corner point).
+
+        quick-260909-fa9 BUG-2: the half-size offset is divided by ``zoom`` —
+        the anchor scales with the view transform while the fixed 8x8 content
+        does not, so the VISIBLE square's centre stays exactly on the corner
+        at every zoom (un-divided offsets drifted ``4 * (1 - zoom)`` device
+        px). Non-positive zoom guards to 1.0 (the set_hit_zoom precedent);
+        zoom 1.0 reduces to today's exact constants.
         """
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
+        off = _HANDLE_OFFSET / zoom
         if self.corner == "TL":
-            self.setPos(parent_rect.left() - _HANDLE_OFFSET, parent_rect.top() - _HANDLE_OFFSET)
+            self.setPos(parent_rect.left() - off, parent_rect.top() - off)
         elif self.corner == "TR":
-            self.setPos(parent_rect.right() - _HANDLE_OFFSET, parent_rect.top() - _HANDLE_OFFSET)
+            self.setPos(parent_rect.right() - off, parent_rect.top() - off)
         elif self.corner == "BL":
-            self.setPos(parent_rect.left() - _HANDLE_OFFSET, parent_rect.bottom() - _HANDLE_OFFSET)
+            self.setPos(parent_rect.left() - off, parent_rect.bottom() - off)
         else:  # BR
-            self.setPos(parent_rect.right() - _HANDLE_OFFSET, parent_rect.bottom() - _HANDLE_OFFSET)
+            self.setPos(parent_rect.right() - off, parent_rect.bottom() - off)
 
     def shape(self) -> QPainterPath:  # noqa: D401 (Qt API casing)
         """Return a LARGER invisible hit rect than the painted 8x8 handle.
@@ -1206,9 +1236,9 @@ class BoxItem(QGraphicsRectItem):
         """
         self._redetect.activate_callback = callback
 
-    def _reposition_redetect(self) -> None:
+    def _reposition_redetect(self, zoom: float = 1.0) -> None:
         """Track the live rect (called from _sync_handles / the setter)."""
-        self._redetect.reposition(self.rect())
+        self._redetect.reposition(self.rect(), zoom)
 
     def _sync_handles(self, primary: bool | None = None) -> None:
         """Show + reposition handles on the selected box (D-08/D-09).
@@ -1232,15 +1262,16 @@ class BoxItem(QGraphicsRectItem):
         selected = self.isSelected()
         show = selected if primary is None else (selected and primary)
         rect = self.rect()
+        zoom = self._overlay_zoom
         for handle in self.handles.values():
             handle.setVisible(show)
-            handle.reposition(rect)
+            handle.reposition(rect, zoom)
         # quick-260824-viq: the rotation handle rides the SAME visibility
         # rule as the corner handles (selected AND primary).
         self._rotation_handle.setVisible(show)
-        self._rotation_handle.reposition(rect)
+        self._rotation_handle.reposition(rect, zoom)
         # quick-260822-gnq: keep the stale-marker affordance on the live rect.
-        self._reposition_redetect()
+        self._reposition_redetect(zoom)
         self.refresh_badge()
         self._reposition_text_overlay()
 
@@ -1317,15 +1348,16 @@ class BoxItem(QGraphicsRectItem):
                 primary = canvas._is_primary_provider(self)
                 if primary is not None:
                     show = bool(primary)
+        zoom = self._overlay_zoom
         for handle in self.handles.values():
             handle.setVisible(show)
-            handle.reposition(rect)
+            handle.reposition(rect, zoom)
         # quick-260824-viq: the rotation handle rides the SAME visibility
         # rule as the corner handles (selected AND primary).
         self._rotation_handle.setVisible(show)
-        self._rotation_handle.reposition(rect)
+        self._rotation_handle.reposition(rect, zoom)
         # quick-260822-gnq: keep the stale-marker affordance on the live rect.
-        self._reposition_redetect()
+        self._reposition_redetect(zoom)
         self._reposition_text_overlay()
 
     # --------------------------------------------- Phase 4 display-object children
@@ -1461,9 +1493,16 @@ class BoxItem(QGraphicsRectItem):
         # Position at the TL corner, OUTSIDE the box rect (UI-SPEC §17). The
         # badge ignores transformations, so pos() is in SCENE coords; use the
         # scene-space rect so a moved/resized box keeps the badge tracking.
+        # quick-260909-fa9 BUG-2: bw/bh/_BADGE_OFFSET are VIEWPORT-px
+        # measurements of the ignores-transformations badge — divide the whole
+        # outside offset by the stored zoom so the rendered gap is exactly
+        # _BADGE_OFFSET viewport px at every zoom (zoom 1.0 = today's values).
         rect = self.sceneBoundingRect()
-        bx = rect.left() - bw - _BADGE_OFFSET
-        by = rect.top() - bh - _BADGE_OFFSET
+        zoom = self._overlay_zoom
+        if not isinstance(zoom, (int, float)) or zoom <= 0:
+            zoom = 1.0
+        bx = rect.left() - (bw + _BADGE_OFFSET) / zoom
+        by = rect.top() - (bh + _BADGE_OFFSET) / zoom
         # Edge-flip: if the outside position would clip off the page TL edge,
         # flip to inside-top-left (inset 2px). sceneRect reflects the image
         # bounds (set_image -> setSceneRect); falls back to no-flip when the
@@ -1472,8 +1511,8 @@ class BoxItem(QGraphicsRectItem):
         if scene is not None:
             sr = scene.sceneRect()
             if not sr.isNull() and (bx < sr.left() or by < sr.top()):
-                bx = rect.left() + _BADGE_OFFSET
-                by = rect.top() + _BADGE_OFFSET
+                bx = rect.left() + _BADGE_OFFSET / zoom
+                by = rect.top() + _BADGE_OFFSET / zoom
         self._badge.setPos(bx, by)
         # Border pen: amber for manual override, matte for auto (D-16).
         if self.pagebox.manual_override:

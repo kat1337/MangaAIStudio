@@ -341,10 +341,15 @@ def test_redetect_handle_anchor_byte_identical_at_zoom_one(qtbot) -> None:
 @pytest.mark.parametrize("zoom", [0.25, 0.5, 1.0, 2.0])
 def test_badge_anchored_tl_outside_at_every_zoom(qtbot, zoom) -> None:
     """The badge sits (badge_w + 2)/zoom scene px left of the scene rect — a
-    2-viewport-px gap at any zoom (BUG-2)."""
-    pb = PageBox(box=Box(100, 80, 300, 260), origin=DETECTED)
+    2-viewport-px gap at any zoom (BUG-2). The scene carries an explicit
+    sceneRect (the production canvas sets it to the image bounds; an
+    auto-computed one would include the badge itself and flip the edge case)."""
+    # Far enough from the page TL that the TL-outside branch is exercised at
+    # the lowest zoom (a box near the corner legitimately edge-flips inside).
+    pb = PageBox(box=Box(300, 300, 300, 260), origin=DETECTED)
     pb.bubble_no = 5
     scene, item = _scene_with_box(pb)
+    scene.setSceneRect(0.0, 0.0, 1000.0, 1000.0)
     _select(scene, item)
     _apply_zoom_and_sync(item, zoom)
 
@@ -354,8 +359,10 @@ def test_badge_anchored_tl_outside_at_every_zoom(qtbot, zoom) -> None:
     pos = item._badge.scenePos()
     assert pos.x() == pytest.approx(sbr.left() - (bw + _BADGE_OFFSET) / zoom, abs=1e-6)
     assert pos.y() == pytest.approx(sbr.top() - (bh + _BADGE_OFFSET) / zoom, abs=1e-6)
-    # On-screen gap: (sbr.left - (pos.x + bw)) * zoom == 2 viewport px.
-    gap = (sbr.left() - (pos.x() + bw)) * zoom
+    # On-screen gap: the badge ignores transformations, so its DEVICE-px right
+    # edge is pos.x*zoom + bw (bw does NOT scale) — the gap to the scene rect's
+    # rendered left edge is exactly 2 viewport px.
+    gap = sbr.left() * zoom - (pos.x() * zoom + bw)
     assert gap == pytest.approx(_BADGE_OFFSET, abs=1e-6)
 
 

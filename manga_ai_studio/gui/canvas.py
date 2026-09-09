@@ -2655,6 +2655,13 @@ class EditorCanvas(QGraphicsView):
         self._install_redetect_hook(item)
         self._install_rotation_hook(item)
         self._scene.addItem(item)
+        # quick-260909-fa9 BUG-2: seed the LIVE canvas zoom into the new item.
+        # A box created at fit-to-window zoom (e.g. 0.18 on a large page) used
+        # to carry _overlay_zoom = 1.0 until the next zoom change, so its pen,
+        # handle anchors, and hit zones were all wrong at birth. This is the
+        # single seeding site — apply_overlay_zoom stores the zoom, propagates
+        # set_hit_zoom to the handles, AND re-derives the compensated pen.
+        item.apply_overlay_zoom(self.zoom_factor)
         # Parent-less items inherit their own visibility; sync to the layer
         # state so a toggle BEFORE any boxes were added still hides them.
         item.setVisible(self._box_overlay_visible)
@@ -2867,10 +2874,15 @@ class EditorCanvas(QGraphicsView):
         covers wheel zoom, zoom_reset, and fit_to_window — the app default on
         every page load, exactly the zoom where the pre-fix outline was
         invisible.
+
+        quick-260909-fa9 BUG-2: the apply_overlay_zoom call now runs BEFORE
+        _sync_handles — reposition consumes the STORED zoom (the zoom-divided
+        device-px offsets), so the store must precede the re-anchor. The
+        stored zoom also re-derives the zoom-compensated border pen (BUG-1).
         """
         for item in self._box_items:
-            item._sync_handles(primary=(item is self._primary_box))
             item.apply_overlay_zoom(zoom)
+            item._sync_handles(primary=(item is self._primary_box))
 
     # --------------------------------------------------- box interaction helpers
     def _commit_inline_editor_if_active(self) -> None:
