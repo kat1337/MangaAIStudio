@@ -360,6 +360,13 @@ class EditorCanvas(QGraphicsView):
         self._primary_box: BoxItem | None = None
         self._selection_order: list[BoxItem] = []
         self._pending_boxes_op_name: str | None = None
+        # quick-260909-fa9 BUG-3: the BEFORE-burst snapshot of a pending
+        # arrow-key nudge burst. Opened on the FIRST press of a burst and
+        # flushed as ONE boxes_modified emission (an undo entry) on the
+        # non-auto-repeat key release — key-repeat at ~30/s must not flood the
+        # BOXES undo stack. Safety nets (mousePressEvent / set_boxes / any
+        # other key release) flush a burst whose release was missed.
+        self._nudge_before: list | None = None
         self._creating_box = False
         self._create_anchor = QPointF()
         # quick-260824-viq: the rotate-drag state (mirrors the resize trio).
@@ -1542,6 +1549,12 @@ class EditorCanvas(QGraphicsView):
             event.accept()
             return
 
+        # quick-260909-fa9 BUG-3: flush a pending nudge burst BEFORE any press
+        # dispatch — a press between arrow keys commits the burst (the
+        # missed-release safety net) so its undo entry lands before the
+        # press's own interaction opens a new snapshot.
+        self._flush_pending_nudge()
+
         middle = event.button() == Qt.MouseButton.MiddleButton
         space_left = self._space_held and event.button() == Qt.MouseButton.LeftButton
         if middle or space_left:
@@ -2422,6 +2435,49 @@ class EditorCanvas(QGraphicsView):
                 event.accept()
                 return
 
+        # --- quick-260909-fa9 BUG-3: arrow keys nudge every selected box 1
+        # scene px per press under the Move (V) tool (key auto-repeat keeps
+        # nudging — do NOT gate on event.isAutoRepeat()). The burst opens a
+        # BEFORE-snapshot on its FIRST press and is flushed as ONE
+        # boxes_modified emission on the non-auto-repeat release (one undo
+        # entry per burst, T-fa9-02). Gated off while the inline editor is
+        # active and while any drag is armed (a move/resize/rotate/create owns
+        # the geometry then).
+        if event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
+            selected_items = [
+                it for it in self._box_items if it.isSelected()
+            ]
+            if (
+                self.current_tool == ToolMode.MOVE
+                and not self._inline_editor.is_active()
+                and self._moving_box is None
+                and self._resizing_box is None
+                and self._rotating_box is None
+                and not self._creating_box
+                and selected_items
+            ):
+                if self._nudge_before is None:
+                    self._nudge_before = self.boxes_snapshot()
+                dx, dy = {
+                    Qt.Key.Key_Left: (-1.0, 0.0),
+                    Qt.Key.Key_Right: (1.0, 0.0),
+                    Qt.Key.Key_Up: (0.0, -1.0),
+                    Qt.Key.Key_Down: (0.0, 1.0),
+                }[event.key()]
+                for it in selected_items:
+                    it.setRect(it.rect().translated(dx, dy))
+                    # The group-move reposition-only discipline
+                    # (mouseMoveEvent): setRect + handle sync, no overlay
+                    # refresh.
+                    it._sync_handles(primary=(it is self._primary_box))
+                event.accept()
+                return
+
         # --- quick-260824-viq: Ctrl+C copies, Ctrl+V pastes (canvas-scoped).
         # Guarded to do nothing while the inline editor is active — the
         # editor owns Ctrl+C/Ctrl+V for its own text while open.
@@ -2483,7 +2539,16 @@ class EditorCanvas(QGraphicsView):
         event.ignore()
 
     def keyReleaseEvent(self, event) -> None:  # noqa: N802
-        """Clear the Space-pan flag; Shift release restores Brush from Eraser."""
+        """Clear the Space-pan flag; Shift release restores Brush from Eraser.
+
+        quick-260909-fa9 BUG-3: the FIRST statement flushes a pending nudge
+        burst on any NON-auto-repeat key release — the arrow-key release that
+        ends the burst (the one emission per burst contract) plus the
+        missed-arrow-release safety net (any other key release commits the
+        burst too, so a stale before-snapshot can never dangle).
+        """
+        if self._nudge_before is not None and not event.isAutoRepeat():
+            self._flush_pending_nudge()
         if event.key() == Qt.Key.Key_Space and self._space_held:
             self._space_held = False
             if not self._panning:
@@ -2631,6 +2696,11 @@ class EditorCanvas(QGraphicsView):
         self._selection_order = []
         self._primary_box = None
         self._group_move = {}
+        # quick-260909-fa9 BUG-3: a layer rebuild flushes a pending nudge
+        # burst here — the nudged items are about to be retired, so the burst
+        # must commit NOW (its own undo entry) rather than emit a stale
+        # snapshot of dead items later.
+        self._flush_pending_nudge()
 
         for pb in list(user_pageboxes) + list(detected_pageboxes):
             self._register_box_item(BoxItem(pb))
@@ -2885,6 +2955,25 @@ class EditorCanvas(QGraphicsView):
             item._sync_handles(primary=(item is self._primary_box))
 
     # --------------------------------------------------- box interaction helpers
+    def _flush_pending_nudge(self) -> None:
+        """Emit ONE ``boxes_modified`` for a pending arrow-key nudge burst (fa9).
+
+        Reuses the move-commit contract (:meth:`mouseReleaseEvent`): the
+        payload is the BEFORE-burst snapshot captured at the burst's first
+        press, and the op-name override fires only for a multi-selection
+        (``"Nudged N boxes"``, mirroring ``"Moved N boxes"``). No-op when no
+        burst is open. MainWindow's existing ``boxes_modified`` ->
+        ``_on_boxes_modified`` connection supplies undo, dirty-marking, and
+        geometry-stale marking — no new signals.
+        """
+        if self._nudge_before is None:
+            return
+        n = len([it for it in self._box_items if it.isSelected()])
+        if n > 1:
+            self._pending_boxes_op_name = f"Nudged {n} boxes"
+        self.boxes_modified.emit(self._nudge_before)
+        self._nudge_before = None
+
     def _commit_inline_editor_if_active(self) -> None:
         """Commit the active inline edit (no-op when none is active).
 
