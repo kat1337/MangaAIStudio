@@ -4884,11 +4884,12 @@ def test_undo_style_commit_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
     QApplication.processEvents()
 
     # ONE style commit (queues overlay updates per selected box — the UAF
-    # precondition) + ONE BOXES snapshot pushed.
+    # precondition) + ONE BOXES snapshot pushed. The commit emits the
+    # canonical HexArgb spelling (quick-260909-nj9 normalization).
     window.inspector_panel._commit_style_color("#00ff00")
     QApplication.processEvents()
-    assert items[0].pagebox.style.color == "#00ff00"
-    assert items[1].pagebox.style.color == "#00ff00"
+    assert items[0].pagebox.style.color == "#ff00ff00"
+    assert items[1].pagebox.style.color == "#ff00ff00"
 
     # App lifetime: capture weakrefs, then drop EVERY wrapper ref — the
     # canvas's _box_items becomes the only strong reference (what the app's
@@ -4943,10 +4944,11 @@ def test_delete_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
     item.setSelected(True)
     QApplication.processEvents()
 
-    # Style commit (queues overlay updates — the UAF precondition).
+    # Style commit (queues overlay updates — the UAF precondition). The
+    # commit emits the canonical HexArgb spelling (quick-260909-nj9).
     window.inspector_panel._commit_style_color("#00ff00")
     QApplication.processEvents()
-    assert item.pagebox.style.color == "#00ff00"
+    assert item.pagebox.style.color == "#ff00ff00"
 
     # Drop EVERY wrapper ref except the canvas's _box_items.
     wr = weakref.ref(item)
@@ -4975,7 +4977,7 @@ def test_delete_with_dropped_refs_no_crash(qtbot, tmp_path) -> None:
     QApplication.processEvents()
     assert canvas.box_count() == 1
     restored = canvas._box_items[0].pagebox
-    assert restored.style.color == "#00ff00"
+    assert restored.style.color == "#ff00ff00"
 
 
 @pytest.mark.gui

@@ -222,14 +222,37 @@ _EFFECT_DEFAULT_COLORS = {"outline": "#ffffff", "glow": "#e8e8ea", "shadow": "#0
 _EFFECT_DEFAULT_VALUES = {"outline": 2, "glow": 4, "shadow": 2}
 
 
+def _norm_hex_a(color) -> str:
+    """Normalize a hex color string to Qt's canonical lowercase HexArgb
+    spelling (``#aarrggbb``) — quick-260909-nj9.
+
+    A valid 7- or 9-char hex (``#RRGGBB`` / ``#AARRGGBB``) maps through
+    ``QColor.name(HexArgb)``: the legacy opaque ``#ff0000`` normalizes to
+    ``#ffff0000`` (alpha-preserving, alpha ``ff`` = opaque) and a sub-opaque
+    spelling round-trips verbatim. ANYTHING else — invalid, malformed, a
+    non-hex string, ``None`` — is returned UNCHANGED (the V5 tolerance:
+    never invent, never reject). The WR-01 style-color guard compares BOTH
+    sides through this helper so re-picking the loaded color in a different
+    opaque spelling is still a no-op.
+    """
+    if isinstance(color, str) and color.startswith("#") and len(color) in (7, 9):
+        parsed = QColor(color)
+        if parsed.isValid():
+            return parsed.name(QColor.NameFormat.HexArgb)
+    return color
+
+
 class _ColorSwatchButton(QToolButton):
     """A 24x24 color swatch (UI-SPEC §33 — the styling-section Color/effect rows).
 
-    ``color`` is a hex string or ``None``. ``None`` paints the D-10 MIXED
-    split swatch (left ``#e8e8ea`` / right ``#9a9aa2``, 1px ``#3a3a42``
-    border — UI-SPEC §Color) — the sentinel NEVER leaves the widget layer
-    (RESEARCH Pitfall 7): a commit only fires from the dialog path with a
-    real color.
+    ``color`` is a hex string (#RRGGBB or #AARRGGBB — quick-260909-nj9) or
+    ``None``. A sub-opaque ARGB color paints over a neutral 2-tone
+    checkerboard so the transparency reads honestly (the fill composites
+    over the greys instead of the widget background). ``None`` paints the
+    D-10 MIXED split swatch (left ``#e8e8ea`` / right ``#9a9aa2``, 1px
+    ``#3a3a42`` border — UI-SPEC §Color) — the sentinel NEVER leaves the
+    widget layer (RESEARCH Pitfall 7): a commit only fires from the dialog
+    path with a real color.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -240,7 +263,8 @@ class _ColorSwatchButton(QToolButton):
         self.setToolTip("Choose a color.")
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        """Paint the solid fill or the Mixed split fill + the 1px border."""
+        """Paint the solid fill (over a checkerboard when sub-opaque) or the
+        Mixed split fill + the 1px border."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -256,7 +280,31 @@ class _ColorSwatchButton(QToolButton):
                 QColor("#9a9aa2"),
             )
         else:
-            painter.fillRect(rect, QColor(self.color))
+            parsed = QColor(self.color)
+            if parsed.isValid() and parsed.alpha() < 255:
+                # quick-260909-nj9: honest transparency — a neutral 2-tone
+                # checkerboard (~4x4 px, #cccccc/#8a8a8a) UNDER the fill so
+                # the alpha composites visibly instead of vanishing into
+                # the widget background. Opaque/legacy paths keep today's
+                # paint exactly.
+                cell = 4.0
+                row = 0
+                y = rect.top()
+                while y < rect.bottom():
+                    h = min(cell, rect.bottom() - y)
+                    col = 0
+                    x = rect.left()
+                    while x < rect.right():
+                        w = min(cell, rect.right() - x)
+                        painter.fillRect(
+                            QRectF(x, y, w, h),
+                            QColor("#cccccc" if (row + col) % 2 == 0 else "#8a8a8a"),
+                        )
+                        x += w
+                        col += 1
+                    y += h
+                    row += 1
+            painter.fillRect(rect, parsed)
         painter.setPen(QPen(QColor("#3a3a42"), 1))
         painter.drawRect(rect)
         painter.end()
@@ -546,9 +594,13 @@ class InspectorPanel(QWidget):
 
         # Color — the 24x24 swatch -> QColorDialog (Don't-Hand-Roll). The
         # split fill (color None) is the D-10 Mixed presentation.
+        # quick-260909-nj9: the picker offers transparency (the glyph fill
+        # stores #AARRGGBB); the swatch shows sub-opaque fills over a
+        # checkerboard.
         self.color_swatch = _ColorSwatchButton()
         self.color_swatch.setToolTip(
-            "Glyph fill color — choose one to apply it to the selection."
+            "Glyph fill color — choose one (with optional transparency) "
+            "to apply it to the selection."
         )
         form.addRow("Color", self.color_swatch)
 
@@ -1567,19 +1619,44 @@ class InspectorPanel(QWidget):
             on_vertical(real)
 
     def _pick_style_color(self, on_style_color) -> None:
-        """Open ``QColorDialog`` seeded with the current color; commit on pick."""
+        """Open ``QColorDialog`` seeded with the current color; commit on pick.
+
+        quick-260909-nj9: the dialog carries ``ShowAlphaChannel`` (Qt's
+        alpha-control option) so the glyph fill can pick a transparency, and
+        ``DontUseNativeDialog`` is REQUIRED (not cosmetic) — the Windows
+        native color dialog has no alpha control, so the alpha option alone
+        would silently show nothing. The seed ``QColor`` parses
+        ``#AARRGGBB``, so the dialog opens at the stored alpha and its
+        preview updates live while the slider drags; the canvas refreshes on
+        the existing commit-on-pick cadence.
+        """
         seed = self.color_swatch.color
         if seed is None or self._loaded_style_color is None:
             seed = "#e8e8ea"
-        color = QColorDialog.getColor(QColor(seed), self, "Select Font Color")
+        color = QColorDialog.getColor(
+            QColor(seed),
+            self,
+            "Select Font Color",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel
+            | QColorDialog.ColorDialogOption.DontUseNativeDialog,
+        )
         if color.isValid():
-            self._emit_style_color_if_changed(color.name(), on_style_color)
+            self._emit_style_color_if_changed(
+                color.name(QColor.NameFormat.HexArgb), on_style_color
+            )
 
     def _emit_style_color_if_changed(self, color_hex: str, on_style_color) -> None:
+        """WR-01 emit-if-changed for the glyph fill, ALPHA-AWARE
+        (quick-260909-nj9): BOTH sides compare through ``_norm_hex_a`` so
+        re-picking the loaded color in a different opaque spelling
+        (``#ff0000`` vs ``#ffff0000``) is a no-op — never a spurious undo
+        entry — and the emitted value is the canonical HexArgb form, so the
+        model converges on one spelling without a load-time rewrite."""
         if not color_hex:
             return
-        if color_hex != self._loaded_style_color:
-            on_style_color(color_hex)
+        normalized = _norm_hex_a(color_hex)
+        if normalized != _norm_hex_a(self._loaded_style_color):
+            on_style_color(normalized)
 
     def _emit_style_align_if_changed(self, on_style_align) -> None:
         """Per-axis align commit: Mixed->None translation + per-axis WR-01 guard.
@@ -1629,7 +1706,15 @@ class InspectorPanel(QWidget):
         on_style_effect(key, self._effect_payload(key, value=value))
 
     def _pick_effect_color(self, key: str, on_style_effect) -> None:
-        """Open ``QColorDialog`` for ONE effect row's swatch; commit on pick."""
+        """Open ``QColorDialog`` for ONE effect row's swatch; commit on pick.
+
+        quick-260909-nj9 SCOPE DECISION: effect colors stay OPAQUE on
+        purpose (HexRgb dialog, no ShowAlphaChannel) — each effect dict
+        already owns its own opacity field (``TextStyle`` DEFAULT_GLOW /
+        DEFAULT_SHADOW), so a second transparency control per row would be
+        redundant. Alpha is the glyph-fill Color row ONLY; do not "fix"
+        this asymmetry.
+        """
         seed = self._effect_swatches[key].color or _EFFECT_DEFAULT_COLORS[key]
         color = QColorDialog.getColor(QColor(seed), self, f"Select {key.title()} Color")
         if color.isValid():

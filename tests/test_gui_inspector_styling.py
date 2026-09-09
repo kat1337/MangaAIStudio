@@ -249,9 +249,10 @@ def test_style_commit_signal_fires(qtbot) -> None:
     # WR-01 loaded-memory reflects the applied style.
     panel.load_box(_pagebox_with_style(auto_fit=False, font_size_px=14.0))
 
-    # Color + align + effect — one emission per real change.
+    # Color + align + effect — one emission per real change. The commit
+    # emits the canonical HexArgb spelling (quick-260909-nj9 normalization).
     panel._commit_style_color("#112233")
-    assert fired["color"] == ["#112233"]
+    assert fired["color"] == ["#ff112233"]
     panel.load_box(
         _pagebox_with_style(auto_fit=False, font_size_px=14.0, color="#112233")
     )
@@ -267,11 +268,11 @@ def test_style_commit_signal_fires(qtbot) -> None:
     panel.size_spin.editingFinished.emit()  # unchanged value
     panel.auto_fit_check.setChecked(False)  # unchanged
     panel._effect_checks["outline"].setChecked(True)  # unchanged
-    panel._commit_style_color("#112233")  # unchanged
+    panel._commit_style_color("#112233")  # unchanged (alpha-normalized WR-01)
     assert fired["font"] == ["Arial"]
     assert fired["size"] == [14]
     assert fired["auto_fit"] == [False]
-    assert fired["color"] == ["#112233"]
+    assert fired["color"] == ["#ff112233"]
     assert fired["align"] == [("left", "middle")]
     assert fired["effect"] == [
         ("outline", {"enabled": True, "color": "#ffffff", "value": 2})
@@ -723,10 +724,11 @@ def test_style_commit_applies_to_all(qtbot, tmp_path) -> None:
     assert window.inspector_panel._loaded_style_color is None
 
     # ONE color override -> BOTH boxes update; exactly ONE BOXES emission.
+    # The commit emits the canonical HexArgb spelling (quick-260909-nj9).
     window.inspector_panel._commit_style_color("#00ff00")
     QApplication.processEvents()
-    assert items[0].pagebox.style.color == "#00ff00"
-    assert items[1].pagebox.style.color == "#00ff00"
+    assert items[0].pagebox.style.color == "#ff00ff00"
+    assert items[1].pagebox.style.color == "#ff00ff00"
     assert len(emitted) == 1, "a style commit must emit boxes_modified exactly once"
     before = emitted[0]
     assert before[0].style.color == "#ff0000"
@@ -769,7 +771,7 @@ def test_mixed_sentinel_never_persists(qtbot, tmp_path) -> None:
     for pb in window.canvas.boxes_snapshot():
         d = pb.style.to_dict()
         assert "Mixed" not in str(d), f"sentinel leaked into a TextStyle: {d}"
-        assert pb.style.color == "#123456"
+        assert pb.style.color == "#ff123456"
         assert pb.style.font_size_px == 18.0
         assert pb.style.auto_fit is False
 
@@ -1237,3 +1239,192 @@ def test_glow_radius_256_commit_reaches_the_model_unreclamped(qtbot) -> None:
         }
     )
     assert result.glow["radius_px"] == 256.0
+
+
+# ===========================================================================
+# quick-260909-nj9 — alpha-capable Color picker, honest swatch, alpha-aware
+# WR-01 guard (effect rows deliberately stay opaque)
+# ===========================================================================
+
+
+@pytest.mark.gui
+def test_pick_style_color_opens_alpha_dialog_and_emits_hexargb(
+    qtbot, monkeypatch
+) -> None:
+    """The picker seam: _pick_style_color opens QColorDialog with BOTH the
+    ShowAlphaChannel and DontUseNativeDialog options (the Windows native
+    dialog has no alpha control, so ShowAlphaChannel alone would silently
+    show nothing) and emits the picked color as Qt's HexArgb spelling."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    panel = _make_inspector(qtbot)
+    fired: list = []
+    captured: dict = {}
+
+    def fake_get_color(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return QColor("#80ff0000")
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(fake_get_color))
+    panel._pick_style_color(fired.append)
+
+    options = captured["args"][3]
+    assert options & QColorDialog.ColorDialogOption.ShowAlphaChannel, (
+        "the glyph-fill picker must offer the alpha control"
+    )
+    assert options & QColorDialog.ColorDialogOption.DontUseNativeDialog, (
+        "the native dialog must be disabled — it has no alpha control"
+    )
+    assert fired == ["#80ff0000"], "the picker must emit the HexArgb spelling"
+
+
+@pytest.mark.gui
+def test_pick_style_color_cancel_still_commits_nothing(qtbot, monkeypatch) -> None:
+    """The existing invalid-color guard is unchanged: a cancelled dialog
+    (invalid QColor) commits nothing."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    panel = _make_inspector(qtbot)
+    fired: list = []
+    monkeypatch.setattr(
+        QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor())
+    )
+    panel._pick_style_color(fired.append)
+    assert fired == []
+
+
+@pytest.mark.gui
+def test_style_color_wr01_guard_is_alpha_normalized(qtbot) -> None:
+    """The WR-01 no-op guard compares ALPHA-NORMALIZED spellings: re-picking
+    the loaded legacy color in opaque HexArgb form fires NOTHING (never a
+    spurious undo entry); a real alpha change commits the normalized
+    spelling; after reload, re-committing the same color is a no-op."""
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    # Legacy project spelling loaded verbatim.
+    panel.load_box(_pagebox_with_style(color="#ff0000"))
+    assert panel._loaded_style_color == "#ff0000"
+
+    # Same color, opaque HexArgb spelling -> NO callback (normalized equal).
+    panel._commit_style_color("#ffff0000")
+    assert fired["color"] == []
+
+    # A real alpha change -> commits the normalized HexArgb spelling.
+    panel._commit_style_color("#80ff0000")
+    assert fired["color"] == ["#80ff0000"]
+
+    # Post-commit reload, then re-picking the SAME color: no-op (WR-01).
+    panel.load_box(_pagebox_with_style(color="#80ff0000"))
+    panel._commit_style_color("#80ff0000")
+    assert fired["color"] == ["#80ff0000"]
+
+
+@pytest.mark.gui
+def test_swatch_paints_transparent_fill_over_checkerboard(qtbot) -> None:
+    """Swatch honesty: a sub-opaque ARGB color renders as the fill BLENDED
+    over a neutral checkerboard — the center pixel's red is strictly below
+    the opaque value and above the bare checker greys (range-based, no
+    exact pixel math), with the red hue reading through."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    from manga_ai_studio.gui.inspector_panel import _ColorSwatchButton
+
+    swatch = _ColorSwatchButton()
+    qtbot.addWidget(swatch)
+    swatch.color = "#80ff0000"
+    img = QImage(24, 24, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    swatch.render(img)
+
+    c = img.pixelColor(12, 12)
+    assert c.alpha() == 255, "the checkerboard underlay makes the pixel opaque"
+    assert 180 <= c.red() < 255, (
+        f"the 50%-alpha red must blend over the checkerboard "
+        f"(red strictly below 255, above the bare greys) — got {c.red()}"
+    )
+    assert c.red() > c.green() and c.red() > c.blue(), (
+        "the red hue must read through the transparency"
+    )
+
+
+@pytest.mark.gui
+def test_swatch_opaque_renders_exactly_as_legacy(qtbot) -> None:
+    """The opaque spelling renders byte-identically to today: full red at
+    the center pixel, no checkerboard interference."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    from manga_ai_studio.gui.inspector_panel import _ColorSwatchButton
+
+    swatch = _ColorSwatchButton()
+    qtbot.addWidget(swatch)
+    swatch.color = "#ff0000"
+    img = QImage(24, 24, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    swatch.render(img)
+    c = img.pixelColor(12, 12)
+    assert (c.red(), c.green(), c.blue(), c.alpha()) == (255, 0, 0, 255)
+
+
+@pytest.mark.gui
+def test_swatch_mixed_split_unchanged(qtbot) -> None:
+    """The None Mixed split swatch is untouched by the alpha work."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    from manga_ai_studio.gui.inspector_panel import _ColorSwatchButton
+
+    swatch = _ColorSwatchButton()
+    qtbot.addWidget(swatch)
+    swatch.color = None
+    img = QImage(24, 24, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    swatch.render(img)
+    left = img.pixelColor(6, 12)
+    right = img.pixelColor(18, 12)
+    assert (left.red(), left.green(), left.blue()) == (232, 232, 234)
+    assert (right.red(), right.green(), right.blue()) == (154, 154, 162)
+
+
+@pytest.mark.gui
+def test_pick_effect_color_stays_opaque_hexrgb(qtbot, monkeypatch) -> None:
+    """Scope decision pin: the EFFECT picker deliberately keeps its HexRgb
+    dialog with NO alpha options — each effect dict already owns an opacity
+    field, so effect colors stay opaque (the emitted spelling is the
+    7-char HexRgb form, never normalized to HexArgb)."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    panel = _make_inspector(qtbot)
+    fired: dict = {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style())  # defaults: outline #ffffff @ 2
+    captured: dict = {}
+
+    def fake_get_color(*args, **kwargs):
+        captured["args"] = args
+        return QColor("#123456")
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(fake_get_color))
+    panel._pick_effect_color(
+        "outline", lambda key, payload: fired["effect"].append((key, payload))
+    )
+
+    assert len(captured["args"]) == 3, (
+        "the effect picker must pass NO dialog options (no ShowAlphaChannel)"
+    )
+    payload = fired["effect"][0][1]
+    assert payload["color"] == "#123456", (
+        "the effect color must stay the 7-char HexRgb spelling (opaque)"
+    )
