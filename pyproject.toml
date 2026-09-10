@@ -33,6 +33,10 @@ dependencies = [
     # pure-Python, both degrade gracefully when absent at runtime.
     "uniseg",
     "pyphen",
+    # psutil backs the diagnostics heartbeat memory telemetry (RSS + system
+    # commit, quick-260909-ke1); the telemetry degrades to a DEBUG line when
+    # absent, but the dependency is declared so it never is.
+    "psutil",
 ]
 
 [project.scripts]

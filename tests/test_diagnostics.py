@@ -1,4 +1,4 @@
-"""Headless diagnostics core tests (quick-260909-ke1 Task 1).
+"""Headless diagnostics core tests (quick-260909-ke1 Tasks 1-3).
 
 ``manga_ai_studio.diagnostics`` is Qt-free at module scope so this battery
 (and any future core-side caller) runs without PySide6 — locked by an AST
@@ -11,6 +11,13 @@ The hang-watchdog assertions use the deterministic short-timeout mechanics
 All log reads drain loguru's ``enqueue=True`` writer first via
 ``logger.complete()`` (fifo-ordered), and absence checks are anchored behind
 an ADMITTED barrier record so a slow writer can never false-pass them.
+
+Task 2 (minidump capture) and Task 3 (heartbeat memory telemetry) extend this
+file: the Windows-only minidump battery covers install idempotence, graceful
+degradation on a broken dbghelp path, real MDMP writes, the UEF/SIGABRT
+latching + chaining contracts, and a subprocess end-to-end abort; the
+telemetry battery covers formatting, latching, env overrides and the
+heartbeat cadence (all psutil-free via fakes/monkeypatching).
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from loguru import logger
@@ -238,3 +246,281 @@ def test_reset_restores_hooks_and_allows_fresh_install(tmp_path: Path, tmp_path_
     second = diagnostics.install(fresh, hang_timeout_s=0.5)
     assert second == fresh / "logs" / "mas.log"
     assert second != first  # the flag was cleared: install targets a fresh dir
+
+
+# ---------------------------------------------------- minidump capture (Task 2)
+_win_only = pytest.mark.skipif(
+    sys.platform != "win32", reason="minidump capture is Windows-only"
+)
+
+
+@_win_only
+@pytest.mark.unit
+def test_install_minidump_handler_is_idempotent_and_reset_restores(
+    tmp_path: Path,
+) -> None:
+    """install() arms the capture once; reset() deregisters and restores state."""
+    apis = diagnostics._load_windows_apis()
+    diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    assert diagnostics._minidump_installed
+    assert diagnostics._dump_dir == tmp_path / "logs"
+    assert diagnostics._md_filter_cb is not None  # ctypes callback kept alive
+    assert diagnostics._md_sigabrt_cb is not None
+    first_prev = diagnostics._md_filter_prev
+
+    # Idempotence: a second call re-captures nothing (the previous filter
+    # stays the one install() saw — never OUR own filter).
+    diagnostics.install_minidump_handler(tmp_path / "logs")
+    assert diagnostics._md_filter_prev is first_prev
+
+    diagnostics.reset()
+    assert not diagnostics._minidump_installed
+    assert diagnostics._md_filter_cb is None
+    # Round-trip: the process filter is back to what install() captured. The
+    # read itself installs NULL, so put the captured value back afterwards.
+    now = apis.set_unhandled_exception_filter(None)
+    apis.set_unhandled_exception_filter(first_prev)
+    assert now == first_prev
+
+
+@_win_only
+@pytest.mark.unit
+def test_minidump_install_degrades_gracefully_without_dbghelp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing/broken dbghelp path is swallowed: install() still completes."""
+    def boom():
+        raise OSError("no dbghelp on this box")
+
+    monkeypatch.setattr(diagnostics, "_load_windows_apis", boom)
+    log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    assert log.exists()  # the rest of install() is untouched
+    assert not diagnostics._minidump_installed
+    assert diagnostics._md_filter_cb is None
+    diagnostics.install_minidump_handler(tmp_path)  # direct call: also safe
+    assert not diagnostics._minidump_installed
+
+
+@_win_only
+@pytest.mark.unit
+def test_write_minidump_produces_mdmp_file(tmp_path: Path) -> None:
+    """_write_minidump writes a real Windows minidump (MDMP magic) into dir."""
+    path = diagnostics._write_minidump(tmp_path)
+    assert path is not None
+    assert path.parent == tmp_path
+    assert path.name.startswith("mas-") and path.name.endswith(".dmp")
+    assert path.read_bytes()[:4] == b"MDMP"
+
+
+@_win_only
+@pytest.mark.unit
+def test_crash_filter_writes_once_latches_and_logs_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The UEF writes ONE dump per session, latches, and logs the path."""
+    log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    dumps: list[Path] = []
+    fake_dump = tmp_path / "fake.dmp"
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_minidump",
+        lambda d, exception_pointers=None: dumps.append(d) or fake_dump,
+    )
+    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
+    assert (
+        diagnostics._unhandled_exception_filter(None)
+        == diagnostics.EXCEPTION_CONTINUE_SEARCH
+    )
+    assert (
+        diagnostics._unhandled_exception_filter(None)
+        == diagnostics.EXCEPTION_CONTINUE_SEARCH
+    )
+    assert dumps == [tmp_path]  # written exactly once (latched)
+    text = _read_log(log)
+    assert text.count("Crash minidump written") == 1
+    assert "fake.dmp" in text
+
+
+@_win_only
+@pytest.mark.unit
+def test_crash_filter_chains_previous_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The UEF chains the previous filter and returns ITS verdict."""
+    import ctypes
+
+    seen: list[int | None] = []
+    apis = diagnostics._load_windows_apis()
+    prev_cb = apis.filter_func(lambda pointers: seen.append(pointers) or 7)
+    prev_addr = ctypes.cast(prev_cb, ctypes.c_void_p).value
+    monkeypatch.setattr(diagnostics, "_md_apis", apis)
+    monkeypatch.setattr(diagnostics, "_md_filter_prev", prev_addr)
+    monkeypatch.setattr(
+        diagnostics, "_write_minidump", lambda d, exception_pointers=None: None
+    )
+    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
+    assert diagnostics._unhandled_exception_filter(1234) == 7
+    assert seen == [1234]
+
+
+@_win_only
+@pytest.mark.unit
+def test_sigabrt_handler_dumps_uninstalls_then_chains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The C-level SIGABRT handler dumps, restores prev into the slot, chains."""
+    import ctypes
+
+    apis = diagnostics._load_windows_apis()
+    chained: list[int] = []
+    prev_cb = apis.sigabrt_func(lambda signum: chained.append(signum))
+    prev_addr = ctypes.cast(prev_cb, ctypes.c_void_p).value
+    signal_calls: list[tuple[int, int]] = []
+
+    def recording_signal(sig: int, handler: int) -> int:
+        signal_calls.append((sig, handler))
+        return prev_addr
+
+    apis = apis._replace(signal=recording_signal)  # NamedTuple: immutably swap
+    dumps: list[Path] = []
+    monkeypatch.setattr(diagnostics, "_md_apis", apis)
+    monkeypatch.setattr(diagnostics, "_md_sigabrt_prev", prev_addr)
+    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_minidump",
+        lambda d, exception_pointers=None: dumps.append(d) or (d / "x.dmp"),
+    )
+
+    diagnostics._abort_sigabrt_handler(22)
+
+    assert dumps == [tmp_path]
+    assert chained == [22]  # the previous handler (faulthandler's) was chained
+    # ...and our handler uninstalled itself first (re-raise cannot recurse).
+    assert signal_calls == [(apis.sigabrt, prev_addr)]
+
+
+@_win_only
+@pytest.mark.unit
+def test_abort_in_subprocess_writes_minidump_and_chains_faulthandler(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a real abort() lands a mas-*.dmp AND keeps the hang dump.
+
+    The load-bearing proof for the observed crash shape (native abort with no
+    Python slot frames): the C-level SIGABRT handler writes the minidump, then
+    chains to faulthandler's handler so mas-hang.log still gets the
+    all-thread Python dump, and the WARNING breadcrumbs land in mas.log.
+    """
+    logs = tmp_path / "logs"
+    code = (
+        "import manga_ai_studio.diagnostics as d;"
+        f"d.install({str(tmp_path)!r}, hang_timeout_s=60.0);"
+        "import ctypes;"
+        'ctypes.CDLL("ucrtbase.dll").abort()'
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    dumps = sorted(logs.glob("mas-*.dmp"))
+    assert dumps, f"no minidump after abort (rc={proc.returncode}): {proc.stderr!r}"
+    assert dumps[0].read_bytes()[:4] == b"MDMP"
+    hang = (logs / "mas-hang.log").read_text(encoding="utf-8", errors="replace")
+    assert "Fatal Python error" in hang  # the chained faulthandler dump landed
+    text = (logs / "mas.log").read_text(encoding="utf-8", errors="replace")
+    assert "Crash minidump written" in text  # the path breadcrumb landed
+
+
+# ------------------------------------------------- memory telemetry (Task 3)
+@pytest.mark.unit
+def test_memory_threshold_warnings_format_and_latch() -> None:
+    """Warn-once per threshold: formats the crossing, never repeats, independent."""
+    latches = {"rss": False, "commit": False}
+    assert diagnostics._memory_threshold_warnings(1000.0, 40.0, 8192.0, 90.0, latches) == []
+    crossed = diagnostics._memory_threshold_warnings(9000.0, 40.0, 8192.0, 90.0, latches)
+    assert len(crossed) == 1
+    assert "RSS 9000MB" in crossed[0]
+    assert "8192MB" in crossed[0]
+    assert diagnostics._memory_threshold_warnings(9500.0, 40.0, 8192.0, 90.0, latches) == []
+    # The commit latch is independent of the RSS latch.
+    crossed = diagnostics._memory_threshold_warnings(9500.0, 95.0, 8192.0, 90.0, latches)
+    assert len(crossed) == 1
+    assert "commit 95.0%" in crossed[0]
+    assert latches == {"rss": True, "commit": True}
+
+
+@pytest.mark.unit
+def test_memory_thresholds_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MAS_MEM_RSS_WARN_MB / MAS_MEM_COMMIT_WARN_PCT override; junk falls back."""
+    monkeypatch.setenv("MAS_MEM_RSS_WARN_MB", "4096")
+    monkeypatch.setenv("MAS_MEM_COMMIT_WARN_PCT", "70")
+    assert diagnostics._memory_thresholds() == (4096.0, 70.0)
+    monkeypatch.setenv("MAS_MEM_RSS_WARN_MB", "not-a-number")
+    thresholds = diagnostics._memory_thresholds()
+    assert thresholds[0] == float(diagnostics.MEM_RSS_WARN_MB_DEFAULT)
+    assert thresholds[1] == 70.0
+
+
+@pytest.mark.unit
+def test_sample_and_log_memory_info_line_and_latched_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every sample logs the INFO line; the threshold WARNING lands once."""
+    log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    fake = SimpleNamespace(
+        Process=lambda: SimpleNamespace(
+            memory_info=lambda: SimpleNamespace(rss=9 * 1024**3)
+        ),
+        swap_memory=lambda: SimpleNamespace(percent=50.0),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake)
+    diagnostics._sample_and_log_memory()
+    diagnostics._sample_and_log_memory()
+    text = _read_log(log)
+    assert text.count("memory: rss=9216MB commit=50.0%") == 2  # INFO every sample
+    assert text.count("RSS 9216MB") == 1  # WARNING latched after the first
+
+
+@pytest.mark.unit
+def test_sample_and_log_memory_swallows_psutil_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing psutil degrades silently: no raise, heartbeat keeps ticking."""
+    log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    monkeypatch.setitem(sys.modules, "psutil", None)  # ImportError on import
+    diagnostics._sample_and_log_memory()  # must not raise
+    logger.warning("ke1-mem-barrier")
+    assert "ke1-mem-barrier" in _read_log(log)
+
+
+@pytest.mark.unit
+def test_heartbeat_tick_samples_memory_every_nth_beat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watchdog re-arm stays per-beat; the memory sample runs every Nth."""
+    diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    launches: list[int] = []
+    monkeypatch.setattr(diagnostics, "_launch_memory_sample", lambda: launches.append(1))
+    for _ in range(diagnostics.HEARTBEAT_TELEMETRY_EVERY_N * 2 + 2):
+        diagnostics._heartbeat_tick()
+    assert launches == [1, 1]  # exactly the N-th and 2N-th beats
+
+
+@pytest.mark.unit
+def test_launch_memory_sample_runs_sampler_in_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_launch_memory_sample runs the sampler on a daemon thread (never inline)."""
+    diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    done = threading.Event()
+    threads: list[threading.Thread] = []
+    monkeypatch.setattr(
+        diagnostics,
+        "_sample_and_log_memory",
+        lambda: (threads.append(threading.current_thread()), done.set()),
+    )
+    diagnostics._launch_memory_sample()
+    assert done.wait(5.0)
+    assert threads[0].name == "mas-mem-telemetry"
+    assert threads[0].daemon
+    assert threads[0] is not threading.current_thread()

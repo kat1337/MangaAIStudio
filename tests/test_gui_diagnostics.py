@@ -153,3 +153,5 @@ def test_main_wires_diagnostics_in_documented_order() -> None:
     assert idx_qt < idx_hb, "heartbeat armed after the handler"
     assert idx_hb < idx_print, "log path printed after the heartbeat is armed"
     assert "file=sys.stderr" in src
+    # quick-260909-ke1 task 2: the user must be able to find the minidumps.
+    assert ".dmp" in src and "minidump" in src

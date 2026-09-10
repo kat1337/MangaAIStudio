@@ -25,10 +25,47 @@ in one :func:`install` call:
   wedged loop produces an all-thread stack dump ~60s in — zero code changes
   needed at freeze time (the watchdog thread does not need the frozen main
   thread's cooperation).
+- Native-crash minidumps (Windows, quick-260909-ke1 task 2): the 2026-09-09
+  17:04 session died as ``Fatal Python error: Aborted`` — a SIGABRT raised in
+  native code dispatched by the Qt event loop, invisible to faulthandler's
+  Python-frame dump on Windows (``<cannot get C stack on this system>``). A
+  top-level unhandled-exception filter (``kernel32.SetUnhandledExceptionFilter``)
+  plus a C-LEVEL SIGABRT handler (``ucrtbase.signal``) now write
+  ``mas-<timestamp>.dmp`` (``dbghelp.MiniDumpWriteDump``, MiniDumpWithDataSegs
+  — thread stacks + global data, megabytes not gigabytes) into the same logs
+  dir, and log a WARNING with the dump path. abort() is first routed through
+  ``raise(SIGABRT)`` by clearing the CRT ``_CALL_REPORTFAULT`` bit
+  (``ucrtbase._set_abort_behavior``) so the fail-fast/Watson path cannot skip
+  the handler. A PYTHON-level ``signal.signal(SIGABRT, ...)`` handler was
+  deliberately NOT used: CPython's signal handler only trips a flag consumed
+  at the next eval-loop bytecode boundary — a native abort never returns to
+  the eval loop, so the Python function would never run, and installing it
+  would displace faulthandler's C handler and LOSE the mas-hang.log stack
+  dump. The ctypes SIGABRT handler instead chains to the PREVIOUS C handler
+  (faulthandler's) after uninstalling itself, so the all-thread Python dump
+  is preserved and no re-raise can recurse into us. The UEF and SIGABRT
+  handler can both fire for one abort; at most ONE dump per session is
+  written (``_crash_dump_written`` latch). Everything is best-effort: any
+  ctypes/OS failure degrades to the pre-existing behavior (a DEBUG line, no
+  exception) — never an app break. NB a ctypes callback acquires the GIL, so
+  capture from an aborting NATIVE thread can stall while the (dying) main
+  thread holds the GIL; for the observed crash shape — the aborting thread
+  IS the main thread — it re-enters immediately.
+- Heartbeat memory telemetry (quick-260909-ke1 task 3): every
+  ``HEARTBEAT_TELEMETRY_EVERY_N``-th heartbeat beat (~once a minute at the
+  15s default) logs one INFO line with the process RSS and the system commit
+  percent (psutil; sampled on a daemon thread so the tick itself never
+  blocks, and guarded — telemetry never breaks the heartbeat), plus a
+  latched WARNING when the RSS crosses ``MAS_MEM_RSS_WARN_MB`` (default
+  8192) or commit crosses ``MAS_MEM_COMMIT_WARN_PCT`` (default 90). This
+  makes the next bad_alloc-style abort conclusively attributable from the
+  log timeline alone.
 
 Module scope imports ONLY stdlib + loguru (PySide6 stays out so the core
 battery and future core-side callers never need Qt); the Qt-touching helpers
-(:func:`heartbeat`, :func:`install_qt_message_handler`) import lazily.
+(:func:`heartbeat`, :func:`install_qt_message_handler`) and the native
+capture helpers (:func:`install_minidump_handler`, :func:`_write_minidump`)
+import lazily.
 
 The platform truth for the watchdog dump header is ``Timeout (...)!`` followed
 by ``Thread 0x... (most recent call first):`` lines (measured on this
@@ -39,11 +76,13 @@ crashing thread dumps itself).
 from __future__ import annotations
 
 import faulthandler
+import os
 import platform
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, NamedTuple
 
 from loguru import logger
 
@@ -51,12 +90,17 @@ from manga_ai_studio import __version__
 
 __all__ = [
     "HANG_TIMEOUT_S",
+    "HEARTBEAT_TELEMETRY_EVERY_N",
+    "MEM_COMMIT_WARN_PCT_DEFAULT",
+    "MEM_RSS_WARN_MB_DEFAULT",
+    "MINIDUMP_FLAGS",
     "install",
     "reset",
     "cancel_hang_watchdog",
     "heartbeat",
     "stop_heartbeat",
     "install_qt_message_handler",
+    "install_minidump_handler",
 ]
 
 # The production watchdog deadline (seconds). A main-thread stall longer than
@@ -71,6 +115,33 @@ _ROTATION = "5 MB"
 _RETENTION = 3
 # loguru WARNING severity number (the admission floor).
 _WARNING_LEVEL_NO = 30
+
+# ------------------------------------------------------- memory telemetry
+# One INFO sample every N-th heartbeat beat (~1/min at the 15s default).
+HEARTBEAT_TELEMETRY_EVERY_N = 4
+# High-water defaults (env-overridable at call time, see _memory_thresholds):
+# a warn at 8 GB RSS / 90% system commit makes an OOM-style native abort
+# attributable from the mas.log timeline alone. RSS covers torch/scipy
+# residency; commit catches the system-level push toward allocation failure.
+MEM_RSS_WARN_MB_DEFAULT = 8 * 1024
+MEM_COMMIT_WARN_PCT_DEFAULT = 90.0
+_ENV_MEM_RSS_MB = "MAS_MEM_RSS_WARN_MB"
+_ENV_MEM_COMMIT_PCT = "MAS_MEM_COMMIT_WARN_PCT"
+
+# ------------------------------------------------------- minidump capture
+# MiniDumpWithDataSegs (MiniDumpNormal | WithDataSegs): thread stacks plus
+# global data — megabytes, never the multi-GB full-heap dump.
+MINIDUMP_FLAGS = 0x00000001
+_DUMP_PREFIX = "mas-"
+_DUMP_SUFFIX = ".dmp"
+# crtdefs.h _CALL_REPORTFAULT: the abort() bit that raises the fail-fast/
+# Watson path INSTEAD of raise(SIGABRT); cleared so abort() reaches our
+# C-level SIGABRT handler (and faulthandler's chain) on every machine.
+_CALL_REPORTFAULT = 0x00000002
+# Win32 unhandled-filter return: keep searching (default WER handling follows).
+EXCEPTION_CONTINUE_SEARCH = 0
+_SIG_DFL = 0
+_SIG_IGN = 1
 
 _LOG_FORMAT = (
     "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}"
@@ -88,6 +159,22 @@ _prev_sys_excepthook = None
 _prev_threading_excepthook = None
 _heartbeat_timer = None  # QTimer parented to the QApplication (Task 2)
 
+# Memory-telemetry state (Task 3): beat counter + the warn-once latches.
+_beat_count = 0
+_mem_latches = {"rss": False, "commit": False}
+
+# Minidump-capture state (Task 2). The ctypes callback objects MUST stay
+# referenced for the process lifetime (a GC'd callback = a wild pointer in
+# kernel32's filter slot); reset() drops them only after deregistering.
+_minidump_installed = False
+_dump_dir: Path | None = None
+_md_apis: Any = None
+_md_filter_cb: Any = None
+_md_sigabrt_cb: Any = None
+_md_filter_prev: int | None = None
+_md_sigabrt_prev: int | None = None
+_crash_dump_written = False
+
 
 def logs_dir(base_dir: Path | None = None) -> Path:
     """The log directory: ``base_dir/logs`` or the profile dir's ``logs`` sibling."""
@@ -96,8 +183,11 @@ def logs_dir(base_dir: Path | None = None) -> Path:
 
 
 def _admit(record) -> bool:  # noqa: ANN001 (loguru record dict)
-    """Sink filter: WARNING floor + gui-namespace DEBUG + session_marker escape."""
-    if record["extra"].get("session_marker"):
+    """Sink filter: WARNING floor + gui-namespace DEBUG + escape extras."""
+    extra = record["extra"]
+    # The session separator and the heartbeat memory-telemetry INFO lines are
+    # admitted below the WARNING floor (both are diagnostics-native records).
+    if extra.get("session_marker") or extra.get("memory_telemetry"):
         return True
     if record["level"].no >= _WARNING_LEVEL_NO:
         return True
@@ -114,6 +204,7 @@ def install(base_dir: Path | None = None, hang_timeout_s: float = HANG_TIMEOUT_S
     """
     global _is_installed, _sink_id, _log_path, _hang_path, _hang_fh, _hang_timeout
     global _prev_sys_excepthook, _prev_threading_excepthook
+    global _beat_count, _mem_latches
 
     log_dir = logs_dir(base_dir)
     log_path = log_dir / _LOG_FILE_NAME
@@ -123,6 +214,12 @@ def install(base_dir: Path | None = None, hang_timeout_s: float = HANG_TIMEOUT_S
     log_dir.mkdir(parents=True, exist_ok=True)
     _log_path = log_path
     _hang_path = log_dir / _HANG_FILE_NAME
+    _beat_count = 0
+    _mem_latches = {"rss": False, "commit": False}
+
+    # Warm the telemetry path FIRST (no faulthandler deadline is armed yet):
+    # the cold psutil import must never run under an armed hang deadline.
+    _warm_memory_telemetry()
 
     # Hang capture first: faulthandler writes raw from its watchdog thread into
     # a DEDICATED file (never the loguru sink's file — fd-level writes would
@@ -149,6 +246,9 @@ def install(base_dir: Path | None = None, hang_timeout_s: float = HANG_TIMEOUT_S
         format=_LOG_FORMAT,
     )
     _write_session_separator()
+    # Native-crash minidumps LAST (after the sink): its DEBUG traces must never
+    # land in the file before the session separator does.
+    install_minidump_handler(log_dir)
     _is_installed = True
     return log_path
 
@@ -187,6 +287,386 @@ def _threading_excepthook(args) -> None:  # noqa: ANN001 (threading.ExceptHookAr
 def cancel_hang_watchdog() -> None:
     """Disarm the ``dump_traceback_later`` watchdog (tests + heartbeat tick)."""
     faulthandler.cancel_dump_traceback_later()
+
+
+# ----------------------------------------------------------- memory telemetry
+# (quick-260909-ke1 task 3 — psutil is imported lazily so the module keeps a
+# stdlib-only import graph; a missing/failing psutil degrades to a DEBUG line,
+# never a heartbeat break).
+
+
+def _env_number(name: str, default: float) -> float:
+    """Env override reader: malformed values fall back to the default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _memory_thresholds() -> tuple[float, float]:
+    """``(rss_warn_mb, commit_warn_pct)`` with the MAS_MEM_* env overrides."""
+    return (
+        _env_number(_ENV_MEM_RSS_MB, MEM_RSS_WARN_MB_DEFAULT),
+        _env_number(_ENV_MEM_COMMIT_PCT, MEM_COMMIT_WARN_PCT_DEFAULT),
+    )
+
+
+def _memory_threshold_warnings(
+    rss_mb: float,
+    commit_pct: float,
+    rss_warn_mb: float,
+    commit_warn_pct: float,
+    latches: dict[str, bool],
+) -> list[str]:
+    """Warn-once messages for newly-crossed thresholds; crossing latches.
+
+    Pure function (the latching dict is passed in) so the threshold/latch
+    logic is testable without psutil or the heartbeat. Each latch fires AT
+    MOST once per session — a threshold is reported the first time it is
+    seen crossed, never again (no spam around a hovering value).
+    """
+    messages: list[str] = []
+    if rss_mb >= rss_warn_mb and not latches["rss"]:
+        latches["rss"] = True
+        messages.append(
+            f"Memory threshold: process RSS {rss_mb:.0f}MB >= {rss_warn_mb:.0f}MB "
+            f"(warn-once latch; if the app now dies with 'Fatal Python error: "
+            f"Aborted', the abort is memory exhaustion)"
+        )
+    if commit_pct >= commit_warn_pct and not latches["commit"]:
+        latches["commit"] = True
+        messages.append(
+            f"Memory threshold: system commit {commit_pct:.1f}% >= "
+            f"{commit_warn_pct:.0f}% (warn-once latch; allocation failures "
+            f"become likely near the commit limit)"
+        )
+    return messages
+
+
+def _sample_and_log_memory() -> None:
+    """One telemetry sample: an INFO line + latched threshold WARNINGs.
+
+    Called from a telemetry thread (see :func:`_launch_memory_sample`) or
+    directly in tests — NEVER raises: a missing or failing psutil only costs
+    a DEBUG line (filtered from the file sink).
+    """
+    try:
+        import psutil
+
+        rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+        commit_pct = float(psutil.swap_memory().percent)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break the heartbeat
+        logger.debug(f"memory telemetry unavailable: {exc}")
+        return
+    rss_warn_mb, commit_warn_pct = _memory_thresholds()
+    for message in _memory_threshold_warnings(
+        rss_mb, commit_pct, rss_warn_mb, commit_warn_pct, _mem_latches
+    ):
+        logger.warning(message)
+    logger.bind(memory_telemetry=True).info(
+        f"memory: rss={rss_mb:.0f}MB commit={commit_pct:.1f}%"
+    )
+
+
+def _launch_memory_sample() -> None:
+    """Run one telemetry sample OFF the event-loop thread.
+
+    A daemon thread keeps the tick O(microseconds); samples are ~1/min in
+    production, so no overlap guard is needed. (The first-call psutil costs
+    are paid up front by :func:`_warm_memory_telemetry` at install time.)
+    """
+    try:
+        threading.Thread(
+            target=_sample_and_log_memory, name="mas-mem-telemetry", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001 — telemetry must never break the heartbeat
+        pass
+
+
+def _warm_memory_telemetry() -> None:
+    """Pay the psutil first-call costs BEFORE the hang watchdog is armed.
+
+    The cold ``import psutil`` can hold the GIL for hundreds of milliseconds
+    in a heavy process; running it under an armed hang deadline (or inside a
+    live tick) can starve the timer dispatch long enough to fire a spurious
+    watchdog dump. install() runs this BEFORE ``dump_traceback_later`` — no
+    deadline is outstanding, so the cost is invisible. Failure is fine: the
+    telemetry then degrades to a DEBUG line per sample.
+    """
+    try:
+        import psutil
+
+        psutil.Process().memory_info().rss
+        psutil.swap_memory().percent
+    except Exception:  # noqa: BLE001 — telemetry stays optional
+        pass
+
+
+# ------------------------------------------------------------ minidump capture
+# (quick-260909-ke1 task 2 — see the module docstring for the design; the
+# whole section is Windows-only, ctypes-lazy, and best-effort by contract).
+
+
+class _WindowsApis(NamedTuple):
+    """The ctypes entry points + callback factories for the capture path."""
+
+    sigabrt: int
+    filter_func: Any
+    sigabrt_func: Any
+    set_unhandled_exception_filter: Any
+    mini_dump_write_dump: Any
+    get_current_process: Any
+    get_current_process_id: Any
+    get_current_thread_id: Any
+    signal: Any
+    set_abort_behavior: Any  # None when the ucrtbase export is absent
+
+
+def _load_windows_apis() -> _WindowsApis:
+    """Resolve the kernel32/dbghelp/ucrtbase entry points for the capture path.
+
+    Raises OSError when anything required is missing (non-Windows, absent
+    export) so callers degrade gracefully. Optional exports (e.g.
+    ``_set_abort_behavior``) come through as None instead of raising.
+    """
+    if sys.platform != "win32":
+        raise OSError("minidump capture requires Windows")
+    import ctypes
+    from signal import SIGABRT
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    dbghelp = ctypes.WinDLL("dbghelp", use_last_error=True)
+    ucrtbase = ctypes.CDLL("ucrtbase.dll")
+
+    def _resolve(lib: Any, name: str, restype: Any, argtypes: list) -> Any:
+        try:
+            fn = getattr(lib, name)
+        except AttributeError as exc:  # pragma: no cover - depends on OS build
+            raise OSError(f"{name} export not found") from exc
+        fn.restype = restype
+        fn.argtypes = argtypes
+        return fn
+
+    c = ctypes
+    set_abort_behavior = getattr(ucrtbase, "_set_abort_behavior", None)
+    if set_abort_behavior is not None:
+        set_abort_behavior.restype = c.c_uint32
+        set_abort_behavior.argtypes = [c.c_uint32, c.c_uint32]
+
+    return _WindowsApis(
+        sigabrt=int(SIGABRT),
+        # x64 has a single calling convention; on the rare 32-bit build the
+        # UCRT handler is cdecl and WINFUNCTYPE(stdcall) would be wrong — this
+        # app ships x64 only, and the handlers are guarded regardless.
+        filter_func=c.WINFUNCTYPE(c.c_long, c.c_void_p),
+        sigabrt_func=c.WINFUNCTYPE(None, c.c_int),
+        set_unhandled_exception_filter=_resolve(
+            kernel32, "SetUnhandledExceptionFilter", c.c_void_p, [c.c_void_p]
+        ),
+        mini_dump_write_dump=_resolve(
+            dbghelp,
+            "MiniDumpWriteDump",
+            c.c_long,  # Win32 BOOL
+            [
+                c.c_void_p,  # hProcess
+                c.c_uint32,  # ProcessId
+                c.c_void_p,  # hFile
+                c.c_uint32,  # DumpType
+                c.c_void_p,  # ExceptionParam (ptr or NULL)
+                c.c_void_p,  # UserStreamParam
+                c.c_void_p,  # CallbackParam
+            ],
+        ),
+        get_current_process=_resolve(kernel32, "GetCurrentProcess", c.c_void_p, []),
+        get_current_process_id=_resolve(kernel32, "GetCurrentProcessId", c.c_uint32, []),
+        get_current_thread_id=_resolve(kernel32, "GetCurrentThreadId", c.c_uint32, []),
+        signal=_resolve(ucrtbase, "signal", c.c_void_p, [c.c_int, c.c_void_p]),
+        set_abort_behavior=set_abort_behavior,
+    )
+
+
+def _write_minidump(
+    log_dir: Path, exception_pointers: int | None = None
+) -> Path | None:
+    """Write one minidump into ``log_dir``; the path on success, else None.
+
+    ``exception_pointers`` is the raw LPEXCEPTION_POINTERS from the filter
+    (None for the SIGABRT path — a stack dump without exception context still
+    shows every thread's native stack). Never returns a partial file: a
+    failed MiniDumpWriteDump unlinks its target. Raises only on environment
+    problems (non-Windows, missing dbghelp) — crash-path callers guard it.
+    """
+    import ctypes
+    import msvcrt
+
+    apis = _load_windows_apis()
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = log_dir / f"{_DUMP_PREFIX}{stamp}{_DUMP_SUFFIX}"
+    suffix = 2
+    while path.exists():  # second-resolution names: never overwrite a dump
+        path = log_dir / f"{_DUMP_PREFIX}{stamp}-{suffix}{_DUMP_SUFFIX}"
+        suffix += 1
+
+    exc_param = None
+    if exception_pointers:
+        # MINIDUMP_EXCEPTION_INFORMATION {ThreadId, PEXCEPTION_POINTERS,
+        # ClientPointers} — defined inline to keep ctypes lazy at module scope.
+        class _MiniDumpExceptionInfo(ctypes.Structure):
+            _fields_ = [
+                ("ThreadId", ctypes.c_uint32),
+                ("ExceptionPointers", ctypes.c_void_p),
+                ("ClientPointers", ctypes.c_int32),
+            ]
+
+        exc_param = ctypes.addressof(
+            _MiniDumpExceptionInfo(
+                apis.get_current_thread_id(), exception_pointers, False
+            )
+        )
+
+    file_obj = open(path, "wb")
+    try:
+        handle = msvcrt.get_osfhandle(file_obj.fileno())
+        ok = apis.mini_dump_write_dump(
+            apis.get_current_process(),
+            apis.get_current_process_id(),
+            handle,
+            MINIDUMP_FLAGS,
+            exc_param,
+            None,
+            None,
+        )
+    finally:
+        file_obj.close()
+    if not ok:
+        try:
+            path.unlink()
+        except OSError:  # pragma: no cover - best-effort cleanup
+            pass
+        return None
+    return path
+
+
+def _capture_crash_dump(exception_pointers: int | None) -> None:
+    """Write the one crash dump per session and say so in mas.log (WARNING)."""
+    global _crash_dump_written
+    if _crash_dump_written or _dump_dir is None:
+        return
+    logger.warning(
+        f"Native crash: writing minidump into {_dump_dir} "
+        f"({_DUMP_PREFIX}*.dmp, next to mas.log)"
+    )
+    path = _write_minidump(_dump_dir, exception_pointers)
+    if path is not None:
+        _crash_dump_written = True
+        logger.warning(f"Crash minidump written: {path}")
+    else:
+        logger.warning("Crash minidump could not be written (dbghelp failure)")
+    # Bound-flush the WARNINGs: the enqueue writer thread may be the dying
+    # thread itself, so complete() runs in a helper thread capped at 2s — the
+    # dump file (already on disk) is the load-bearing artifact either way.
+    try:
+        flusher = threading.Thread(target=logger.complete, daemon=True)
+        flusher.start()
+        flusher.join(2.0)
+    except Exception:  # noqa: BLE001 — best-effort to the very end
+        pass
+
+
+def _unhandled_exception_filter(exception_pointers: int | None) -> int:
+    """The ctypes top-level unhandled-exception filter (SEH crash path)."""
+    try:
+        _capture_crash_dump(exception_pointers)
+    except Exception:  # noqa: BLE001 — the filter must never raise
+        pass
+    prev = _md_filter_prev
+    if prev:
+        try:
+            apis = _md_apis
+            if apis is not None:
+                return int(apis.filter_func(prev)(exception_pointers))
+        except Exception:  # noqa: BLE001
+            pass
+    return EXCEPTION_CONTINUE_SEARCH
+
+
+def _abort_sigabrt_handler(signum: int) -> None:
+    """The ctypes C-LEVEL SIGABRT handler (the observed abort() path).
+
+    Writes the minidump, then chains to the PREVIOUS C handler — usually
+    faulthandler's, preserving the all-thread Python-stack dump in
+    mas-hang.log. Our handler is uninstalled BEFORE the chain so any
+    re-raise inside the previous handler (faulthandler restores + re-raises)
+    cannot recurse into us.
+    """
+    try:
+        _capture_crash_dump(None)
+    except Exception:  # noqa: BLE001 — never raise out of a C signal handler
+        pass
+    apis = _md_apis
+    prev = _md_sigabrt_prev
+    if apis is None or prev in (None, _SIG_DFL, _SIG_IGN):
+        return  # nothing to chain; abort()'s own _exit(3) proceeds
+    try:
+        apis.signal(apis.sigabrt, prev)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        apis.sigabrt_func(prev)(signum)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def install_minidump_handler(log_dir: Path | None = None) -> None:
+    """Install the UEF + SIGABRT minidump capture (Windows-only, idempotent).
+
+    Any failure (non-Windows, missing dbghelp, ...) is swallowed with a DEBUG
+    line: the app keeps running exactly as before, just without dump capture.
+    """
+    global _minidump_installed, _dump_dir, _md_apis
+    global _md_filter_cb, _md_sigabrt_cb, _md_filter_prev, _md_sigabrt_prev
+    if _minidump_installed:
+        return
+    target = log_dir if log_dir is not None else (
+        _log_path.parent if _log_path is not None else None
+    )
+    if target is None:  # pragma: no cover - install() always passes a dir
+        target = logs_dir(None)
+    try:
+        import ctypes
+
+        apis = _load_windows_apis()
+        # abort(): prefer raise(SIGABRT) over the fail-fast/Watson detour so
+        # the handler chain below always sees the abort.
+        if apis.set_abort_behavior is not None:
+            apis.set_abort_behavior(0, _CALL_REPORTFAULT)
+        filter_cb = apis.filter_func(_unhandled_exception_filter)
+        prev_filter = apis.set_unhandled_exception_filter(
+            ctypes.cast(filter_cb, ctypes.c_void_p).value
+        )
+        sigabrt_cb = apis.sigabrt_func(_abort_sigabrt_handler)
+        prev_sigabrt = apis.signal(
+            apis.sigabrt, ctypes.cast(sigabrt_cb, ctypes.c_void_p).value
+        )
+        # Commit the module state only after EVERY registration succeeded.
+        _md_apis = apis
+        _md_filter_cb = filter_cb  # keep-alive: a GC'd callback = wild pointer
+        _md_sigabrt_cb = sigabrt_cb
+        _md_filter_prev = prev_filter
+        _md_sigabrt_prev = prev_sigabrt
+        _dump_dir = Path(target)
+        _minidump_installed = True
+        logger.debug(
+            "minidump capture installed (native crashes leave "
+            f"{_DUMP_PREFIX}<timestamp>{_DUMP_SUFFIX} next to mas.log)"
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostics must never break the app
+        logger.debug(f"minidump capture unavailable (continuing without): {exc}")
 
 
 # ----------------------------------------------------------------- Qt layer
@@ -250,14 +730,24 @@ def heartbeat(app, interval_s: float = 15.0) -> None:  # noqa: ANN001 (QApplicat
     timer.timeout.connect(_heartbeat_tick)
     timer.start()
     _heartbeat_timer = timer
+    # t0 baseline sample (async — see _launch_memory_sample): warms the psutil
+    # path out of any tick and anchors the session's memory timeline at zero.
+    _launch_memory_sample()
 
 
 def _heartbeat_tick() -> None:
-    """The heartbeat slot: reset the watchdog deadline."""
+    """The heartbeat slot: reset the watchdog deadline; sample memory."""
+    global _beat_count
     if _hang_fh is None:
         return
     faulthandler.cancel_dump_traceback_later()
     faulthandler.dump_traceback_later(_hang_timeout, repeat=True, file=_hang_fh)
+    # quick-260909-ke1 task 3: one INFO memory sample + latched threshold
+    # WARNINGs every N-th beat (~once a minute at the 15s default), sampled
+    # off the event-loop thread so the tick itself never blocks.
+    _beat_count += 1
+    if _beat_count % HEARTBEAT_TELEMETRY_EVERY_N == 0:
+        _launch_memory_sample()
 
 
 def stop_heartbeat() -> None:
@@ -280,9 +770,33 @@ def reset() -> None:
     """
     global _is_installed, _sink_id, _log_path, _hang_path, _hang_fh
     global _prev_sys_excepthook, _prev_threading_excepthook, _prev_qt_handler
+    global _minidump_installed, _dump_dir, _md_apis
+    global _md_filter_cb, _md_sigabrt_cb, _md_filter_prev, _md_sigabrt_prev
+    global _crash_dump_written, _beat_count, _mem_latches
 
     stop_heartbeat()
     faulthandler.cancel_dump_traceback_later()
+    if _minidump_installed:
+        apis, filter_prev, sigabrt_prev = _md_apis, _md_filter_prev, _md_sigabrt_prev
+        try:
+            if apis is not None:
+                apis.set_unhandled_exception_filter(filter_prev)
+                if sigabrt_prev in (None, _SIG_DFL, _SIG_IGN):
+                    apis.signal(apis.sigabrt, _SIG_DFL)
+                else:
+                    apis.signal(apis.sigabrt, sigabrt_prev)
+        except Exception:  # noqa: BLE001 — a diagnostics restore must never raise
+            pass
+        _md_apis = None
+        _md_filter_cb = None  # drop the ctypes callbacks ONLY after deregistering
+        _md_sigabrt_cb = None
+        _md_filter_prev = None
+        _md_sigabrt_prev = None
+        _dump_dir = None
+        _crash_dump_written = False
+        _minidump_installed = False
+    _beat_count = 0
+    _mem_latches = {"rss": False, "commit": False}
     if _prev_qt_handler is not None:
         try:
             from PySide6.QtCore import qInstallMessageHandler

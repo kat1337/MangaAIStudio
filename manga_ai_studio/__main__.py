@@ -30,8 +30,14 @@ def main() -> None:
     app = create_app(sys.argv)
     diagnostics.install_qt_message_handler()
     diagnostics.heartbeat(app)
-    # The user must always be able to find and paste the log path.
+    # The user must always be able to find and paste the log path. Native
+    # crashes additionally leave a minidump next to it (quick-260909-ke1).
     print(f"[manga-ai-studio] log file: {log_path}", file=sys.stderr)
+    print(
+        "[manga-ai-studio] native crashes leave a mas-<timestamp>.dmp minidump "
+        "next to the log file",
+        file=sys.stderr,
+    )
 
     config_dir = Path.home() / ".manga_ai_studio"
     config_dir.mkdir(parents=True, exist_ok=True)
