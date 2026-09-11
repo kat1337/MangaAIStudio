@@ -130,6 +130,19 @@ _FONT_STYLE_FLAGS = {
     "Bold": (True, False),
     "Bold Italic": (True, True),
 }
+# quick-260910-vej (T-vej-04): the ONLY TextStyle keys the Inspector Fill
+# commit may carry. `_on_inspector_style_fill_committed` forwards exactly
+# these (explicit whitelist — never a blind **changes pass-through from the
+# widget layer into dataclasses.replace).
+_STYLE_FILL_KEYS = frozenset(
+    {
+        "fill_type",
+        "fill_color_b",
+        "fill_angle_deg",
+        "pattern_scale",
+        "pattern_tile_b64",
+    }
+)
 _QSETTINGS_ORG = "MangaAIStudio"
 _QSETTINGS_APP = "MangaAIStudio"
 
@@ -4396,6 +4409,10 @@ class MainWindow(QMainWindow):
             # apply-to-all snapshot machinery (D-10).
             on_style_char_spacing=self._on_inspector_char_spacing_committed,
             on_style_line_spacing=self._on_inspector_line_spacing_committed,
+            # quick-260910-vej: the Fill row's commit (Solid | Gradient |
+            # Pattern + conditional sub-controls), riding the SAME
+            # apply-to-all snapshot machinery (D-10).
+            on_style_fill=self._on_inspector_style_fill_committed,
             # Plan 08-08 (D-13/D-14): the Inpaint override combo's grouped
             # commit (UI-SPEC §38 — ONE snapshot, recompose, border refresh,
             # status flash).
@@ -4976,6 +4993,21 @@ class MainWindow(QMainWindow):
     def _on_inspector_style_color_committed(self, color_hex: str) -> None:
         self._inspector_style_commit(
             lambda item: self._replace_style(item.pagebox, color=color_hex)
+        )
+
+    def _on_inspector_style_fill_committed(self, changes: dict) -> None:
+        """quick-260910-vej: the Fill row's commit — applies the changed fill
+        fields to EVERY selected box via ``_replace_style`` (fresh
+        ``TextStyle``, D-10). T-vej-04 mitigation: only the whitelisted
+        ``_STYLE_FILL_KEYS`` are forwarded — the widget-layer dict can never
+        smuggle an arbitrary ``TextStyle`` kwarg through ``**changes``. A
+        commit without ``pattern_tile_b64`` never clobbers an existing tile
+        (the tile is only committed on a real pick)."""
+        known = {k: changes[k] for k in _STYLE_FILL_KEYS if k in changes}
+        if not known:
+            return
+        self._inspector_style_commit(
+            lambda item: self._replace_style(item.pagebox, **known)
         )
 
     def _on_inspector_style_align_committed(self, h, v) -> None:

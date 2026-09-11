@@ -112,10 +112,10 @@ def _pagebox_with_style(**style_kwargs) -> PageBox:
 
 
 def _style_callbacks(fired: dict):
-    """The 7 style-section commit callbacks recording into ``fired``.
+    """The style-section commit callbacks recording into ``fired``.
 
     ``fired`` keys: font / font_style / size / auto_fit / color / align /
-    effect. The four Phase 4 callbacks are no-ops (unused here).
+    effect / fill. The four Phase 4 callbacks are no-ops (unused here).
     """
     return dict(
         on_recognized=lambda _t: None,
@@ -131,6 +131,8 @@ def _style_callbacks(fired: dict):
         on_style_align=lambda h, v: fired["align"].append((h, v)),
         # style_effect_changed emits (key, dict) — capture the tuple.
         on_style_effect=lambda key, payload: fired["effect"].append((key, payload)),
+        # quick-260910-vej: style_fill_changed emits the changed-fields dict.
+        on_style_fill=lambda changes: fired.setdefault("fill", []).append(changes),
     )
 
 
@@ -1428,3 +1430,484 @@ def test_pick_effect_color_stays_opaque_hexrgb(qtbot, monkeypatch) -> None:
     assert payload["color"] == "#123456", (
         "the effect color must stay the 7-char HexRgb spelling (opaque)"
     )
+
+
+# ===========================================================================
+# quick-260910-vej — the Fill row (Solid | Gradient | Pattern)
+# ===========================================================================
+
+
+def _tile_png_b64(w: int = 8, h: int = 8) -> str:
+    """A real two-color PNG tile (top half red / bottom half green) as b64."""
+    import base64
+    from io import BytesIO
+
+    from PIL import Image as PILImage
+
+    img = PILImage.new("RGBA", (w, h), (255, 0, 0, 255))
+    for y in range(h // 2, h):
+        for x in range(w):
+            img.putpixel((x, y), (0, 255, 0, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _write_tile_file(tmp_path, name="tile.png"):
+    """Write the two-color tile as a real file; returns its path."""
+    import base64
+
+    path = tmp_path / name
+    path.write_bytes(base64.b64decode(_tile_png_b64()))
+    return path
+
+
+def _fired_fill(fired: dict) -> list:
+    return fired.get("fill", [])
+
+
+def _fresh_fired() -> dict:
+    return {
+        "font": [], "font_style": [], "size": [], "auto_fit": [],
+        "color": [], "align": [], "effect": [],
+    }
+
+
+@pytest.mark.gui
+def test_fill_row_present_with_conditional_sub_rows(qtbot) -> None:
+    """The Fill row exists above Color with Solid|Gradient|Pattern (+Mixed
+    capability); the sub-rows appear EXACTLY for Gradient (Color B + Angle)
+    and Pattern (Image… + Scale); a legacy solid style loads Solid with all
+    sub-rows hidden."""
+    panel = _make_inspector(qtbot)
+
+    # Widgets + ranges (UI == model clamps by construction).
+    assert isinstance(panel.fill_combo, QComboBox)
+    assert [panel.fill_combo.itemText(i) for i in range(panel.fill_combo.count())] == [
+        "Solid", "Gradient", "Pattern",
+    ]
+    assert panel.fill_angle_spin.minimum() == 0
+    assert panel.fill_angle_spin.maximum() == 359
+    assert panel.fill_angle_spin.suffix() == "\u00b0"
+    assert panel.fill_scale_spin.minimum() == 0.10
+    assert panel.fill_scale_spin.maximum() == 10.00
+    assert panel.fill_scale_spin.suffix() == "\u00d7"
+    assert isinstance(panel.fill_image_button, QToolButton)
+
+    # Legacy default style (fill_type solid): Solid shown, sub-rows hidden.
+    panel.load_box(_pagebox_with_style())
+    assert panel.fill_combo.currentText() == "Solid"
+    assert panel.fill_color_b_swatch.isHidden() is True
+    assert panel.fill_angle_spin.isHidden() is True
+    assert panel.fill_image_button.isHidden() is True
+    assert panel.fill_scale_spin.isHidden() is True
+
+    # Gradient: Color B + Angle visible, Image + Scale hidden.
+    panel.load_box(
+        _pagebox_with_style(
+            fill_type="gradient", fill_color_b="#00ff00", fill_angle_deg=45.0
+        )
+    )
+    assert panel.fill_combo.currentText() == "Gradient"
+    assert panel.fill_color_b_swatch.isHidden() is False
+    assert panel.fill_angle_spin.isHidden() is False
+    assert panel.fill_image_button.isHidden() is True
+    assert panel.fill_scale_spin.isHidden() is True
+    assert panel.fill_color_b_swatch.color == "#00ff00"
+    assert panel.fill_angle_spin.value() == 45
+
+    # Pattern: Image + Scale visible, Color B + Angle hidden.
+    panel.load_box(
+        _pagebox_with_style(
+            fill_type="pattern", pattern_scale=2.5,
+            pattern_tile_b64=_tile_png_b64(),
+        )
+    )
+    assert panel.fill_combo.currentText() == "Pattern"
+    assert panel.fill_color_b_swatch.isHidden() is True
+    assert panel.fill_angle_spin.isHidden() is True
+    assert panel.fill_image_button.isHidden() is False
+    assert panel.fill_scale_spin.isHidden() is False
+    assert panel.fill_scale_spin.value() == 2.5
+    assert "8x8" in panel.fill_image_button.toolTip()
+
+
+@pytest.mark.gui
+def test_fill_combo_commit_emits_only_type(qtbot) -> None:
+    """Switching the Fill combo emits style_fill_changed with ONLY the
+    fill_type key; the WR-01 loaded memory suppresses an unchanged cycle."""
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style())  # Solid
+
+    panel.fill_combo.setCurrentText("Gradient")
+    assert _fired_fill(fired) == [{"fill_type": "gradient"}]
+    panel.fill_combo.setCurrentText("Pattern")
+    assert _fired_fill(fired) == [
+        {"fill_type": "gradient"}, {"fill_type": "pattern"},
+    ]
+
+    # WR-01: the loaded memory is the ORIGINAL Solid (this standalone panel
+    # has no consumer reload), so switching back to Solid is an UNCHANGED
+    # cycle — a no-op, never a spurious commit.
+    panel.fill_combo.setCurrentText("Solid")
+    assert len(_fired_fill(fired)) == 2, "an unchanged cycle must be a no-op"
+
+
+@pytest.mark.gui
+def test_fill_angle_and_scale_wr01_guards(qtbot) -> None:
+    """Angle/Scale commit only on a REAL change (WR-01); a mixed sentinel
+    load drops the no-op focus cycle (Pitfall 7)."""
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    panel.load_box(
+        _pagebox_with_style(fill_type="gradient", fill_angle_deg=45.0)
+    )
+    # Unchanged focus cycle: nothing fires.
+    panel.fill_angle_spin.setValue(45)
+    panel.fill_angle_spin.editingFinished.emit()
+    assert _fired_fill(fired) == []
+    # A real change commits the angle only.
+    panel.fill_angle_spin.setValue(120)
+    panel.fill_angle_spin.editingFinished.emit()
+    assert _fired_fill(fired) == [{"fill_angle_deg": 120.0}]
+
+    panel.load_box(
+        _pagebox_with_style(fill_type="pattern", pattern_scale=1.0)
+    )
+    panel.fill_scale_spin.setValue(1.00)
+    panel.fill_scale_spin.editingFinished.emit()
+    assert len(_fired_fill(fired)) == 1
+    panel.fill_scale_spin.setValue(2.50)
+    panel.fill_scale_spin.editingFinished.emit()
+    assert _fired_fill(fired)[-1] == {"pattern_scale": 2.5}
+
+    # Mixed sentinel loads (differing values across the selection): a no-op
+    # cycle on the sentinel value drops.
+    pb_a = _pagebox_with_style(fill_type="gradient", fill_angle_deg=30.0)
+    pb_b = _pagebox_with_style(fill_type="gradient", fill_angle_deg=300.0)
+    panel.load_multi_selection([pb_a, pb_b])
+    assert panel._loaded_style_fill_angle is None
+    assert panel.fill_angle_spin.specialValueText() == "Mixed"
+    panel.fill_angle_spin.setValue(0)
+    panel.fill_angle_spin.editingFinished.emit()
+    assert len(_fired_fill(fired)) == 2
+
+
+@pytest.mark.gui
+def test_fill_color_b_picker_alpha_capable_and_wr01(qtbot, monkeypatch) -> None:
+    """The Color B picker carries ShowAlphaChannel | DontUseNativeDialog and
+    emits the canonical HexArgb spelling; re-picking the loaded color in a
+    different opaque spelling is a WR-01 no-op."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(
+        _pagebox_with_style(fill_type="gradient", fill_color_b="#ffffff")
+    )
+    captured: dict = {}
+
+    def fake_get_color(*args, **kwargs):
+        captured["args"] = args
+        return QColor("#40ff0000")
+
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(fake_get_color))
+    panel.fill_color_b_swatch.clicked.emit()
+
+    # getColor(parent, title, color, options) — the options ride the 4th
+    # positional slot (the quick-260909-nj9 picker's calling convention).
+    assert len(captured["args"]) == 4, (
+        "the Color B picker must pass the dialog options positionally"
+    )
+    options = captured["args"][3]
+    assert options is not None
+    assert options & QColorDialog.ColorDialogOption.ShowAlphaChannel
+    assert options & QColorDialog.ColorDialogOption.DontUseNativeDialog
+    assert _fired_fill(fired) == [{"fill_color_b": "#40ff0000"}]
+
+    # WR-01 (alpha-aware, the _norm_hex_a discipline): after the consumer
+    # reload carries the committed color, re-picking it in the OPAQUE
+    # spelling (#ff0000 -> #ffff0000) is a no-op — never a spurious commit.
+    panel.load_box(
+        _pagebox_with_style(fill_type="gradient", fill_color_b="#ffff0000")
+    )
+    monkeypatch.setattr(
+        QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor("#ff0000"))
+    )
+    panel.fill_color_b_swatch.clicked.emit()
+    assert len(_fired_fill(fired)) == 1, (
+        "re-picking the loaded color in another opaque spelling must be a no-op"
+    )
+
+
+@pytest.mark.gui
+def test_pattern_tile_pick_commits_and_same_file_is_noop(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    """Picking a tile file commits {fill_type: pattern, pattern_tile_b64};
+    re-picking the SAME bytes is a WR-01 no-op; cancelling commits nothing."""
+    from PySide6.QtWidgets import QFileDialog
+
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style())
+
+    tile_path = _write_tile_file(tmp_path)
+
+    # Cancel: nothing happens.
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: ("", ""))
+    )
+    panel.fill_image_button.clicked.emit()
+    assert _fired_fill(fired) == []
+
+    # First pick: the tile commits with the fill-type switch.
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(tile_path), "")),
+    )
+    panel.fill_image_button.clicked.emit()
+    assert len(_fired_fill(fired)) == 1
+    first = _fired_fill(fired)[0]
+    assert first["fill_type"] == "pattern"
+    assert first["pattern_tile_b64"] == _tile_png_b64()
+
+    # Re-pick the same bytes: WR-01 no-op.
+    panel.fill_image_button.clicked.emit()
+    assert len(_fired_fill(fired)) == 1
+
+
+@pytest.mark.gui
+def test_oversize_tile_warns_and_commits_nothing(qtbot, tmp_path, monkeypatch) -> None:
+    """A tile above the real 4 MB FILL_TILE_MAX_BYTES cap shows the LOCKED
+    warning dialog and commits NOTHING (never a corrupt save)."""
+    import os
+
+    from PIL import Image as PILImage
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from manga_ai_studio.core.text_style import FILL_TILE_MAX_BYTES
+
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+    panel.load_box(_pagebox_with_style())
+
+    # A genuinely oversized noise PNG (incompressible random bytes -> the
+    # encoded PNG lands well above the 4 MB cap).
+    w = h = 1300
+    noise = PILImage.frombuffer(
+        "RGBA", (w, h), os.urandom(w * h * 4), "raw", "RGBA", 0, 1
+    )
+    big_path = tmp_path / "big_tile.png"
+    noise.save(big_path, format="PNG")
+    assert big_path.stat().st_size > FILL_TILE_MAX_BYTES
+
+    warnings: list = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a))
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(big_path), "")),
+    )
+
+    panel.fill_image_button.clicked.emit()
+    assert len(warnings) == 1, "the oversize tile must show the warning dialog"
+    assert _fired_fill(fired) == [], "an oversize tile must commit NOTHING"
+    assert panel._loaded_style_pattern_tile is None
+
+
+@pytest.mark.gui
+def test_mixed_fill_types_show_sentinel_and_commit_nothing(qtbot) -> None:
+    """Differing fill TYPES across the selection show the non-editable
+    "Mixed" sentinel, hide the sub-rows, and NEVER commit (Pitfall 7)."""
+    panel = _make_inspector(qtbot)
+    fired = _fresh_fired()
+    panel.connect_commit_handlers(**_style_callbacks(fired))
+
+    pb_solid = _pagebox_with_style(fill_type="solid")
+    pb_gradient = _pagebox_with_style(fill_type="gradient")
+    panel.load_multi_selection([pb_solid, pb_gradient])
+
+    assert panel.fill_combo.currentText() == "Mixed"
+    assert panel._loaded_style_fill_display == "Mixed"
+    # Mixed hides every sub-row (no single fill type governs them).
+    assert panel.fill_color_b_swatch.isHidden() is True
+    assert panel.fill_angle_spin.isHidden() is True
+    assert panel.fill_image_button.isHidden() is True
+    assert panel.fill_scale_spin.isHidden() is True
+
+    # Re-picking the sentinel commits nothing.
+    panel.fill_combo.setCurrentText("Mixed")
+    assert _fired_fill(fired) == []
+
+    # A REAL override still commits.
+    panel.fill_combo.setCurrentText("Pattern")
+    assert _fired_fill(fired) == [{"fill_type": "pattern"}]
+
+
+@pytest.mark.gui
+def test_fill_multi_uniform_shows_values_and_mixed_sub_fields(qtbot) -> None:
+    """A uniform fill type loads the common values; a differing sub-field
+    shows its per-widget Mixed sentinel (angle spin special text)."""
+    panel = _make_inspector(qtbot)
+    pb_a = _pagebox_with_style(
+        fill_type="gradient", fill_color_b="#00ff00", fill_angle_deg=45.0
+    )
+    pb_b = _pagebox_with_style(
+        fill_type="gradient", fill_color_b="#00ff00", fill_angle_deg=45.0
+    )
+    panel.load_multi_selection([pb_a, pb_b])
+    assert panel.fill_combo.currentText() == "Gradient"
+    assert panel._loaded_style_fill_display == "Gradient"
+    assert panel.fill_angle_spin.value() == 45
+    assert panel.fill_color_b_swatch.color == "#00ff00"
+    assert panel.fill_color_b_swatch.isHidden() is False
+
+    # Differing angle -> the Mixed sentinel on the spin (types stay uniform).
+    pb_c = _pagebox_with_style(
+        fill_type="gradient", fill_color_b="#00ff00", fill_angle_deg=300.0
+    )
+    panel.load_multi_selection([pb_a, pb_c])
+    assert panel._loaded_style_fill_angle is None
+    assert panel.fill_angle_spin.specialValueText() == "Mixed"
+
+
+def _grab_swatch(swatch):
+    """Render a swatch button into an image (paint smoke-test helper)."""
+    from PySide6.QtGui import QImage as _QImage
+
+    pixmap = swatch.grab()
+    return _QImage(pixmap.toImage().convertToFormat(_QImage.Format.Format_ARGB32))
+
+
+@pytest.mark.gui
+def test_swatch_preview_paints_real_gradient_and_pattern(qtbot) -> None:
+    """LOCKED UI decision: the MAIN Color swatch previews the REAL fill —
+    gradient mode paints the ramp (left != right at 0 deg), pattern mode
+    tiles the loaded tile, and a legacy solid keeps the solid mode. Paint
+    smoke-tests — none may raise."""
+    panel = _make_inspector(qtbot)
+
+    # Gradient preview: 0 deg blue->yellow must differ left-to-right.
+    panel.load_box(
+        _pagebox_with_style(
+            color="#ff0000ff",
+            fill_type="gradient",
+            fill_color_b="#ffffff00",
+            fill_angle_deg=0.0,
+        )
+    )
+    assert panel.color_swatch.preview_mode == "gradient"
+    img = _grab_swatch(panel.color_swatch)
+    assert not img.isNull()
+    left = img.pixelColor(2, 12)
+    right = img.pixelColor(21, 12)
+    assert (left.blue(), left.red()) != (right.blue(), right.red()), (
+        "the gradient preview must paint a left-to-right ramp"
+    )
+
+    # Pattern preview: the mode flips and the paint stays clean.
+    panel.load_box(
+        _pagebox_with_style(
+            color="#ff0000ff",
+            fill_type="pattern",
+            pattern_tile_b64=_tile_png_b64(8, 8),
+        )
+    )
+    assert panel.color_swatch.preview_mode == "pattern"
+    assert panel.color_swatch.preview_tile is not None
+    img = _grab_swatch(panel.color_swatch)
+    assert not img.isNull()
+
+    # Solid legacy: the preview mode stays solid (today's paint verbatim).
+    panel.load_box(_pagebox_with_style())
+    assert panel.color_swatch.preview_mode == "solid"
+
+
+@pytest.mark.gui
+def test_mainwindow_fill_commit_applies_to_all_selected_and_preserves_tile(
+    qtbot, tmp_path
+) -> None:
+    """The MainWindow fill handler applies to ALL selected boxes through
+    _replace_style (one BOXES snapshot); a commit WITHOUT pattern_tile_b64
+    never clobbers an existing tile; an unknown key is dropped (T-vej-04);
+    one Ctrl+Z reverses the whole fill commit."""
+    window = _window_with_page(qtbot, tmp_path)
+    items = _seed_boxes_window(
+        window, [Box(10, 10, 70, 50), Box(10, 60, 70, 100)]
+    )
+    # Explicit legacy-solid styles so the final undo restore is exact.
+    items[0].pagebox.style = TextStyle()
+    items[1].pagebox.style = TextStyle()
+    for it in items:
+        it.setSelected(True)
+    QApplication.processEvents()
+
+    b64 = _tile_png_b64()
+    panel = window.inspector_panel
+
+    # 1) The combo switch commits gradient to EVERY selected box.
+    panel.fill_combo.setCurrentText("Gradient")
+    for it in items:
+        assert it.pagebox.style is not None
+        assert it.pagebox.style.fill_type == "gradient"
+
+    # 2) The tile commit embeds the tile on every box.
+    panel.style_fill_changed.emit(
+        {"fill_type": "pattern", "pattern_tile_b64": b64}
+    )
+    for it in items:
+        assert it.pagebox.style.pattern_tile_b64 == b64
+
+    # 3) A scale-only commit must NOT clobber the tile.
+    panel.fill_scale_spin.setValue(2.00)
+    panel.fill_scale_spin.editingFinished.emit()
+    for it in items:
+        assert it.pagebox.style.pattern_tile_b64 == b64
+        assert it.pagebox.style.pattern_scale == 2.0
+
+    # 4) T-vej-04: an unknown key is dropped by the whitelist — the styles
+    # stay bit-identical.
+    before = [it.pagebox.style for it in items]
+    panel.style_fill_changed.emit({"color": "#ff0000", "font_family": "Arial"})
+    for it, style_before in zip(items, before):
+        assert it.pagebox.style == style_before
+
+    # 5) The commits rode the BOXES snapshot machinery: three undo steps
+    # (scale -> tile -> fill-type) restore the pre-fill styles (solid).
+    # The undo restore REBUILDS the canvas BoxItems — re-read, never the
+    # stale pre-undo references.
+    for _ in range(3):
+        window.on_undo()
+        QApplication.processEvents()
+    restored = [it.pagebox for it in window.canvas._box_items]
+    for pb in restored:
+        assert pb.style is not None
+        assert pb.style.fill_type == "solid"
+        assert pb.style.pattern_tile_b64 is None
+
+
+@pytest.mark.gui
+def test_legacy_solid_style_round_trips_inspector_display(qtbot) -> None:
+    """A legacy style (no fill keys) loads Solid with the default Color B /
+    angle / scale memories — the exact legacy look, never Mixed."""
+    panel = _make_inspector(qtbot)
+    panel.load_box(_pagebox_with_style(color="#123456"))
+    assert panel.fill_combo.currentText() == "Solid"
+    assert panel._loaded_style_fill_display == "Solid"
+    assert panel._loaded_style_fill_color_b == "#ffffff"
+    assert panel._loaded_style_fill_angle == 90.0
+    assert panel._loaded_style_pattern_scale == 1.0
+    assert panel._loaded_style_pattern_tile is None
+    assert panel.color_swatch.preview_mode == "solid"

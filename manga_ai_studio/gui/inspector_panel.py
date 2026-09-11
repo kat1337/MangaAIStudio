@@ -33,7 +33,11 @@ for the currently-selected box:
   33): the per-box styling controls BELOW the text fields — Font
   (``QFontComboBox``), Style (per-family ``QComboBox``), Size + Auto-fit
   (0..1024 ``QSpinBox`` with the "Auto" sentinel + a tri-state ``QCheckBox``),
-  Color (24x24 swatch ``QToolButton`` → ``QColorDialog``), Align / Align V
+  Fill (Solid | Gradient | Pattern — quick-260910-vej: a type selector with
+  conditional Color B + Angle sub-rows for gradient, Image… + Scale sub-rows
+  for pattern, an embedded-tile picker with the 4 MB cap warning, and the
+  MAIN Color swatch previewing the REAL fill), Color (24x24 swatch
+  ``QToolButton`` → ``QColorDialog``), Align / Align V
   combos, and the Outline / Glow / Shadow effect rows (enable checkbox +
   swatch + spin). Every control carries a class-scope Signal + a WR-01 no-op
   guard. In a MULTI-selection (D-10) the section shows the common-value /
@@ -68,12 +72,19 @@ Security:
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
+from loguru import logger
 from PySide6.QtCore import QRectF, Qt, QTimer, QRegularExpression, QSortFilterProxyModel, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFocusEvent,
     QFontDatabase,
+    QImage,
     QKeyEvent,
+    QLinearGradient,
     QPainter,
     QPen,
 )
@@ -81,12 +92,15 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
     QFontComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QSpinBox,
     QTextEdit,
     QToolButton,
@@ -96,7 +110,9 @@ from PySide6.QtWidgets import (
 
 from manga_ai_studio.core.box_model import DETECTED, USER
 from manga_ai_studio.core.text_style import EFFECT_GEOM_MAX
+from manga_ai_studio.core.text_style import FILL_TILE_MAX_BYTES
 from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.gui.text_renderer import _gradient_start_end
 
 # Dark QSS for the Inspector panel (UI-SPEC §Color tokens — copied from the
 # ToolsPanel _TOOLS_QSS so the panel sections share a look). Adds
@@ -221,6 +237,29 @@ _FONT_STYLE_NAME = {
 _EFFECT_DEFAULT_COLORS = {"outline": "#ffffff", "glow": "#e8e8ea", "shadow": "#000000"}
 _EFFECT_DEFAULT_VALUES = {"outline": 2, "glow": 4, "shadow": 2}
 
+# Fill-row display strings <-> TextStyle.fill_type model values
+# (quick-260910-vej; the inpaint/align combo conventions).
+_FILL_ITEMS = ["Solid", "Gradient", "Pattern"]
+_FILL_DISPLAY_TO_MODEL = {"Solid": "solid", "Gradient": "gradient", "Pattern": "pattern"}
+_FILL_MODEL_TO_DISPLAY = {v: k for k, v in _FILL_DISPLAY_TO_MODEL.items()}
+
+
+def _decode_preview_tile(b64) -> QImage | None:
+    """A pattern tile's b64 payload as a preview ``QImage`` (``None`` on any
+    failure — the preview degrades to the solid mode, never raises; the
+    renderer's decode guard is the render-side authority, this is the
+    swatch's cosmetic mirror)."""
+    if not isinstance(b64, str) or not b64:
+        return None
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:  # noqa: BLE001 — a garbage tile degrades, never raises
+        return None
+    if not raw:
+        return None
+    img = QImage.fromData(raw)
+    return None if img.isNull() else img
+
 
 def _norm_hex_a(color) -> str:
     """Normalize a hex color string to Qt's canonical lowercase HexArgb
@@ -253,18 +292,55 @@ class _ColorSwatchButton(QToolButton):
     ``#3a3a42`` border — UI-SPEC §Color) — the sentinel NEVER leaves the
     widget layer (RESEARCH Pitfall 7): a commit only fires from the dialog
     path with a real color.
+
+    quick-260910-vej (LOCKED UI decision — the swatch previews the REAL
+    fill): the optional preview state extends the paint to the styled fill
+    modes. ``preview_mode="gradient"`` paints a ``QLinearGradient`` ramp
+    with the SAME angle semantics as the renderer (via the shared
+    ``_gradient_start_end`` — one angle implementation) over the
+    checkerboard when either stop is sub-opaque; ``preview_mode="pattern"``
+    paints the tile ``QImage`` tiled over the checkerboard at Color A's
+    alpha. ``preview_mode="solid"`` (the default) keeps today's paint
+    byte-for-byte. The MAIN Color swatch previews all three modes; the
+    Color B swatch stays a plain solid swatch.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.color: str | None = None
+        self.preview_mode: str = "solid"  # "solid" | "gradient" | "pattern"
+        self.preview_color_b: str | None = None
+        self.preview_angle: float = 90.0
+        self.preview_tile: QImage | None = None
         self.setFixedSize(24, 24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Choose a color.")
 
+    def _paint_checkerboard(self, painter: QPainter, rect: QRectF) -> None:
+        """The neutral 2-tone checkerboard (quick-260909-nj9) under a
+        sub-opaque fill so the alpha composites visibly."""
+        cell = 4.0
+        row = 0
+        y = rect.top()
+        while y < rect.bottom():
+            h = min(cell, rect.bottom() - y)
+            col = 0
+            x = rect.left()
+            while x < rect.right():
+                w = min(cell, rect.right() - x)
+                painter.fillRect(
+                    QRectF(x, y, w, h),
+                    QColor("#cccccc" if (row + col) % 2 == 0 else "#8a8a8a"),
+                )
+                x += w
+                col += 1
+            y += h
+            row += 1
+
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
-        """Paint the solid fill (over a checkerboard when sub-opaque) or the
-        Mixed split fill + the 1px border."""
+        """Paint the solid fill (over a checkerboard when sub-opaque), the
+        real-fill preview (gradient ramp / tiled pattern), or the Mixed
+        split fill + the 1px border."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -279,6 +355,31 @@ class _ColorSwatchButton(QToolButton):
                 QRectF(mid, rect.top(), rect.right() - mid, rect.height()),
                 QColor("#9a9aa2"),
             )
+        elif self.preview_mode == "gradient":
+            # quick-260910-vej: the REAL gradient preview — same angle
+            # semantics as the renderer's fill brush (shared helper), over
+            # the checkerboard when either stop is sub-opaque.
+            color_a = QColor(self.color)
+            color_b = QColor(self.preview_color_b or "#ffffff")
+            if (color_a.isValid() and color_a.alpha() < 255) or (
+                color_b.isValid() and color_b.alpha() < 255
+            ):
+                self._paint_checkerboard(painter, rect)
+            start, end = _gradient_start_end(
+                rect, float(self.preview_angle)
+            )
+            painter.fillRect(rect, _make_gradient_brush(start, end, color_a, color_b))
+        elif self.preview_mode == "pattern" and self.preview_tile is not None:
+            # quick-260910-vej: the REAL tile preview — tiled over the
+            # checkerboard at Color A's alpha (the LOCKED single-opacity
+            # rule; painter opacity composites the tile over the greys).
+            self._paint_checkerboard(painter, rect)
+            color_a = QColor(self.color)
+            painter.save()
+            if color_a.isValid() and color_a.alpha() < 255:
+                painter.setOpacity(color_a.alpha() / 255.0)
+            painter.fillRect(rect, _make_tile_brush(self.preview_tile))
+            painter.restore()
         else:
             parsed = QColor(self.color)
             if parsed.isValid() and parsed.alpha() < 255:
@@ -287,27 +388,26 @@ class _ColorSwatchButton(QToolButton):
                 # the alpha composites visibly instead of vanishing into
                 # the widget background. Opaque/legacy paths keep today's
                 # paint exactly.
-                cell = 4.0
-                row = 0
-                y = rect.top()
-                while y < rect.bottom():
-                    h = min(cell, rect.bottom() - y)
-                    col = 0
-                    x = rect.left()
-                    while x < rect.right():
-                        w = min(cell, rect.right() - x)
-                        painter.fillRect(
-                            QRectF(x, y, w, h),
-                            QColor("#cccccc" if (row + col) % 2 == 0 else "#8a8a8a"),
-                        )
-                        x += w
-                        col += 1
-                    y += h
-                    row += 1
+                self._paint_checkerboard(painter, rect)
             painter.fillRect(rect, parsed)
         painter.setPen(QPen(QColor("#3a3a42"), 1))
         painter.drawRect(rect)
         painter.end()
+
+
+def _make_gradient_brush(start, end, color_a: QColor, color_b: QColor):
+    """The swatch preview's gradient brush (renderer-equivalent stops)."""
+    gradient = QLinearGradient(start, end)
+    gradient.setColorAt(0.0, color_a)
+    gradient.setColorAt(1.0, color_b)
+    return gradient
+
+
+def _make_tile_brush(tile: QImage):
+    """The swatch preview's tiled-texture brush (Qt-native tiling)."""
+    brush = QBrush(tile)
+    brush.setStyle(Qt.BrushStyle.TexturePattern)
+    return brush
 
 
 class _CommitTextEdit(QTextEdit):
@@ -358,6 +458,12 @@ class InspectorPanel(QWidget):
     style_size_changed = Signal(int)  # 0 = the "Auto" sentinel (D-15)
     style_auto_fit_changed = Signal(bool)
     style_color_changed = Signal(str)
+    # quick-260910-vej: the Fill row's commit signal — carries ONLY the
+    # fields the user actually changed as a model-keyed dict, e.g.
+    # {"fill_type": "gradient", "fill_color_b": "#ff0000", "fill_angle_deg":
+    # 45.0} or {"fill_type": "pattern", "pattern_tile_b64": ...} (per-key
+    # WR-01 guards; the "Mixed" sentinel never leaves the widget layer).
+    style_fill_changed = Signal(dict)
     style_align_changed = Signal(object, object)  # (align_h, align_v) model values; None = untouched axis (G-07-7)
     style_effect_changed = Signal(str, dict)  # effect key + {enabled, color, value}
     # G-07-3 (plan 07-11): the Set-as-Default affordance's family emission —
@@ -592,17 +698,97 @@ class InspectorPanel(QWidget):
         )
         form.addRow("Spacing V", self.line_spacing_spin)
 
+        # Fill — the 3-way glyph-fill selector (quick-260910-vej): Solid |
+        # Gradient | Pattern, riding the shared QBrush fill path (the
+        # renderer's style_fill_brush). In a multi-selection whose fill
+        # TYPES differ, the non-editable "Mixed" sentinel entry is prepended
+        # dynamically (the inpaint-combo pattern; Pitfall 7 — never
+        # committed). The conditional sub-rows below (Color B + Angle for
+        # gradient, Image… + Scale for pattern) show/hide per type; the UI
+        # ranges read the model's PUBLIC constants so UI == clamp by
+        # construction (the EFFECT_GEOM_MAX precedent).
+        self.fill_combo = QComboBox()
+        self.fill_combo.addItems(list(_FILL_ITEMS))
+        self.fill_combo.setToolTip(
+            "Glyph fill type: Solid (a plain color), Gradient (a linear "
+            "two-color ramp at an angle), or Pattern (a tiled image clipped "
+            "to the glyphs)."
+        )
+        form.addRow("Fill", self.fill_combo)
+
         # Color — the 24x24 swatch -> QColorDialog (Don't-Hand-Roll). The
         # split fill (color None) is the D-10 Mixed presentation.
         # quick-260909-nj9: the picker offers transparency (the glyph fill
         # stores #AARRGGBB); the swatch shows sub-opaque fills over a
-        # checkerboard.
+        # checkerboard. quick-260910-vej: this MAIN swatch previews the REAL
+        # fill (gradient ramp / tiled pattern) via the swatch's preview
+        # state.
         self.color_swatch = _ColorSwatchButton()
         self.color_swatch.setToolTip(
             "Glyph fill color — choose one (with optional transparency) "
             "to apply it to the selection."
         )
         form.addRow("Color", self.color_swatch)
+
+        # Color B — the gradient's second stop (quick-260910-vej). An
+        # alpha-capable swatch like the MAIN Color (white->transparent fades
+        # ride the same #AARRGGBB discipline). Hidden unless Gradient.
+        self.fill_color_b_swatch = _ColorSwatchButton()
+        self.fill_color_b_swatch.setToolTip(
+            "Gradient second color (Color B) — with optional transparency."
+        )
+        form.addRow("Color B", self.fill_color_b_swatch)
+
+        # Angle — the gradient direction, CLOCKWISE degrees (0 = left->right,
+        # 90 = top->bottom; Color A at the start) — the same semantics the
+        # TextStyle.fill_angle_deg field documents and the renderer's brush
+        # factory implements. 0..359 so the UI can never produce a value the
+        # V5 clamp (0..360) treats differently. Hidden unless Gradient.
+        self.fill_angle_spin = QSpinBox()
+        self.fill_angle_spin.setRange(0, 359)
+        self.fill_angle_spin.setSuffix("\u00b0")
+        self.fill_angle_spin.setValue(90)
+        self.fill_angle_spin.setToolTip(
+            "Gradient direction in degrees (clockwise): 0 = left to right, "
+            "90 = top to bottom. The first color starts at the ramp's start."
+        )
+        form.addRow("Angle", self.fill_angle_spin)
+
+        # Image… — the pattern tile picker (quick-260910-vej). Reads the file
+        # BYTES in the panel; the 4 MB FILL_TILE_MAX_BYTES cap (imported from
+        # the model — one shared symbol) shows a warning dialog on oversize
+        # and commits NOTHING. Hidden unless Pattern.
+        self.fill_image_button = QToolButton()
+        self.fill_image_button.setText("Image\u2026")
+        self.fill_image_button.setToolTip(
+            "Choose an image tile to fill the glyphs with (repeated and "
+            "clipped to the text). Max 4 MB."
+        )
+        form.addRow("Image", self.fill_image_button)
+
+        # Scale — the pattern tile's uniform zoom, 0.10..10.00 x (the model's
+        # PATTERN_SCALE bounds). Hidden unless Pattern.
+        self.fill_scale_spin = QDoubleSpinBox()
+        self.fill_scale_spin.setRange(0.10, 10.00)
+        self.fill_scale_spin.setDecimals(2)
+        self.fill_scale_spin.setSingleStep(0.05)
+        self.fill_scale_spin.setValue(1.00)
+        self.fill_scale_spin.setSuffix("\u00d7")
+        self.fill_scale_spin.setToolTip(
+            "Zoom the pattern tile before tiling (0.10x .. 10.00x)."
+        )
+        form.addRow("Scale", self.fill_scale_spin)
+
+        # The fill sub-rows' label widgets (hidden with the fields so the
+        # QFormLayout row collapses cleanly).
+        self._fill_sub_labels = {}
+        for widget in (
+            self.fill_color_b_swatch,
+            self.fill_angle_spin,
+            self.fill_image_button,
+            self.fill_scale_spin,
+        ):
+            self._fill_sub_labels[widget] = form.labelForField(widget)
 
         # Align / Align V — H and V alignment combos (one signal pair:
         # style_align_changed(h, v); model values, UI-SPEC §33).
@@ -664,6 +850,15 @@ class InspectorPanel(QWidget):
         self._loaded_rendered_size: float | None = None
         self._loaded_style_auto_fit = False
         self._loaded_style_color: str | None = "#e8e8ea"
+        # quick-260910-vej: the Fill row's WR-01 loaded memories. The display
+        # (combo text) / numeric entries are None when the D-10 Mixed
+        # sentinel is displayed; the tile memory is the LOADED b64 payload
+        # (re-picking the same bytes is a no-op).
+        self._loaded_style_fill_display = "Solid"
+        self._loaded_style_fill_color_b: str | None = "#ffffff"
+        self._loaded_style_fill_angle: float | None = 90.0
+        self._loaded_style_pattern_scale: float | None = 1.0
+        self._loaded_style_pattern_tile: str | None = None
         self._loaded_style_align_h = "Center"
         self._loaded_style_align_v = "Middle"
         self._loaded_effects: dict = {
@@ -683,6 +878,7 @@ class InspectorPanel(QWidget):
         self._cb_style_color = None
         self._cb_style_effect = None
         self._cb_style_size = None
+        self._cb_style_fill = None
         # quick-260824-t64 Task 3: live Size commits. editingFinished only
         # fires on focus-loss/Enter — NOT per click of the up/down arrows or a
         # scroll-wheel step, which is why font-size changes only rendered
@@ -932,6 +1128,64 @@ class InspectorPanel(QWidget):
             self._loaded_style_color = None
             self._set_swatch_color(self.color_swatch, None)
 
+        # Fill (quick-260910-vej) — per-field common-value rule. Differing
+        # fill TYPES prepend the non-editable "Mixed" sentinel entry (never
+        # committed, Pitfall 7) and HIDE the sub-rows (no single fill type
+        # governs them); a single type with differing angle/scale/tile shows
+        # the per-widget Mixed sentinel (spin special text / split swatch).
+        fill_types = {s.fill_type for s in styles}
+        if len(fill_types) == 1:
+            display = _FILL_MODEL_TO_DISPLAY.get(next(iter(fill_types)), "Solid")
+            self._select_combo(self.fill_combo, list(_FILL_ITEMS), display)
+            self._loaded_style_fill_display = display
+        else:
+            self._select_combo(
+                self.fill_combo, ["Mixed"] + list(_FILL_ITEMS), "Mixed"
+            )
+            self._loaded_style_fill_display = "Mixed"
+
+        angles = {int(round(float(s.fill_angle_deg))) for s in styles}
+        was = self.fill_angle_spin.blockSignals(True)
+        if len(fill_types) == 1 and len(angles) == 1:
+            self.fill_angle_spin.setSpecialValueText("")
+            self.fill_angle_spin.setValue(next(iter(angles)))
+            self._loaded_style_fill_angle = float(self.fill_angle_spin.value())
+        else:
+            self.fill_angle_spin.setSpecialValueText("Mixed")
+            self.fill_angle_spin.setValue(0)
+            self._loaded_style_fill_angle = None
+        self.fill_angle_spin.blockSignals(was)
+
+        scales = {round(float(s.pattern_scale), 2) for s in styles}
+        was = self.fill_scale_spin.blockSignals(True)
+        if len(fill_types) == 1 and len(scales) == 1:
+            self.fill_scale_spin.setSpecialValueText("")
+            self.fill_scale_spin.setValue(next(iter(scales)))
+            self._loaded_style_pattern_scale = float(self.fill_scale_spin.value())
+        else:
+            self.fill_scale_spin.setSpecialValueText("Mixed")
+            self.fill_scale_spin.setValue(0.10)  # the minimum shows "Mixed"
+            self._loaded_style_pattern_scale = None
+        self.fill_scale_spin.blockSignals(was)
+
+        colors_b = {s.fill_color_b for s in styles}
+        if len(fill_types) == 1 and len(colors_b) == 1:
+            self._loaded_style_fill_color_b = next(iter(colors_b))
+            self._set_swatch_color(self.fill_color_b_swatch, next(iter(colors_b)))
+        else:
+            self._loaded_style_fill_color_b = None
+            self._set_swatch_color(self.fill_color_b_swatch, None)
+
+        tiles = {s.pattern_tile_b64 for s in styles}
+        if len(fill_types) == 1 and len(tiles) == 1:
+            self._loaded_style_pattern_tile = next(iter(tiles))
+        else:
+            self._loaded_style_pattern_tile = None
+        self._update_fill_image_button_tooltip(self._loaded_style_pattern_tile)
+
+        self._apply_fill_preview(styles)
+        self._update_fill_row_visibility()
+
         # Aligns. A differing axis shows the leading "Mixed" entry AND keeps
         # the real options selectable (G-07-7 — the override must be pickable);
         # a uniform axis shows the plain real-item list, never Mixed.
@@ -1065,6 +1319,33 @@ class InspectorPanel(QWidget):
         self._loaded_style_color = style.color
         self._set_swatch_color(self.color_swatch, style.color)
 
+        # quick-260910-vej: the Fill row — type, conditional sub-controls,
+        # and the MAIN swatch's real-fill preview state (uniform values,
+        # never Mixed on the single path).
+        display = _FILL_MODEL_TO_DISPLAY.get(style.fill_type, "Solid")
+        self._select_combo(self.fill_combo, list(_FILL_ITEMS), display)
+        self._loaded_style_fill_display = display
+        self._loaded_style_fill_color_b = style.fill_color_b
+        self._set_swatch_color(self.fill_color_b_swatch, style.fill_color_b)
+        was = self.fill_angle_spin.blockSignals(True)
+        self.fill_angle_spin.setSpecialValueText("")
+        self.fill_angle_spin.setValue(
+            max(0, min(359, int(round(float(style.fill_angle_deg)))))
+        )
+        self.fill_angle_spin.blockSignals(was)
+        self._loaded_style_fill_angle = float(self.fill_angle_spin.value())
+        was = self.fill_scale_spin.blockSignals(True)
+        self.fill_scale_spin.setSpecialValueText("")
+        self.fill_scale_spin.setValue(
+            max(0.10, min(10.0, float(style.pattern_scale)))
+        )
+        self.fill_scale_spin.blockSignals(was)
+        self._loaded_style_pattern_scale = float(self.fill_scale_spin.value())
+        self._loaded_style_pattern_tile = style.pattern_tile_b64
+        self._update_fill_image_button_tooltip(style.pattern_tile_b64)
+        self._apply_fill_preview([style])
+        self._update_fill_row_visibility()
+
         align_h = _ALIGN_H_DISPLAY.get(style.align_h, "Center")
         align_v = _ALIGN_V_DISPLAY.get(style.align_v, "Middle")
         self._select_combo(self.align_combo, ["Left", "Center", "Right"], align_h)
@@ -1161,6 +1442,183 @@ class InspectorPanel(QWidget):
             "value": None if mixed else next(iter(values)),
         }
         self._apply_effect_row_state(key)
+
+    # ------------------------------------------------- fill row (quick-260910-vej)
+    def _update_fill_row_visibility(self) -> None:
+        """Show/hide the fill sub-rows per the selected fill type (Gradient
+        reveals Color B + Angle; Pattern reveals Image… + Scale). The
+        QFormLayout label hides with the field so the row collapses."""
+        display = self.fill_combo.currentText()
+        show_gradient = display == "Gradient"
+        show_pattern = display == "Pattern"
+        for widget, show in (
+            (self.fill_color_b_swatch, show_gradient),
+            (self.fill_angle_spin, show_gradient),
+            (self.fill_image_button, show_pattern),
+            (self.fill_scale_spin, show_pattern),
+        ):
+            widget.setVisible(show)
+            label = self._fill_sub_labels.get(widget)
+            if label is not None:
+                label.setVisible(show)
+
+    def _update_fill_image_button_tooltip(self, tile_b64: str | None) -> None:
+        """The Image… button's tooltip carries the loaded tile's decoded
+        dimensions (or the mixed/absent state) — a cheap honest summary."""
+        img = _decode_preview_tile(tile_b64)
+        if img is not None:
+            self.fill_image_button.setToolTip(
+                f"Pattern tile loaded ({img.width()}x{img.height()} px). "
+                "Click to choose another image."
+            )
+        elif tile_b64 is None and self._loaded_style_fill_display == "Mixed":
+            self.fill_image_button.setToolTip(
+                "Pattern tile differs across the selection."
+            )
+        else:
+            self.fill_image_button.setToolTip(
+                "Choose an image tile to fill the glyphs with (repeated and "
+                "clipped to the text). Max 4 MB."
+            )
+
+    def _apply_fill_preview(self, styles: list) -> None:
+        """Point the MAIN Color swatch's preview state at the REAL fill
+        (LOCKED UI decision, quick-260910-vej): a gradient selection previews
+        the ramp, a pattern selection the tiled tile; Mixed/uniform-solid
+        states keep the solid/split paint. Cosmetic only — the renderer's
+        brush factory is the render-side authority."""
+        swatch = self.color_swatch
+        swatch.preview_mode = "solid"
+        swatch.preview_color_b = None
+        swatch.preview_angle = 90.0
+        swatch.preview_tile = None
+        if styles:
+            fill_types = {s.fill_type for s in styles}
+            if fill_types == {"gradient"}:
+                colors_b = {s.fill_color_b for s in styles}
+                if len(colors_b) == 1:
+                    swatch.preview_mode = "gradient"
+                    swatch.preview_color_b = next(iter(colors_b))
+                    swatch.preview_angle = float(styles[0].fill_angle_deg)
+            elif fill_types == {"pattern"}:
+                tiles = {s.pattern_tile_b64 for s in styles}
+                if len(tiles) == 1:
+                    tile = _decode_preview_tile(next(iter(tiles)))
+                    if tile is not None:
+                        swatch.preview_mode = "pattern"
+                        swatch.preview_tile = tile
+        swatch.update()
+
+    def _emit_fill_type_if_changed(self) -> None:
+        """The Fill combo commit — WR-01-gated; the "Mixed" sentinel NEVER
+        leaves the widget layer (Pitfall 7). Also live-updates the sub-row
+        visibility (idempotent with the post-commit panel reload)."""
+        text = self.fill_combo.currentText()
+        self._update_fill_row_visibility()
+        if text == self._loaded_style_fill_display:
+            return  # WR-01: an unchanged cycle is a no-op
+        if text == "Mixed":
+            return  # the sentinel never leaves the widget layer (Pitfall 7)
+        self.style_fill_changed.emit({"fill_type": _FILL_DISPLAY_TO_MODEL[text]})
+
+    def _emit_fill_angle_if_changed(self) -> None:
+        """The gradient Angle commit — WR-01-gated (a Mixed-sentinel no-op
+        cycle on a mixed selection drops)."""
+        value = self.fill_angle_spin.value()
+        if self._loaded_style_fill_angle is None and value == 0:
+            return  # a no-op focus cycle on the "Mixed" sentinel (Pitfall 7)
+        if value == self._loaded_style_fill_angle:
+            return  # WR-01: an unchanged focus cycle is a no-op
+        self.style_fill_changed.emit({"fill_angle_deg": float(value)})
+
+    def _emit_pattern_scale_if_changed(self) -> None:
+        """The pattern Scale commit — WR-01-gated (the Mixed sentinel sits at
+        the spin's minimum, 0.10)."""
+        value = self.fill_scale_spin.value()
+        if self._loaded_style_pattern_scale is None and value <= 0.10 + 1e-9:
+            return  # a no-op focus cycle on the "Mixed" sentinel (Pitfall 7)
+        if value == self._loaded_style_pattern_scale:
+            return  # WR-01: an unchanged focus cycle is a no-op
+        self.style_fill_changed.emit({"pattern_scale": float(value)})
+
+    def _pick_fill_color_b(self) -> None:
+        """Open the alpha-capable ``QColorDialog`` for the gradient's Color B;
+        commit on pick (WR-01-gated, alpha-aware — the ``_norm_hex_a``
+        discipline so re-picking the loaded color in another opaque spelling
+        is a no-op). ``ShowAlphaChannel`` + ``DontUseNativeDialog`` are
+        REQUIRED on Windows (the native dialog has no alpha control — the
+        quick-260909-nj9 lesson)."""
+        seed = self.fill_color_b_swatch.color
+        if seed is None or self._loaded_style_fill_color_b is None:
+            seed = "#ffffff"
+        color = QColorDialog.getColor(
+            QColor(seed),
+            self,
+            "Select Gradient Color B",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel
+            | QColorDialog.ColorDialogOption.DontUseNativeDialog,
+        )
+        if color.isValid():
+            hex_argb = color.name(QColor.NameFormat.HexArgb)
+            if _norm_hex_a(hex_argb) != _norm_hex_a(
+                self._loaded_style_fill_color_b
+            ):
+                self.style_fill_changed.emit({"fill_color_b": hex_argb})
+
+    def _pick_pattern_tile(self) -> None:
+        """Pick + embed the pattern tile file (quick-260910-vej).
+
+        Reads the file BYTES in the panel; an oversized file (above the
+        shared ``FILL_TILE_MAX_BYTES`` cap) shows the LOCKED warning dialog
+        and commits NOTHING (reject/oversize are both silent no-ops). On
+        accept the commit carries the fill-type switch too
+        (``{"fill_type": "pattern", "pattern_tile_b64": ...}``). WR-01:
+        re-picking a file whose bytes equal the loaded tile is a no-op —
+        the decoded b64 is compared against the loaded memory.
+        """
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select Pattern Tile",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All Files (*)",
+        )
+        if not path:
+            return  # cancelled — nothing happens
+        try:
+            data = Path(path).read_bytes()
+        except OSError as exc:
+            logger.warning("Pattern tile read failed for {}: {}", path, exc)
+            QMessageBox.warning(
+                self,
+                "Pattern Tile",
+                f"The tile could not be read:\n{exc}",
+            )
+            return
+        if len(data) > FILL_TILE_MAX_BYTES:
+            # The LOCKED oversize guard: a warning dialog, never a silent
+            # truncate, never a corrupt save.
+            QMessageBox.warning(
+                self,
+                "Pattern Tile Too Large",
+                f"The selected image is {len(data) / (1024 * 1024):.1f} MB, "
+                f"above the {FILL_TILE_MAX_BYTES // (1024 * 1024)} MB tile "
+                "limit.\nUse a smaller tile.",
+            )
+            return
+        b64 = base64.b64encode(data).decode("ascii")
+        if b64 == self._loaded_style_pattern_tile:
+            return  # WR-01: the same bytes are already loaded — no-op
+        self._loaded_style_pattern_tile = b64
+        self._update_fill_image_button_tooltip(b64)
+        self.style_fill_changed.emit(
+            {"fill_type": "pattern", "pattern_tile_b64": b64}
+        )
+
+    def _commit_style_fill(self, changes: dict) -> None:
+        """Direct fill-commit hook (the real paths are the combo/angle/scale/
+        swatch/tile-dialog signals wired in connect_commit_handlers)."""
+        if changes:
+            self.style_fill_changed.emit(changes)
 
     def _refresh_style_combo(self, family: str, bold: bool, italic: bool) -> None:
         """Repopulate the Style combo for ``family`` + select ``(bold, italic)``.
@@ -1318,6 +1776,11 @@ class InspectorPanel(QWidget):
             self.char_spacing_spin,
             self.line_spacing_spin,
             self.color_swatch,
+            self.fill_combo,
+            self.fill_color_b_swatch,
+            self.fill_angle_spin,
+            self.fill_image_button,
+            self.fill_scale_spin,
             self.align_combo,
             self.align_v_combo,
             self.inpaint_combo,
@@ -1361,6 +1824,7 @@ class InspectorPanel(QWidget):
         on_style_effect=None,
         on_style_char_spacing=None,
         on_style_line_spacing=None,
+        on_style_fill=None,
         on_inpaint_override=None,
     ) -> None:
         """Wire each field's commit signal to the MainWindow-supplied callbacks.
@@ -1430,6 +1894,25 @@ class InspectorPanel(QWidget):
                 lambda: self._pick_style_color(on_style_color)
             )
             self._cb_style_color = on_style_color
+        # quick-260910-vej: the Fill row's commit wiring — the class-scope
+        # style_fill_changed signal carries the changed-fields dict to the
+        # MainWindow callback, and the combo / Angle / Color B / Scale /
+        # Image… emitters all route through it (each commit carries only the
+        # fields the user actually changed).
+        if on_style_fill is not None:
+            self._cb_style_fill = on_style_fill
+            self.style_fill_changed.connect(on_style_fill)
+            self.fill_combo.currentIndexChanged.connect(
+                lambda _i: self._emit_fill_type_if_changed()
+            )
+            self.fill_angle_spin.editingFinished.connect(
+                self._emit_fill_angle_if_changed
+            )
+            self.fill_color_b_swatch.clicked.connect(self._pick_fill_color_b)
+            self.fill_scale_spin.editingFinished.connect(
+                self._emit_pattern_scale_if_changed
+            )
+            self.fill_image_button.clicked.connect(self._pick_pattern_tile)
         if on_style_align is not None:
             self.align_combo.currentIndexChanged.connect(
                 lambda _i: self._emit_style_align_if_changed(on_style_align)
