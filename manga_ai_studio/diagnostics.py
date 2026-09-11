@@ -25,32 +25,35 @@ in one :func:`install` call:
   wedged loop produces an all-thread stack dump ~60s in — zero code changes
   needed at freeze time (the watchdog thread does not need the frozen main
   thread's cooperation).
-- Native-crash minidumps (Windows, quick-260909-ke1 task 2): the 2026-09-09
-  17:04 session died as ``Fatal Python error: Aborted`` — a SIGABRT raised in
-  native code dispatched by the Qt event loop, invisible to faulthandler's
-  Python-frame dump on Windows (``<cannot get C stack on this system>``). A
-  top-level unhandled-exception filter (``kernel32.SetUnhandledExceptionFilter``)
-  plus a C-LEVEL SIGABRT handler (``ucrtbase.signal``) now write
-  ``mas-<timestamp>.dmp`` (``dbghelp.MiniDumpWriteDump``, MiniDumpWithDataSegs
-  — thread stacks + global data, megabytes not gigabytes) into the same logs
-  dir, and log a WARNING with the dump path. abort() is first routed through
-  ``raise(SIGABRT)`` by clearing the CRT ``_CALL_REPORTFAULT`` bit
-  (``ucrtbase._set_abort_behavior``) so the fail-fast/Watson path cannot skip
-  the handler. A PYTHON-level ``signal.signal(SIGABRT, ...)`` handler was
-  deliberately NOT used: CPython's signal handler only trips a flag consumed
-  at the next eval-loop bytecode boundary — a native abort never returns to
-  the eval loop, so the Python function would never run, and installing it
-  would displace faulthandler's C handler and LOSE the mas-hang.log stack
-  dump. The ctypes SIGABRT handler instead chains to the PREVIOUS C handler
-  (faulthandler's) after uninstalling itself, so the all-thread Python dump
-  is preserved and no re-raise can recurse into us. The UEF and SIGABRT
-  handler can both fire for one abort; at most ONE dump per session is
-  written (``_crash_dump_written`` latch). Everything is best-effort: any
-  ctypes/OS failure degrades to the pre-existing behavior (a DEBUG line, no
-  exception) — never an app break. NB a ctypes callback acquires the GIL, so
-  capture from an aborting NATIVE thread can stall while the (dying) main
-  thread holds the GIL; for the observed crash shape — the aborting thread
-  IS the main thread — it re-enters immediately.
+- Native-crash text reports (Windows, quick-260909-ke1 task 2; log-only since
+  2026-09-10): the 2026-09-09 17:04 session died as ``Fatal Python error:
+  Aborted`` — a SIGABRT raised in native code dispatched by the Qt event loop,
+  invisible to faulthandler's Python-frame dump on Windows (``<cannot get C
+  stack on this system>``). A top-level unhandled-exception filter
+  (``kernel32.SetUnhandledExceptionFilter``) plus a C-LEVEL SIGABRT handler
+  (``ucrtbase.signal``) write a TEXT crash report into mas.log: the exception
+  code (named for the common NTSTATUS values), the faulting frame resolved to
+  ``module!+0xoffset``, and the native stack of the faulting thread as
+  ``module!+0xoffset`` lines (``ntdll.RtlCaptureStackBackTrace`` + psapi module
+  resolution) — a few KB, never a dump file (the original
+  ``dbghelp.MiniDumpWriteDump`` wiring produced multi-GB .dmp files of OOM-scale
+  sessions and was disabled). abort() is first routed through ``raise(SIGABRT)``
+  by clearing the CRT ``_CALL_REPORTFAULT`` bit (``ucrtbase._set_abort_behavior``)
+  so the fail-fast/Watson path cannot skip the handler. A PYTHON-level
+  ``signal.signal(SIGABRT, ...)`` handler was deliberately NOT used: CPython's
+  signal handler only trips a flag consumed at the next eval-loop bytecode
+  boundary — a native abort never returns to the eval loop, so the Python
+  function would never run, and installing it would displace faulthandler's C
+  handler and LOSE the mas-hang.log stack dump. The ctypes SIGABRT handler
+  instead chains to the PREVIOUS C handler (faulthandler's) after uninstalling
+  itself, so the all-thread Python dump is preserved and no re-raise can
+  recurse into us. The UEF and SIGABRT handler can both fire for one abort; at
+  most ONE report per session is logged (``_native_crash_logged`` latch).
+  Everything is best-effort: any ctypes/OS failure degrades to the pre-existing
+  behavior (a DEBUG line, no exception) — never an app break. NB a ctypes
+  callback acquires the GIL, so capture from an aborting NATIVE thread can
+  stall while the (dying) main thread holds the GIL; for the observed crash
+  shape — the aborting thread IS the main thread — it re-enters immediately.
 - Heartbeat memory telemetry (quick-260909-ke1 task 3): every
   ``HEARTBEAT_TELEMETRY_EVERY_N``-th heartbeat beat (~once a minute at the
   15s default) logs one INFO line with the process RSS and the system commit
@@ -63,8 +66,8 @@ in one :func:`install` call:
 
 Module scope imports ONLY stdlib + loguru (PySide6 stays out so the core
 battery and future core-side callers never need Qt); the Qt-touching helpers
-(:func:`heartbeat`, :func:`install_qt_message_handler`) and the native
-capture helpers (:func:`install_minidump_handler`, :func:`_write_minidump`)
+(:func:`heartbeat`, :func:`install_qt_message_handler`) and the native crash
+helpers (:func:`install_native_crash_logger`, :func:`_native_crash_report`)
 import lazily.
 
 The platform truth for the watchdog dump header is ``Timeout (...)!`` followed
@@ -93,14 +96,13 @@ __all__ = [
     "HEARTBEAT_TELEMETRY_EVERY_N",
     "MEM_COMMIT_WARN_PCT_DEFAULT",
     "MEM_RSS_WARN_MB_DEFAULT",
-    "MINIDUMP_FLAGS",
     "install",
     "reset",
     "cancel_hang_watchdog",
     "heartbeat",
     "stop_heartbeat",
     "install_qt_message_handler",
-    "install_minidump_handler",
+    "install_native_crash_logger",
 ]
 
 # The production watchdog deadline (seconds). A main-thread stall longer than
@@ -128,12 +130,22 @@ MEM_COMMIT_WARN_PCT_DEFAULT = 90.0
 _ENV_MEM_RSS_MB = "MAS_MEM_RSS_WARN_MB"
 _ENV_MEM_COMMIT_PCT = "MAS_MEM_COMMIT_WARN_PCT"
 
-# ------------------------------------------------------- minidump capture
-# MiniDumpWithDataSegs (MiniDumpNormal | WithDataSegs): thread stacks plus
-# global data — megabytes, never the multi-GB full-heap dump.
-MINIDUMP_FLAGS = 0x00000001
-_DUMP_PREFIX = "mas-"
-_DUMP_SUFFIX = ".dmp"
+# ---------------------------------------------------- native crash reporting
+# Text-only since 2026-09-10: the MiniDumpWriteDump wiring produced multi-GB
+# .dmp files of OOM-scale sessions; the report below is a few KB of mas.log.
+# Common NTSTATUS exception codes, for the report header only.
+_CRASH_CODE_NAMES = {
+    0xC0000005: "ACCESS_VIOLATION",
+    0xC00000FD: "STACK_OVERFLOW",
+    0xC0000409: "STACK_BUFFER_OVERRUN / fail-fast",
+    0xC000001D: "ILLEGAL_INSTRUCTION",
+    0xC0000094: "INT_DIVIDE_BY_ZERO",
+    0xC0000096: "PRIVILEGED_INSTRUCTION",
+    0x80000003: "BREAKPOINT",
+    0xE06D7363: "C++ EXCEPTION (msvc throw)",
+}
+# RtlCaptureStackBackTrace's hard cap on captured frames.
+_MAX_NATIVE_FRAMES = 62
 # crtdefs.h _CALL_REPORTFAULT: the abort() bit that raises the fail-fast/
 # Watson path INSTEAD of raise(SIGABRT); cleared so abort() reaches our
 # C-level SIGABRT handler (and faulthandler's chain) on every machine.
@@ -163,17 +175,17 @@ _heartbeat_timer = None  # QTimer parented to the QApplication (Task 2)
 _beat_count = 0
 _mem_latches = {"rss": False, "commit": False}
 
-# Minidump-capture state (Task 2). The ctypes callback objects MUST stay
-# referenced for the process lifetime (a GC'd callback = a wild pointer in
-# kernel32's filter slot); reset() drops them only after deregistering.
-_minidump_installed = False
-_dump_dir: Path | None = None
+# Native-crash-logger state (quick-260909-ke1 task 2). The ctypes callback
+# objects MUST stay referenced for the process lifetime (a GC'd callback = a
+# wild pointer in kernel32's filter slot); reset() drops them only after
+# deregistering.
+_crash_logger_installed = False
 _md_apis: Any = None
 _md_filter_cb: Any = None
 _md_sigabrt_cb: Any = None
 _md_filter_prev: int | None = None
 _md_sigabrt_prev: int | None = None
-_crash_dump_written = False
+_native_crash_logged = False
 
 
 def logs_dir(base_dir: Path | None = None) -> Path:
@@ -246,12 +258,9 @@ def install(base_dir: Path | None = None, hang_timeout_s: float = HANG_TIMEOUT_S
         format=_LOG_FORMAT,
     )
     _write_session_separator()
-    # Native-crash minidumps LAST (after the sink): its DEBUG traces must never
-    # land in the file before the session separator does.
-    # DISABLED (2026-09-10, user request): with-data-segs minidumps of OOM-scale
-    # sessions wrote multi-GB .dmp files (8 GB observed) users have no disk for.
-    # Re-enable this call for native-crash triage only.
-    # install_minidump_handler(log_dir)
+    # Native-crash text reports LAST (after the sink): its ERROR record must
+    # never land in the file before the session separator does.
+    install_native_crash_logger()
     _is_installed = True
     return log_path
 
@@ -408,19 +417,22 @@ def _warm_memory_telemetry() -> None:
         pass
 
 
-# ------------------------------------------------------------ minidump capture
+# ----------------------------------------------------- native crash reporting
 # (quick-260909-ke1 task 2 — see the module docstring for the design; the
 # whole section is Windows-only, ctypes-lazy, and best-effort by contract).
 
 
 class _WindowsApis(NamedTuple):
-    """The ctypes entry points + callback factories for the capture path."""
+    """The ctypes entry points + callback factories for the crash-logger path."""
 
     sigabrt: int
     filter_func: Any
     sigabrt_func: Any
     set_unhandled_exception_filter: Any
-    mini_dump_write_dump: Any
+    capture_stack_back_trace: Any
+    get_module_handle_ex_w: Any
+    get_module_base_name_w: Any
+    get_module_information: Any
     get_current_process: Any
     get_current_process_id: Any
     get_current_thread_id: Any
@@ -429,19 +441,20 @@ class _WindowsApis(NamedTuple):
 
 
 def _load_windows_apis() -> _WindowsApis:
-    """Resolve the kernel32/dbghelp/ucrtbase entry points for the capture path.
+    """Resolve the kernel32/ntdll/psapi/ucrtbase entry points for the logger.
 
     Raises OSError when anything required is missing (non-Windows, absent
     export) so callers degrade gracefully. Optional exports (e.g.
     ``_set_abort_behavior``) come through as None instead of raising.
     """
     if sys.platform != "win32":
-        raise OSError("minidump capture requires Windows")
+        raise OSError("native crash reporting requires Windows")
     import ctypes
     from signal import SIGABRT
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    dbghelp = ctypes.WinDLL("dbghelp", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
     ucrtbase = ctypes.CDLL("ucrtbase.dll")
 
     def _resolve(lib: Any, name: str, restype: Any, argtypes: list) -> Any:
@@ -469,19 +482,27 @@ def _load_windows_apis() -> _WindowsApis:
         set_unhandled_exception_filter=_resolve(
             kernel32, "SetUnhandledExceptionFilter", c.c_void_p, [c.c_void_p]
         ),
-        mini_dump_write_dump=_resolve(
-            dbghelp,
-            "MiniDumpWriteDump",
-            c.c_long,  # Win32 BOOL
-            [
-                c.c_void_p,  # hProcess
-                c.c_uint32,  # ProcessId
-                c.c_void_p,  # hFile
-                c.c_uint32,  # DumpType
-                c.c_void_p,  # ExceptionParam (ptr or NULL)
-                c.c_void_p,  # UserStreamParam
-                c.c_void_p,  # CallbackParam
-            ],
+        # The native stack of the faulting thread (the filter/handler runs ON
+        # it). Frames are module-resolved for the report; the raw addresses
+        # are printed when resolution fails.
+        capture_stack_back_trace=_resolve(
+            ntdll,
+            "RtlCaptureStackBackTrace",
+            c.c_uint16,  # USHORT frames captured
+            [c.c_uint32, c.c_uint32, c.c_void_p, c.c_void_p],
+        ),
+        # GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS (0x4) |
+        # GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT (0x2).
+        # GetModuleHandleExW is a kernel32 export (NOT psapi — only the
+        # module name/info helpers live there).
+        get_module_handle_ex_w=_resolve(
+            kernel32, "GetModuleHandleExW", c.c_int, [c.c_uint32, c.c_void_p, c.c_void_p]
+        ),
+        get_module_base_name_w=_resolve(
+            psapi, "GetModuleBaseNameW", c.c_uint32, [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint32]
+        ),
+        get_module_information=_resolve(
+            psapi, "GetModuleInformation", c.c_int, [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint32]
         ),
         get_current_process=_resolve(kernel32, "GetCurrentProcess", c.c_void_p, []),
         get_current_process_id=_resolve(kernel32, "GetCurrentProcessId", c.c_uint32, []),
@@ -491,88 +512,131 @@ def _load_windows_apis() -> _WindowsApis:
     )
 
 
-def _write_minidump(
-    log_dir: Path, exception_pointers: int | None = None
-) -> Path | None:
-    """Write one minidump into ``log_dir``; the path on success, else None.
+def _module_for_address(apis: Any, address: int) -> str:
+    """Resolve ``address`` to ``module!+0xoffset``; the raw hex when unmapped."""
+    import ctypes
 
-    ``exception_pointers`` is the raw LPEXCEPTION_POINTERS from the filter
-    (None for the SIGABRT path — a stack dump without exception context still
-    shows every thread's native stack). Never returns a partial file: a
-    failed MiniDumpWriteDump unlinks its target. Raises only on environment
-    problems (non-Windows, missing dbghelp) — crash-path callers guard it.
+    hmod = ctypes.c_void_p(0)
+    # 0x4 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+    # 0x2 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT — never load/retain.
+    if not apis.get_module_handle_ex_w(0x6, ctypes.c_void_p(address), ctypes.byref(hmod)):
+        return f"0x{address:016X}"
+
+    class _MODULEINFO(ctypes.Structure):
+        _fields_ = [
+            ("lpBaseOfDll", ctypes.c_void_p),
+            ("SizeOfImage", ctypes.c_uint32),
+            ("EntryPoint", ctypes.c_void_p),
+        ]
+
+    info = _MODULEINFO()
+    name_buf = ctypes.create_unicode_buffer(260)
+    if not apis.get_module_information(
+        apis.get_current_process(), hmod, ctypes.byref(info), ctypes.sizeof(info)
+    ) or not apis.get_module_base_name_w(
+        apis.get_current_process(), hmod, ctypes.byref(name_buf), 260
+    ):
+        return f"0x{address:016X}"
+    base = info.lpBaseOfDll or 0
+    return f"{name_buf.value}!+0x{address - base:08X}"
+
+
+def _native_stack(apis: Any) -> list[str]:
+    """The calling thread's native stack as indented ``module!+0xoffset`` lines.
+
+    The filter/SIGABRT handler runs ON the faulting thread, so a capture from
+    here IS the faulting thread's stack (a few dispatcher frames from the
+    exception path sit between our handler and the faulting frame).
     """
     import ctypes
-    import msvcrt
+
+    buf = (ctypes.c_uint64 * _MAX_NATIVE_FRAMES)()
+    captured = apis.capture_stack_back_trace(
+        0, _MAX_NATIVE_FRAMES, ctypes.cast(buf, ctypes.c_void_p), None
+    )
+    lines = []
+    for addr in buf[: min(int(captured), _MAX_NATIVE_FRAMES)]:
+        if not addr:
+            break
+        lines.append(f"  {len(lines)}: {_module_for_address(apis, addr)}")
+    return lines
+
+
+def _native_crash_report(exception_pointers: int | None) -> str:
+    """Build the text crash report for mas.log (a few KB, never a dump file).
+
+    ``exception_pointers`` is the raw LPEXCEPTION_POINTERS from the filter
+    (None for the SIGABRT path). The report names the exception code, resolves
+    the faulting frame to ``module!+0xoffset``, and lists the native stack of
+    the faulting thread. Raises only on environment problems (non-Windows,
+    missing exports) — crash-path callers guard it.
+    """
+    import ctypes
+
+    class _EXCEPTION_RECORD(ctypes.Structure):
+        _fields_ = [
+            ("ExceptionCode", ctypes.c_int32),
+            ("ExceptionFlags", ctypes.c_uint32),
+            ("ExceptionRecord", ctypes.c_void_p),
+            ("ExceptionAddress", ctypes.c_void_p),
+            ("NumberParameters", ctypes.c_uint32),
+            ("ExceptionInformation", ctypes.c_uint64 * 15),
+        ]
+
+    class _EXCEPTION_POINTERS(ctypes.Structure):
+        _fields_ = [
+            ("ExceptionRecord", ctypes.POINTER(_EXCEPTION_RECORD)),
+            ("ContextRecord", ctypes.c_void_p),
+        ]
 
     apis = _load_windows_apis()
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = log_dir / f"{_DUMP_PREFIX}{stamp}{_DUMP_SUFFIX}"
-    suffix = 2
-    while path.exists():  # second-resolution names: never overwrite a dump
-        path = log_dir / f"{_DUMP_PREFIX}{stamp}-{suffix}{_DUMP_SUFFIX}"
-        suffix += 1
-
-    exc_param = None
     if exception_pointers:
-        # MINIDUMP_EXCEPTION_INFORMATION {ThreadId, PEXCEPTION_POINTERS,
-        # ClientPointers} — defined inline to keep ctypes lazy at module scope.
-        class _MiniDumpExceptionInfo(ctypes.Structure):
-            _fields_ = [
-                ("ThreadId", ctypes.c_uint32),
-                ("ExceptionPointers", ctypes.c_void_p),
-                ("ClientPointers", ctypes.c_int32),
-            ]
-
-        exc_param = ctypes.addressof(
-            _MiniDumpExceptionInfo(
-                apis.get_current_thread_id(), exception_pointers, False
+        pointers = ctypes.cast(
+            exception_pointers, ctypes.POINTER(_EXCEPTION_POINTERS)
+        ).contents
+        rec = pointers.ExceptionRecord.contents
+        code = rec.ExceptionCode & 0xFFFFFFFF
+        name = _CRASH_CODE_NAMES.get(code, "UNKNOWN")
+        fault_addr = rec.ExceptionAddress
+        if not fault_addr and pointers.ContextRecord:
+            # x64 CONTEXT.Rip sits at a fixed 0xF8 into the context record
+            # (documented layout) — view the record as uint64s and take [31].
+            fault_addr = ctypes.cast(
+                pointers.ContextRecord, ctypes.POINTER(ctypes.c_uint64 * 32)
+            ).contents[31]
+        where = (
+            _module_for_address(apis, fault_addr) if fault_addr else "<no faulting address>"
+        )
+        header = (
+            f"Native crash: exception 0x{code:08X} ({name}) at {where} "
+            f"on thread {apis.get_current_thread_id()}"
+        )
+        if code == 0xC0000005 and rec.NumberParameters >= 2:
+            access = {0: "read from", 1: "write to", 8: "DEP execute at"}.get(
+                rec.ExceptionInformation[0], "access"
             )
-        )
-
-    file_obj = open(path, "wb")
-    try:
-        handle = msvcrt.get_osfhandle(file_obj.fileno())
-        ok = apis.mini_dump_write_dump(
-            apis.get_current_process(),
-            apis.get_current_process_id(),
-            handle,
-            MINIDUMP_FLAGS,
-            exc_param,
-            None,
-            None,
-        )
-    finally:
-        file_obj.close()
-    if not ok:
-        try:
-            path.unlink()
-        except OSError:  # pragma: no cover - best-effort cleanup
-            pass
-        return None
-    return path
-
-
-def _capture_crash_dump(exception_pointers: int | None) -> None:
-    """Write the one crash dump per session and say so in mas.log (WARNING)."""
-    global _crash_dump_written
-    if _crash_dump_written or _dump_dir is None:
-        return
-    logger.warning(
-        f"Native crash: writing minidump into {_dump_dir} "
-        f"({_DUMP_PREFIX}*.dmp, next to mas.log)"
-    )
-    path = _write_minidump(_dump_dir, exception_pointers)
-    if path is not None:
-        _crash_dump_written = True
-        logger.warning(f"Crash minidump written: {path}")
+            header += f" — {access} 0x{rec.ExceptionInformation[1]:016X}"
     else:
-        logger.warning("Crash minidump could not be written (dbghelp failure)")
-    # Bound-flush the WARNINGs: the enqueue writer thread may be the dying
+        header = f"Native abort (SIGABRT) on thread {apis.get_current_thread_id()}"
+
+    lines = [header, "Native stack (innermost first):", *_native_stack(apis)]
+    return "\n".join(lines)
+
+
+def _log_native_crash(exception_pointers: int | None) -> None:
+    """Log the one native-crash report per session into mas.log (ERROR)."""
+    global _native_crash_logged
+    if _native_crash_logged:
+        return
+    try:
+        report = _native_crash_report(exception_pointers)
+    except Exception:  # noqa: BLE001 — the crash path must never raise
+        report = "Native crash: report generation failed"
+    logger.error(report)
+    _native_crash_logged = True
+    # Bound-flush the report: the enqueue writer thread may be the dying
     # thread itself, so complete() runs in a helper thread capped at 2s — the
-    # dump file (already on disk) is the load-bearing artifact either way.
+    # mas.log record is the load-bearing artifact either way.
     try:
         flusher = threading.Thread(target=logger.complete, daemon=True)
         flusher.start()
@@ -584,7 +648,7 @@ def _capture_crash_dump(exception_pointers: int | None) -> None:
 def _unhandled_exception_filter(exception_pointers: int | None) -> int:
     """The ctypes top-level unhandled-exception filter (SEH crash path)."""
     try:
-        _capture_crash_dump(exception_pointers)
+        _log_native_crash(exception_pointers)
     except Exception:  # noqa: BLE001 — the filter must never raise
         pass
     prev = _md_filter_prev
@@ -601,14 +665,14 @@ def _unhandled_exception_filter(exception_pointers: int | None) -> int:
 def _abort_sigabrt_handler(signum: int) -> None:
     """The ctypes C-LEVEL SIGABRT handler (the observed abort() path).
 
-    Writes the minidump, then chains to the PREVIOUS C handler — usually
-    faulthandler's, preserving the all-thread Python-stack dump in
+    Logs the native crash report, then chains to the PREVIOUS C handler —
+    usually faulthandler's, preserving the all-thread Python-stack dump in
     mas-hang.log. Our handler is uninstalled BEFORE the chain so any
     re-raise inside the previous handler (faulthandler restores + re-raises)
     cannot recurse into us.
     """
     try:
-        _capture_crash_dump(None)
+        _log_native_crash(None)
     except Exception:  # noqa: BLE001 — never raise out of a C signal handler
         pass
     apis = _md_apis
@@ -625,21 +689,18 @@ def _abort_sigabrt_handler(signum: int) -> None:
         pass
 
 
-def install_minidump_handler(log_dir: Path | None = None) -> None:
-    """Install the UEF + SIGABRT minidump capture (Windows-only, idempotent).
+def install_native_crash_logger() -> None:
+    """Install the UEF + SIGABRT text-report capture (Windows-only, idempotent).
 
-    Any failure (non-Windows, missing dbghelp, ...) is swallowed with a DEBUG
-    line: the app keeps running exactly as before, just without dump capture.
+    Native crashes log a TEXT report into mas.log (exception code, faulting
+    ``module!+0xoffset``, native stack) — no dump files. Any failure
+    (non-Windows, missing exports, ...) is swallowed with a DEBUG line: the
+    app keeps running exactly as before, just without crash reporting.
     """
-    global _minidump_installed, _dump_dir, _md_apis
+    global _crash_logger_installed, _md_apis
     global _md_filter_cb, _md_sigabrt_cb, _md_filter_prev, _md_sigabrt_prev
-    if _minidump_installed:
+    if _crash_logger_installed:
         return
-    target = log_dir if log_dir is not None else (
-        _log_path.parent if _log_path is not None else None
-    )
-    if target is None:  # pragma: no cover - install() always passes a dir
-        target = logs_dir(None)
     try:
         import ctypes
 
@@ -662,14 +723,10 @@ def install_minidump_handler(log_dir: Path | None = None) -> None:
         _md_sigabrt_cb = sigabrt_cb
         _md_filter_prev = prev_filter
         _md_sigabrt_prev = prev_sigabrt
-        _dump_dir = Path(target)
-        _minidump_installed = True
-        logger.debug(
-            "minidump capture installed (native crashes leave "
-            f"{_DUMP_PREFIX}<timestamp>{_DUMP_SUFFIX} next to mas.log)"
-        )
+        _crash_logger_installed = True
+        logger.debug("native crash logger installed (reports go into mas.log)")
     except Exception as exc:  # noqa: BLE001 — diagnostics must never break the app
-        logger.debug(f"minidump capture unavailable (continuing without): {exc}")
+        logger.debug(f"native crash logger unavailable (continuing without): {exc}")
 
 
 # ----------------------------------------------------------------- Qt layer
@@ -773,13 +830,13 @@ def reset() -> None:
     """
     global _is_installed, _sink_id, _log_path, _hang_path, _hang_fh
     global _prev_sys_excepthook, _prev_threading_excepthook, _prev_qt_handler
-    global _minidump_installed, _dump_dir, _md_apis
+    global _crash_logger_installed, _md_apis
     global _md_filter_cb, _md_sigabrt_cb, _md_filter_prev, _md_sigabrt_prev
-    global _crash_dump_written, _beat_count, _mem_latches
+    global _native_crash_logged, _beat_count, _mem_latches
 
     stop_heartbeat()
     faulthandler.cancel_dump_traceback_later()
-    if _minidump_installed:
+    if _crash_logger_installed:
         apis, filter_prev, sigabrt_prev = _md_apis, _md_filter_prev, _md_sigabrt_prev
         try:
             if apis is not None:
@@ -795,13 +852,11 @@ def reset() -> None:
         _md_sigabrt_cb = None
         _md_filter_prev = None
         _md_sigabrt_prev = None
-        _dump_dir = None
-        _minidump_installed = False
-    # The one-dump-per-session latch clears UNCONDITIONALLY: capture may be
-    # disabled (install() no longer arms it) yet the latch is still settable
-    # by tests that drive the filter/handler directly — a latched session
-    # must never survive a reset().
-    _crash_dump_written = False
+        _crash_logger_installed = False
+    # The one-report-per-session latch clears UNCONDITIONALLY: the crash
+    # logger is still settable by tests that drive the filter/handler
+    # directly — a latched session must never survive a reset().
+    _native_crash_logged = False
     _beat_count = 0
     _mem_latches = {"rss": False, "commit": False}
     if _prev_qt_handler is not None:

@@ -12,12 +12,14 @@ All log reads drain loguru's ``enqueue=True`` writer first via
 ``logger.complete()`` (fifo-ordered), and absence checks are anchored behind
 an ADMITTED barrier record so a slow writer can never false-pass them.
 
-Task 2 (minidump capture) and Task 3 (heartbeat memory telemetry) extend this
-file: the Windows-only minidump battery covers install idempotence, graceful
-degradation on a broken dbghelp path, real MDMP writes, the UEF/SIGABRT
-latching + chaining contracts, and a subprocess end-to-end abort; the
-telemetry battery covers formatting, latching, env overrides and the
-heartbeat cadence (all psutil-free via fakes/monkeypatching).
+Task 2 (native crash reporting) and Task 3 (heartbeat memory telemetry) extend
+this file: the Windows-only crash-logger battery covers install idempotence,
+graceful degradation on a broken OS-export path, report decoding (SIGABRT text
++ fabricated ACCESS_VIOLATION records resolved to module!offset), the
+UEF/SIGABRT latching + chaining contracts, and a subprocess end-to-end abort
+proving no dump files are written; the telemetry battery covers formatting,
+latching, env overrides and the heartbeat cadence (all psutil-free via
+fakes/monkeypatching).
 """
 
 from __future__ import annotations
@@ -248,40 +250,32 @@ def test_reset_restores_hooks_and_allows_fresh_install(tmp_path: Path, tmp_path_
     assert second != first  # the flag was cleared: install targets a fresh dir
 
 
-# ---------------------------------------------------- minidump capture (Task 2)
+# ---------------------------------------------- native crash reporting (Task 2)
 _win_only = pytest.mark.skipif(
-    sys.platform != "win32", reason="minidump capture is Windows-only"
+    sys.platform != "win32", reason="native crash reporting is Windows-only"
 )
 
 
 @_win_only
 @pytest.mark.unit
-def test_install_minidump_handler_is_idempotent_and_reset_restores(
+def test_install_native_crash_logger_is_idempotent_and_reset_restores(
     tmp_path: Path,
 ) -> None:
-    """install() arms the capture once; reset() deregisters and restores state.
-
-    install() no longer arms minidump capture itself (multi-GB dumps disabled,
-    2026-09-10) — the handler is armed explicitly here because THIS test's
-    subject is the capture machinery, not the wiring.
-    """
+    """install_native_crash_logger() arms once; reset() deregisters and restores."""
     apis = diagnostics._load_windows_apis()
     diagnostics.install(tmp_path, hang_timeout_s=0.5)
-    assert not diagnostics._minidump_installed  # disabled at the wiring site
-    diagnostics.install_minidump_handler(tmp_path / "logs")
-    assert diagnostics._minidump_installed
-    assert diagnostics._dump_dir == tmp_path / "logs"
+    assert diagnostics._crash_logger_installed  # install() arms it again
     assert diagnostics._md_filter_cb is not None  # ctypes callback kept alive
     assert diagnostics._md_sigabrt_cb is not None
     first_prev = diagnostics._md_filter_prev
 
     # Idempotence: a second call re-captures nothing (the previous filter
     # stays the one install() saw — never OUR own filter).
-    diagnostics.install_minidump_handler(tmp_path / "logs")
+    diagnostics.install_native_crash_logger()
     assert diagnostics._md_filter_prev is first_prev
 
     diagnostics.reset()
-    assert not diagnostics._minidump_installed
+    assert not diagnostics._crash_logger_installed
     assert diagnostics._md_filter_cb is None
     # Round-trip: the process filter is back to what install() captured. The
     # read itself installs NULL, so put the captured value back afterwards.
@@ -292,48 +286,83 @@ def test_install_minidump_handler_is_idempotent_and_reset_restores(
 
 @_win_only
 @pytest.mark.unit
-def test_minidump_install_degrades_gracefully_without_dbghelp(
+def test_native_crash_logger_degrades_gracefully_without_apis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A missing/broken dbghelp path is swallowed: install() still completes."""
+    """A missing/broken OS-export path is swallowed: install() still completes."""
     def boom():
-        raise OSError("no dbghelp on this box")
+        raise OSError("no ntdll/psapi exports on this box")
 
     monkeypatch.setattr(diagnostics, "_load_windows_apis", boom)
     log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
     assert log.exists()  # the rest of install() is untouched
-    assert not diagnostics._minidump_installed
+    assert not diagnostics._crash_logger_installed
     assert diagnostics._md_filter_cb is None
-    diagnostics.install_minidump_handler(tmp_path)  # direct call: also safe
-    assert not diagnostics._minidump_installed
+    diagnostics.install_native_crash_logger()  # direct call: also safe
+    assert not diagnostics._crash_logger_installed
 
 
 @_win_only
 @pytest.mark.unit
-def test_write_minidump_produces_mdmp_file(tmp_path: Path) -> None:
-    """_write_minidump writes a real Windows minidump (MDMP magic) into dir."""
-    path = diagnostics._write_minidump(tmp_path)
-    assert path is not None
-    assert path.parent == tmp_path
-    assert path.name.startswith("mas-") and path.name.endswith(".dmp")
-    assert path.read_bytes()[:4] == b"MDMP"
+def test_native_crash_report_sigabrt_text_and_stack() -> None:
+    """The SIGABRT-shape report names the abort and lists a module-resolved stack."""
+    report = diagnostics._native_crash_report(None)
+    assert "Native abort (SIGABRT)" in report
+    assert "Native stack (innermost first):" in report
+    # Frames resolve to module!+0xoffset (the capture runs on a live thread —
+    # at least our own python314/ntdll frames must be resolvable).
+    assert "!+0x" in report
 
 
 @_win_only
 @pytest.mark.unit
-def test_crash_filter_writes_once_latches_and_logs_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_native_crash_report_decodes_access_violation() -> None:
+    """A fabricated AV EXCEPTION_POINTERS decodes code, access type, and module."""
+    import ctypes
+
+    class _EXCEPTION_RECORD(ctypes.Structure):
+        _fields_ = [
+            ("ExceptionCode", ctypes.c_int32),
+            ("ExceptionFlags", ctypes.c_uint32),
+            ("ExceptionRecord", ctypes.c_void_p),
+            ("ExceptionAddress", ctypes.c_void_p),
+            ("NumberParameters", ctypes.c_uint32),
+            ("ExceptionInformation", ctypes.c_uint64 * 15),
+        ]
+
+    class _EXCEPTION_POINTERS(ctypes.Structure):
+        _fields_ = [
+            ("ExceptionRecord", ctypes.POINTER(_EXCEPTION_RECORD)),
+            ("ContextRecord", ctypes.c_void_p),
+        ]
+
+    # Faulting "address" = a real kernel32 function pointer, so module
+    # resolution must land IN kernel32.dll.
+    kernel32 = ctypes.WinDLL("kernel32")
+    fault_addr = ctypes.cast(kernel32.GetCurrentProcess, ctypes.c_void_p).value
+
+    rec = _EXCEPTION_RECORD()
+    rec.ExceptionCode = 0xC0000005
+    rec.ExceptionAddress = fault_addr
+    rec.NumberParameters = 2
+    rec.ExceptionInformation[0] = 1  # write access
+    rec.ExceptionInformation[1] = 0xDEADBEEF
+    pointers = _EXCEPTION_POINTERS(ctypes.pointer(rec), None)
+
+    report = diagnostics._native_crash_report(ctypes.addressof(pointers))
+    assert "0xC0000005" in report and "ACCESS_VIOLATION" in report
+    assert "write to 0x00000000DEADBEEF" in report
+    assert "kernel32.dll!+0x" in report.lower()  # OS returns the base name as-is
+    assert f"0x{fault_addr:016X}" not in report  # resolved, not raw
+
+
+@_win_only
+@pytest.mark.unit
+def test_crash_filter_reports_once_latches_and_logs(
+    tmp_path: Path,
 ) -> None:
-    """The UEF writes ONE dump per session, latches, and logs the path."""
+    """The UEF logs ONE report per session, latches, and keeps chaining."""
     log = diagnostics.install(tmp_path, hang_timeout_s=0.5)
-    dumps: list[Path] = []
-    fake_dump = tmp_path / "fake.dmp"
-    monkeypatch.setattr(
-        diagnostics,
-        "_write_minidump",
-        lambda d, exception_pointers=None: dumps.append(d) or fake_dump,
-    )
-    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
     assert (
         diagnostics._unhandled_exception_filter(None)
         == diagnostics.EXCEPTION_CONTINUE_SEARCH
@@ -342,10 +371,9 @@ def test_crash_filter_writes_once_latches_and_logs_path(
         diagnostics._unhandled_exception_filter(None)
         == diagnostics.EXCEPTION_CONTINUE_SEARCH
     )
-    assert dumps == [tmp_path]  # written exactly once (latched)
     text = _read_log(log)
-    assert text.count("Crash minidump written") == 1
-    assert "fake.dmp" in text
+    assert text.count("Native abort (SIGABRT)") == 1  # exactly once (latched)
+    assert "Native stack (innermost first):" in text
 
 
 @_win_only
@@ -363,19 +391,18 @@ def test_crash_filter_chains_previous_filter(
     monkeypatch.setattr(diagnostics, "_md_apis", apis)
     monkeypatch.setattr(diagnostics, "_md_filter_prev", prev_addr)
     monkeypatch.setattr(
-        diagnostics, "_write_minidump", lambda d, exception_pointers=None: None
+        diagnostics, "_log_native_crash", lambda exception_pointers=None: None
     )
-    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
     assert diagnostics._unhandled_exception_filter(1234) == 7
     assert seen == [1234]
 
 
 @_win_only
 @pytest.mark.unit
-def test_sigabrt_handler_dumps_uninstalls_then_chains(
+def test_sigabrt_handler_reports_uninstalls_then_chains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The C-level SIGABRT handler dumps, restores prev into the slot, chains."""
+    """The C-level SIGABRT handler reports, restores prev into the slot, chains."""
     import ctypes
 
     apis = diagnostics._load_windows_apis()
@@ -389,19 +416,18 @@ def test_sigabrt_handler_dumps_uninstalls_then_chains(
         return prev_addr
 
     apis = apis._replace(signal=recording_signal)  # NamedTuple: immutably swap
-    dumps: list[Path] = []
+    reports: list[int | None] = []
     monkeypatch.setattr(diagnostics, "_md_apis", apis)
     monkeypatch.setattr(diagnostics, "_md_sigabrt_prev", prev_addr)
-    monkeypatch.setattr(diagnostics, "_dump_dir", tmp_path)
     monkeypatch.setattr(
         diagnostics,
-        "_write_minidump",
-        lambda d, exception_pointers=None: dumps.append(d) or (d / "x.dmp"),
+        "_log_native_crash",
+        lambda exception_pointers=None: reports.append(exception_pointers),
     )
 
     diagnostics._abort_sigabrt_handler(22)
 
-    assert dumps == [tmp_path]
+    assert reports == [None]  # the abort-shape report was produced exactly once
     assert chained == [22]  # the previous handler (faulthandler's) was chained
     # ...and our handler uninstalled itself first (re-raise cannot recurse).
     assert signal_calls == [(apis.sigabrt, prev_addr)]
@@ -409,36 +435,35 @@ def test_sigabrt_handler_dumps_uninstalls_then_chains(
 
 @_win_only
 @pytest.mark.unit
-def test_abort_in_subprocess_writes_minidump_and_chains_faulthandler(
+def test_abort_in_subprocess_logs_report_and_chains_faulthandler(
     tmp_path: Path,
 ) -> None:
-    """End-to-end: a real abort() lands a mas-*.dmp AND keeps the hang dump.
+    """End-to-end: a real abort() lands a TEXT report AND keeps the hang dump.
 
     The load-bearing proof for the observed crash shape (native abort with no
-    Python slot frames): the C-level SIGABRT handler writes the minidump, then
-    chains to faulthandler's handler so mas-hang.log still gets the
-    all-thread Python dump, and the WARNING breadcrumbs land in mas.log.
+    Python slot frames): the C-level SIGABRT handler writes the textual crash
+    report into mas.log, then chains to faulthandler's handler so mas-hang.log
+    still gets the all-thread Python dump — and NO .dmp file is written.
     """
     logs = tmp_path / "logs"
     code = (
         "import manga_ai_studio.diagnostics as d;"
         f"d.install({str(tmp_path)!r}, hang_timeout_s=60.0);"
-        # Capture is disabled at the install() wiring (multi-GB dumps) — the
-        # end-to-end crash pipeline under test must arm it explicitly.
-        f"d.install_minidump_handler({str(logs)!r});"
+        # install() arms the crash logger itself; the explicit call documents
+        # that this pipeline no longer depends on any dump machinery.
+        "d.install_native_crash_logger();"
         "import ctypes;"
         'ctypes.CDLL("ucrtbase.dll").abort()'
     )
     proc = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
     )
-    dumps = sorted(logs.glob("mas-*.dmp"))
-    assert dumps, f"no minidump after abort (rc={proc.returncode}): {proc.stderr!r}"
-    assert dumps[0].read_bytes()[:4] == b"MDMP"
+    assert not list(logs.glob("*.dmp")), "no dump files may be written"
+    text = (logs / "mas.log").read_text(encoding="utf-8", errors="replace")
+    assert "Native abort (SIGABRT)" in text  # the report landed
+    assert "Native stack (innermost first):" in text
     hang = (logs / "mas-hang.log").read_text(encoding="utf-8", errors="replace")
     assert "Fatal Python error" in hang  # the chained faulthandler dump landed
-    text = (logs / "mas.log").read_text(encoding="utf-8", errors="replace")
-    assert "Crash minidump written" in text  # the path breadcrumb landed
 
 
 # ------------------------------------------------- memory telemetry (Task 3)
