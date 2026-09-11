@@ -21,6 +21,17 @@ accepted and stored verbatim (alpha ``ff`` = opaque, the legacy default —
 QColor applies it automatically at parse time, so old projects load and
 render byte-compatibly with zero spelling rewrite).
 
+quick-260910-vej extends the glyph fill into a 3-way choice via
+``fill_type``: ``"solid"`` (today's ``color`` fill, byte-identical),
+``"gradient"`` (a linear 2-stop ramp Color A = ``color`` -> Color B =
+``fill_color_b`` at ``fill_angle_deg`` clockwise degrees spanning the
+text bbox), or ``"pattern"`` (a user-loaded image tile
+``pattern_tile_b64`` — base64 of the ORIGINAL file bytes, format-agnostic
+— tiled and clipped to the glyphs at ``pattern_scale``, drawn with
+Color A's alpha as the tile opacity). Every default keeps the legacy
+Solid look exactly: ``fill_type="solid"`` renders the plain ``color``
+fill verbatim, and a legacy project (no fill keys) loads as Solid.
+
 Serialization (``to_dict`` / ``from_dict``) is the SINGLE spelling shared by
 the persistence writers (D-07 — one dict builder under test). ``from_dict``
 is the V5 input boundary: every numeric is type-checked and clamped
@@ -74,6 +85,18 @@ LINE_SPACING_MAX = 256.0
 CHAR_SPACING_MIN = -64.0
 LINE_SPACING_MIN = -256.0
 EFFECT_GEOM_MAX = 256.0  # outline width / glow+shadow radius
+
+# quick-260910-vej — the fill-type framework's PUBLIC shared constants: the
+# Inspector imports them so the UI ranges == the model clamps by construction
+# (the EFFECT_GEOM_MAX precedent). ``FILL_TILE_MAX_BYTES`` is the PICK-TIME
+# byte cap the file-open dialog enforces (a warning dialog, never a silent
+# truncate); the LOAD path deliberately does NOT clamp tile bytes (a larger
+# hand-edited legacy value still loads — the renderer's decode guard handles
+# the crafted-file case).
+FILL_TYPES = ("solid", "gradient", "pattern")
+FILL_TILE_MAX_BYTES = 4 * 1024 * 1024  # 4 MB pick-time cap on the tile file
+PATTERN_SCALE_MIN = 0.1
+PATTERN_SCALE_MAX = 10.0
 
 _ALIGN_H_VALUES = ("left", "center", "right")
 _ALIGN_V_VALUES = ("top", "middle", "bottom")
@@ -179,6 +202,27 @@ class TextStyle:
         line_spacing_px: Extra vertical gap between lines (horizontal mode)
             / between stacked characters in a column (vertical tategaki
             mode), in px. Clamped 0..256.
+        fill_type: quick-260910-vej — the glyph fill mode: ``"solid"``
+            (the plain ``color`` fill, the legacy look), ``"gradient"``
+            (linear 2-stop ramp) or ``"pattern"`` (a tiled image).
+            Anything else loads as ``"solid"`` (the allowed-values fallback,
+            the ``align_h`` pattern).
+        fill_color_b: The gradient's STOP-B color; same verbatim-hex
+            discipline as ``color`` (``#RRGGBB``/``#AARRGGBB``, validated at
+            RENDER time via the renderer's ``_valid_color``, never at load).
+            Only meaningful when ``fill_type == "gradient"``.
+        fill_angle_deg: The gradient direction in degrees CLOCKWISE
+            (documented exactly like ``rotation_deg``): 0.0 = left->right,
+            90.0 = top->bottom, with Color A at the gradient's START.
+            Clamped 0.0..360.0 on load.
+        pattern_scale: Uniform tile zoom for the pattern fill. Clamped
+            ``PATTERN_SCALE_MIN``..``PATTERN_SCALE_MAX`` (0.1..10.0) on load.
+        pattern_tile_b64: base64 of the pattern tile's ORIGINAL file bytes
+            (format-agnostic — whatever ``QImage.fromData`` decodes: PNG/
+            JPG/WebP). ``None`` = no tile (the pattern fill then falls back
+            to solid at render time). A non-str value loads as ``None``;
+            NO size clamp at load (load robustness — the 4 MB
+            ``FILL_TILE_MAX_BYTES`` cap is a pick-time UI guard only).
     """
 
     font_family: str = DEFAULT_FONT_FAMILY
@@ -200,6 +244,13 @@ class TextStyle:
     outline: dict = field(default_factory=lambda: dict(DEFAULT_OUTLINE))
     glow: dict = field(default_factory=lambda: dict(DEFAULT_GLOW))
     shadow: dict = field(default_factory=lambda: dict(DEFAULT_SHADOW))
+    # quick-260910-vej — the fill framework. Every default is
+    # legacy-identical: fill_type "solid" renders the plain color fill.
+    fill_type: str = "solid"
+    fill_color_b: str = "#ffffff"
+    fill_angle_deg: float = 90.0
+    pattern_scale: float = 1.0
+    pattern_tile_b64: str | None = None
 
     def to_dict(self) -> dict:
         """The hand-picked serialization projection (D-07 single spelling).
@@ -224,6 +275,11 @@ class TextStyle:
             "outline": dict(self.outline),
             "glow": dict(self.glow),
             "shadow": dict(self.shadow),
+            "fill_type": self.fill_type,
+            "fill_color_b": self.fill_color_b,
+            "fill_angle_deg": self.fill_angle_deg,
+            "pattern_scale": self.pattern_scale,
+            "pattern_tile_b64": self.pattern_tile_b64,
         }
 
     @classmethod
@@ -263,6 +319,15 @@ class TextStyle:
         if not isinstance(align_v, str) or align_v not in _ALIGN_V_VALUES:
             align_v = "middle"
 
+        # quick-260910-vej — the fill fields (the align_h allowed-values
+        # pattern for the type; _clamp_float for the numerics; a non-str
+        # tile loads as None — no size clamp at LOAD, the 4 MB cap is the
+        # pick-time UI guard and the renderer's decode guard covers crafted
+        # files).
+        fill_type = d.get("fill_type", "solid")
+        if not isinstance(fill_type, str) or fill_type not in FILL_TYPES:
+            fill_type = "solid"
+
         return cls(
             font_family=_coerce_str(d.get("font_family"), DEFAULT_FONT_FAMILY),
             bold=_coerce_bool(d.get("bold"), False),
@@ -285,4 +350,16 @@ class TextStyle:
             outline=_coerce_effect(d.get("outline"), DEFAULT_OUTLINE),
             glow=_coerce_effect(d.get("glow"), DEFAULT_GLOW),
             shadow=_coerce_effect(d.get("shadow"), DEFAULT_SHADOW),
+            fill_type=fill_type,
+            fill_color_b=_coerce_str(d.get("fill_color_b"), "#ffffff"),
+            fill_angle_deg=_clamp_float(
+                d.get("fill_angle_deg"), 0.0, 360.0, 90.0
+            ),
+            pattern_scale=_clamp_float(
+                d.get("pattern_scale"),
+                PATTERN_SCALE_MIN,
+                PATTERN_SCALE_MAX,
+                1.0,
+            ),
+            pattern_tile_b64=_coerce_str(d.get("pattern_tile_b64"), None),
         )

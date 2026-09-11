@@ -312,6 +312,85 @@ def test_legacy_opaque_color_spelling_unchanged_by_persistence() -> None:
     assert out.style.color == "#ff0000"
 
 
+# ---------------------------------------------------------------------------
+# quick-260910-vej — the fill fields survive .mas persistence
+# ---------------------------------------------------------------------------
+
+
+def _tiny_png_tile_b64() -> str:
+    """A real 2x2 PNG tile (two colors) as base64 — the embedded-tile shape."""
+    import base64
+
+    img = Image.new("RGB", (2, 2))
+    img.putpixel((0, 0), (255, 0, 0))
+    img.putpixel((1, 0), (0, 255, 0))
+    img.putpixel((0, 1), (0, 0, 255))
+    img.putpixel((1, 1), (255, 255, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+@pytest.mark.unit
+def test_fill_styles_round_trip_mas_field_for_field() -> None:
+    """quick-260910-vej: gradient (angle 37, alpha Color A, opaque Color B)
+    and pattern (a small REAL PNG tile embedded as b64) styles survive
+    ``pagebox_to_json`` -> ``json.dumps`` -> ``json.loads`` ->
+    ``json_to_pagebox`` field-for-field. Zero persistence-layer edits — the
+    style block rides ``to_dict``/``from_dict`` (the D-07 seam)."""
+    gradient_pb = PageBox(
+        box=Box(10, 20, 200, 300),
+        origin=USER,
+        payload=None,
+        style=TextStyle(
+            color="#80ff0000",
+            fill_type="gradient",
+            fill_color_b="#ff0000ff",
+            fill_angle_deg=37.0,
+        ),
+    )
+    pattern_pb = PageBox(
+        box=Box(5, 5, 105, 105),
+        origin=USER,
+        payload=None,
+        style=TextStyle(
+            fill_type="pattern",
+            pattern_scale=2.5,
+            pattern_tile_b64=_tiny_png_tile_b64(),
+        ),
+    )
+
+    for pb in (gradient_pb, pattern_pb):
+        serialized = json.loads(json.dumps(pagebox_to_json(pb), ensure_ascii=False))
+        out = json_to_pagebox(serialized)
+        assert out.style is not None
+        assert out.style is not pb.style  # fresh instance, never identity
+        assert out.style == pb.style  # field-for-field equal
+
+
+@pytest.mark.unit
+def test_legacy_box_without_fill_keys_loads_solid() -> None:
+    """A legacy style dict with NO fill keys loads as fill_type "solid" with
+    the legacy defaults (Pitfall 8 backward compat — old projects render
+    exactly as before)."""
+    legacy = {
+        "box": [0, 0, 100, 40],
+        "origin": USER,
+        "edited": False,
+        "bubble_no": None,
+        "manual_override": False,
+        "payload": None,
+        "style": {"font_family": "Arial", "color": "#123456"},
+    }
+    out = json_to_pagebox(legacy)
+    assert out.style is not None
+    assert out.style.fill_type == "solid"
+    assert out.style.fill_color_b == "#ffffff"
+    assert out.style.fill_angle_deg == 90.0
+    assert out.style.pattern_scale == 1.0
+    assert out.style.pattern_tile_b64 is None
+
+
 @pytest.mark.unit
 def test_style_none_round_trip() -> None:
     """A style-None box writes "style": None and reloads with the DEFAULT

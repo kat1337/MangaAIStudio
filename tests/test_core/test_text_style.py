@@ -461,3 +461,117 @@ def test_default_color_spelling_unchanged() -> None:
     """The default color spelling is untouched by the alpha work — existing
     projects see zero churn (no 7->9-char rewrite of the default)."""
     assert TextStyle().to_dict()["color"] == "#000000"
+
+
+# ---------------------------------------------------------------------------
+# quick-260910-vej — the fill framework (solid | gradient | pattern)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fill_fields_default_to_legacy_solid_look() -> None:
+    """Every fill field's default is legacy-identical: Solid with the plain
+    color fill, no Color B/angle/scale/tile state to disturb old projects."""
+    from manga_ai_studio.core.text_style import (
+        FILL_TILE_MAX_BYTES,
+        FILL_TYPES,
+    )
+
+    s = TextStyle()
+    assert s.fill_type == "solid"
+    assert s.fill_color_b == "#ffffff"
+    assert s.fill_angle_deg == 90.0
+    assert s.pattern_scale == 1.0
+    assert s.pattern_tile_b64 is None
+    # The public shared constants (the UI imports them — UI == model).
+    assert FILL_TYPES == ("solid", "gradient", "pattern")
+    assert FILL_TILE_MAX_BYTES == 4 * 1024 * 1024
+
+
+@pytest.mark.unit
+def test_fill_fields_round_trip_through_from_dict() -> None:
+    """from_dict(to_dict(s)) preserves all five fill fields for a fully
+    populated fill style (the D-07 single spelling)."""
+    s = TextStyle(
+        color="#80ff0000",
+        fill_type="gradient",
+        fill_color_b="#00ffff00",
+        fill_angle_deg=37.0,
+    )
+    restored = TextStyle.from_dict(s.to_dict())
+    assert restored == s
+
+    tile = TextStyle(
+        fill_type="pattern",
+        pattern_scale=2.5,
+        pattern_tile_b64="aGVsbG8=",
+    )
+    restored_t = TextStyle.from_dict(tile.to_dict())
+    assert restored_t == tile
+
+
+@pytest.mark.unit
+def test_to_dict_carries_all_five_fill_keys() -> None:
+    """to_dict's projection includes every fill key — the .mas shape."""
+    d = TextStyle().to_dict()
+    for key in (
+        "fill_type",
+        "fill_color_b",
+        "fill_angle_deg",
+        "pattern_scale",
+        "pattern_tile_b64",
+    ):
+        assert key in d
+
+
+@pytest.mark.unit
+def test_v5_fill_type_allowed_values_fallback() -> None:
+    """fill_type coerces through the allowed-values set (the align_h
+    pattern): unknown strings and non-str values fall back to "solid"."""
+    assert TextStyle.from_dict({"fill_type": "gradient"}).fill_type == "gradient"
+    assert TextStyle.from_dict({"fill_type": "pattern"}).fill_type == "pattern"
+    assert TextStyle.from_dict({"fill_type": "solid"}).fill_type == "solid"
+    assert TextStyle.from_dict({"fill_type": "radial"}).fill_type == "solid"
+    assert TextStyle.from_dict({"fill_type": 3}).fill_type == "solid"
+    assert TextStyle.from_dict({"fill_type": None}).fill_type == "solid"
+
+
+@pytest.mark.unit
+def test_v5_clamps_fill_angle_and_pattern_scale() -> None:
+    """fill_angle_deg clamps into 0..360; pattern_scale into 0.1..10.0;
+    non-numeric falls back to the default, never raises (V5)."""
+    assert TextStyle.from_dict({"fill_angle_deg": -5}).fill_angle_deg == 0.0
+    assert TextStyle.from_dict({"fill_angle_deg": 720}).fill_angle_deg == 360.0
+    assert TextStyle.from_dict({"fill_angle_deg": 37.5}).fill_angle_deg == 37.5
+    assert TextStyle.from_dict({"fill_angle_deg": "x"}).fill_angle_deg == 90.0
+    assert TextStyle.from_dict({"fill_angle_deg": True}).fill_angle_deg == 90.0
+
+    assert TextStyle.from_dict({"pattern_scale": 0.01}).pattern_scale == 0.1
+    assert TextStyle.from_dict({"pattern_scale": 99}).pattern_scale == 10.0
+    assert TextStyle.from_dict({"pattern_scale": 2.5}).pattern_scale == 2.5
+    assert TextStyle.from_dict({"pattern_scale": "big"}).pattern_scale == 1.0
+
+
+@pytest.mark.unit
+def test_v5_pattern_tile_b64_non_str_loads_as_none() -> None:
+    """A non-str pattern_tile_b64 loads as None (no clamp at load — load
+    robustness; the 4 MB cap is a pick-time UI guard only)."""
+    assert TextStyle.from_dict({"pattern_tile_b64": 123}).pattern_tile_b64 is None
+    assert TextStyle.from_dict({"pattern_tile_b64": None}).pattern_tile_b64 is None
+    assert (
+        TextStyle.from_dict({"pattern_tile_b64": "aGVsbG8="}).pattern_tile_b64
+        == "aGVsbG8="
+    )
+
+
+@pytest.mark.unit
+def test_legacy_dicts_yield_solid_defaults_for_fill_fields() -> None:
+    """A legacy dict without fill keys (and None input) yields the Solid
+    defaults exactly (Pitfall 8 backward compat)."""
+    for src in (None, {}, {"font_family": "Arial", "color": "#ff0000"}):
+        s = TextStyle.from_dict(src)
+        assert s.fill_type == "solid"
+        assert s.fill_color_b == "#ffffff"
+        assert s.fill_angle_deg == 90.0
+        assert s.pattern_scale == 1.0
+        assert s.pattern_tile_b64 is None
