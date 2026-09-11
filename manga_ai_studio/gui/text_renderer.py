@@ -70,7 +70,10 @@ pytest-qt ``qapp`` fixture.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -83,6 +86,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QImage,
+    QLinearGradient,
     QPainter,
     QPen,
     QTextBlockFormat,
@@ -90,9 +94,14 @@ from PySide6.QtGui import (
     QTextCursor,
     QTextDocument,
     QTextOption,
+    QTransform,
 )
 
-from manga_ai_studio.core.text_style import TextStyle
+from manga_ai_studio.core.text_style import (
+    PATTERN_SCALE_MAX,
+    PATTERN_SCALE_MIN,
+    TextStyle,
+)
 from manga_ai_studio.core.text_wrap import break_lines_ex
 
 # ---------------------------------------------------------------------------
@@ -382,6 +391,199 @@ def _outline_pen(style: TextStyle) -> QPen | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# quick-260910-vej — the styled glyph-fill brush factory (gradient + pattern).
+# ONE brush path riding the EXISTING ``setForeground(QBrush)`` call sites
+# (no new compositing passes): horizontal fills merge the brush over the
+# laid-out document in ``_build_document``, vertical fills build per-char
+# brushes anchored so ONE continuous ramp/tiling spans the whole column.
+# Canvas overlay and ``bake_typeset_page`` share the factory through the same
+# ``layout()`` + ``paint()`` functions — canvas ≡ bake is structural (D-01).
+# ---------------------------------------------------------------------------
+
+# T-vej-01: a decoded tile whose max dimension exceeds this is treated as a
+# crafted file — solid fallback + one warning, never an unbounded allocation.
+_TILE_DECODE_MAX_DIMENSION = 8192
+# T-vej-02: the decoded+SCALED tile cache is bounded (evict-oldest). QImage is
+# implicitly shared (copy-on-write): the cached value is shared READ-ONLY
+# across the bake worker thread and the GUI thread — the alpha modulation
+# below always works on a detached copy, never the cached pixels.
+_TILE_CACHE_MAX = 8
+_tile_cache: OrderedDict = OrderedDict()
+
+
+def _gradient_start_end(rect: QRectF, angle_deg: float) -> tuple[QPointF, QPointF]:
+    """The linear gradient's start/end points for ``rect`` at ``angle_deg``.
+
+    Direction ``d = (cos θ, sin θ)`` in y-down document coordinates with
+    θ = ``angle_deg`` in radians — CLOCKWISE degrees (the ``fill_angle_deg``
+    convention): 0° = left->right, 90° = top->bottom, Color A at START. The
+    ramp spans ``rect`` corner-to-corner: ``r = (w*|cos θ| + h*|sin θ|) / 2``
+    positions start/end symmetrically about the center so every angle covers
+    the full bbox (center symmetry is exact by construction).
+    """
+    try:
+        theta = math.radians(float(angle_deg))
+    except (TypeError, ValueError):
+        theta = math.radians(90.0)
+    if not math.isfinite(theta):
+        theta = math.radians(90.0)
+    dx = math.cos(theta)
+    dy = math.sin(theta)
+    r = (rect.width() * abs(dx) + rect.height() * abs(dy)) / 2.0
+    center = rect.center()
+    return (
+        QPointF(center.x() - dx * r, center.y() - dy * r),
+        QPointF(center.x() + dx * r, center.y() + dy * r),
+    )
+
+
+def _pattern_scale_of(style: TextStyle) -> float:
+    """The style's pattern scale, defensively clamped into the model bounds.
+
+    ``from_dict`` already clamps (V5), but a directly-constructed
+    ``TextStyle`` may carry anything — the renderer must never scale a tile
+    to 0 px or to a mega-surface.
+    """
+    try:
+        scale = float(getattr(style, "pattern_scale", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(scale):
+        return 1.0
+    return min(PATTERN_SCALE_MAX, max(PATTERN_SCALE_MIN, scale))
+
+
+def _decoded_scaled_tile(style: TextStyle) -> QImage | None:
+    """The style's tile decoded and scaled (``None`` on any failure).
+
+    Cache discipline (T-vej-02): keyed by (md5 of the b64 payload, scale
+    rounded to 4 decimals), bounded to ``_TILE_CACHE_MAX`` entries,
+    evict-oldest; the stored image is PRE-alpha-modulation so the cached
+    value stays reusable across alpha changes. ``b64decode`` with
+    ``validate=False`` plus the ``QImage.fromData`` null check absorbs
+    garbage payloads (T-vej-01 — a crafted .mas tile degrades to the solid
+    fallback with one warning, never an exception).
+    """
+    b64 = getattr(style, "pattern_tile_b64", None)
+    if not isinstance(b64, str) or not b64:
+        return None
+    scale = _pattern_scale_of(style)
+    key = (hashlib.md5(b64.encode("utf-8")).hexdigest(), round(scale, 4))
+    cached = _tile_cache.get(key)
+    if cached is not None:
+        _tile_cache.move_to_end(key)  # LRU touch
+        return cached
+
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:  # noqa: BLE001 — any garbage degrades to the fallback
+        raw = b""
+    img = QImage.fromData(raw) if raw else QImage()
+    if img.isNull():
+        logger.warning(
+            "Pattern tile could not be decoded - glyph fill falls back to "
+            "solid (quick-260910-vej)"
+        )
+        return None
+    if max(img.width(), img.height()) > _TILE_DECODE_MAX_DIMENSION:
+        logger.warning(
+            "Pattern tile {}x{} exceeds the {} px decode guard - glyph fill "
+            "falls back to solid (T-vej-01)",
+            img.width(),
+            img.height(),
+            _TILE_DECODE_MAX_DIMENSION,
+        )
+        return None
+    if scale != 1.0:
+        tw = max(1, int(round(img.width() * scale)))
+        th = max(1, int(round(img.height() * scale)))
+        img = img.scaled(
+            tw,
+            th,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    _tile_cache[key] = img
+    while len(_tile_cache) > _TILE_CACHE_MAX:
+        _tile_cache.popitem(last=False)
+    return img
+
+
+def _alpha_modulated_tile(scaled: QImage, color_a: QColor) -> QImage:
+    """A DETACHED copy of the tile with its alpha scaled by Color A's alpha.
+
+    The LOCKED single-opacity-control rule (quick-260910-vej CONTEXT): the
+    glyph-fill color's alpha IS the pattern opacity, so the existing
+    transparency control governs every fill type. The numpy bridge detaches
+    (Pitfall 2), so the cached tile's pixels are never mutated.
+    """
+    arr = _qimage_argb_to_numpy(scaled)
+    factor = color_a.alpha() / 255.0
+    if factor < 0.999:
+        arr[..., 3] = (arr[..., 3].astype(np.float32) * factor + 0.5).astype(
+            np.uint8
+        )
+    return _numpy_rgba_to_qimage(arr)
+
+
+def style_fill_brush(
+    style: TextStyle, rect: QRectF, offset: tuple[float, float] = (0.0, 0.0)
+) -> QBrush:
+    """The styled glyph-fill brush for ``style`` over doc-local ``rect``.
+
+    - ``fill_type == "solid"``: ``QBrush(Color A)`` — byte-identical to the
+      legacy fill (the wiring only calls the factory for non-solid fills).
+    - ``fill_type == "gradient"``: a linear 2-stop ``QLinearGradient``,
+      Color A -> Color B at ``fill_angle_deg`` (clockwise, see
+      :func:`_gradient_start_end`), spanning ``rect`` corner-to-corner.
+      QColor alpha carries through the stops, so white->transparent fades
+      need no extra machinery (LOCKED decision).
+    - ``fill_type == "pattern"``: the decoded+scaled tile as a
+      ``TexturePattern`` brush, alpha-modulated by Color A's alpha; an
+      unusable tile (absent/undecodable/oversized) renders SOLID Color A
+      with one loguru warning (T-vej-01/02), never an exception.
+
+    ``offset`` is the DOC DRAW ORIGIN (doc-local = global − offset): the
+    fill's anchor moves by −offset in doc-local space, so per-char documents
+    in the vertical path sample ONE continuous ramp/tiling across the whole
+    column (gradient start/end translate by −offset; the texture brush rides
+    ``QTransform.fromTranslate(-ox, -oy)`` — the same −offset anchor).
+    Unknown ``fill_type`` values render solid (defense in depth —
+    ``from_dict`` already normalizes).
+    """
+    color_a = _valid_color(style.color, "#000000")
+    fill_type = getattr(style, "fill_type", "solid")
+    ox, oy = float(offset[0]), float(offset[1])
+
+    if fill_type == "gradient":
+        start, end = _gradient_start_end(
+            rect, getattr(style, "fill_angle_deg", 90.0)
+        )
+        gradient = QLinearGradient(
+            start.x() - ox, start.y() - oy, end.x() - ox, end.y() - oy
+        )
+        gradient.setColorAt(0.0, color_a)
+        gradient.setColorAt(1.0, _valid_color(style.fill_color_b, "#ffffff"))
+        return QBrush(gradient)
+
+    if fill_type == "pattern":
+        scaled = _decoded_scaled_tile(style)
+        if scaled is not None:
+            brush = QBrush(_alpha_modulated_tile(scaled, color_a))
+            brush.setStyle(Qt.BrushStyle.TexturePattern)
+            if (ox, oy) != (0.0, 0.0):
+                brush.setTransform(QTransform.fromTranslate(-ox, -oy))
+            return brush
+        logger.warning(
+            "Pattern tile unavailable - glyph fill falls back to solid "
+            "Color A (quick-260910-vej)"
+        )
+        return QBrush(color_a)
+
+    return QBrush(color_a)
+
+
 def _build_document(
     text: str,
     style: TextStyle,
@@ -454,7 +656,28 @@ def _build_document(
 
     # Force the document layout before any block-layout reads (see module
     # docstring — lineAt on an un-laid-out block access-violates here).
-    doc.documentLayout().documentSize()
+    doc_size = doc.documentLayout().documentSize()
+
+    # quick-260910-vej: the gradient/pattern fill rides the SAME
+    # setForeground channel — the doc-local text bbox (0,0,docW,docH) spans
+    # the ramp/tiling (probe-verified), so the document itself carries the
+    # brush and every consumer (the fill drawContents, the outline clone,
+    # the effect silhouette) inherits it — canvas ≡ bake is structural
+    # (D-01). Solid fills keep today's byte-identical path (this merge never
+    # runs for them).
+    if getattr(style, "fill_type", "solid") != "solid":
+        fill_fmt = QTextCharFormat()
+        fill_fmt.setForeground(
+            style_fill_brush(
+                style, QRectF(0.0, 0.0, doc_size.width(), doc_size.height())
+            )
+        )
+        fill_cursor = QTextCursor(doc)
+        fill_cursor.select(QTextCursor.SelectionType.Document)
+        fill_cursor.mergeCharFormat(fill_fmt)
+        # The foreground edit cannot change metrics, but re-force the layout
+        # so the stack-safety invariant above holds unconditionally.
+        doc.documentLayout().documentSize()
     return doc
 
 
@@ -1009,11 +1232,41 @@ def _paint_fill_pass(painter: QPainter, result: LayoutResult, style: TextStyle) 
     """
     _paint_outline_pass(painter, result, style)
     if result.vertical_placements:
+        # quick-260910-vej: a styled (gradient/pattern) fill builds per-char
+        # brushes anchored so ONE continuous ramp/tiling spans the column —
+        # not per-char resets. ``None`` (solid) keeps today's exact path.
+        fill_brush_fn = _vertical_fill_brush_fn(style, result.ink)
         _paint_vertical(
-            painter, result, style, _valid_color(style.color, "#000000"), None
+            painter,
+            result,
+            style,
+            _valid_color(style.color, "#000000"),
+            None,
+            fill_brush_fn,
         )
     else:
         result.document.drawContents(painter)
+
+
+def _vertical_fill_brush_fn(style: TextStyle, ink_rect: QRectF):
+    """The per-char brush builder for a styled vertical fill (quick-260910-vej).
+
+    Returns ``None`` for solid styles (the caller keeps the legacy path).
+    Otherwise returns ``build(ntr, placement) -> QBrush`` where the brush is
+    computed from the column-wide ``ink_rect`` and the per-char DOC DRAW
+    ORIGIN ``R_p = (p.x + p.w/2 − ntr.center().x, p.y + p.h/2 −
+    ntr.center().y())`` — the same translate chain ``_paint_vertical`` draws
+    with — so the whole column samples ONE continuous ramp/tiling.
+    """
+    if getattr(style, "fill_type", "solid") == "solid":
+        return None
+
+    def build(ntr: QRectF, placement: dict) -> QBrush:
+        ox = placement["x"] + placement["w"] / 2.0 - ntr.center().x()
+        oy = placement["y"] + placement["h"] / 2.0 - ntr.center().y()
+        return style_fill_brush(style, ink_rect, offset=(ox, oy))
+
+    return build
 
 
 def _paint_outline_pass(
@@ -1078,6 +1331,7 @@ def _paint_vertical(
     style: TextStyle,
     fill_color: QColor,
     pen: QPen | None,
+    fill_brush_fn=None,
 ) -> None:
     """Per-char vertical painting (D-11), parameterized per pass.
 
@@ -1090,10 +1344,15 @@ def _paint_vertical(
     is the proven glyph mechanism (``QPainterPath.addText``/``QTextLayout``
     glyph paths crash this Python 3.14.2 / PySide6 6.10.1 stack — see the
     module docstring).
+
+    quick-260910-vej: ``fill_brush_fn`` (additive, default ``None`` =
+    today's solid behavior) builds the styled gradient/pattern brush per
+    char doc in the fill pass; the silhouette pass (``pen`` not None) never
+    carries a brush — its solid outline color overrides by design.
     """
     font = _style_font(style, result.used_font_size_px)
     for p in result.vertical_placements:
-        doc = _char_document(p["char"], font, fill_color, pen)
+        doc = _char_document(p["char"], font, fill_color, pen, fill_brush_fn, p)
         ntr = _doc_ink_rect(doc)
         if ntr.isNull():
             continue
@@ -1106,13 +1365,25 @@ def _paint_vertical(
         painter.restore()
 
 
-def _char_document(char: str, font: QFont, fill: QColor, pen: QPen | None) -> QTextDocument:
+def _char_document(
+    char: str,
+    font: QFont,
+    fill: QColor,
+    pen: QPen | None,
+    fill_brush_fn=None,
+    placement: dict | None = None,
+) -> QTextDocument:
     """A single-char PLAIN document with the merged fill/outline format.
 
     The generic variant-document factory the paint passes drive (the
     vertical path builds one per placement per pass); ``pen=None`` renders
     the fill-only variant. The layout is forced before returning so the
     ink-rect read is stack-safe.
+
+    quick-260910-vej: with ``fill_brush_fn`` (fill pass only — ``pen`` is
+    None there), the styled gradient/pattern brush is merged over the
+    doc's foreground AFTER the forced layout, anchored by the char's draw
+    origin so the column shares one continuous fill.
     """
     doc = QTextDocument()
     doc.setPlainText(char)  # ASVS V5: plain text only — no rich-text injection
@@ -1126,6 +1397,19 @@ def _char_document(char: str, font: QFont, fill: QColor, pen: QPen | None) -> QT
     cursor.select(QTextCursor.SelectionType.Document)
     cursor.mergeCharFormat(fmt)
     doc.documentLayout().documentSize()
+    if fill_brush_fn is not None and pen is None and placement is not None:
+        ntr = _doc_ink_rect(doc)
+        brush = None if ntr.isNull() else fill_brush_fn(ntr, placement)
+        if brush is not None:
+            brush_fmt = QTextCharFormat()
+            brush_fmt.setForeground(brush)
+            brush_cursor = QTextCursor(doc)
+            brush_cursor.select(QTextCursor.SelectionType.Document)
+            brush_cursor.mergeCharFormat(brush_fmt)
+            # The foreground edit cannot change metrics, but re-force the
+            # layout so the stack-safety invariant above holds
+            # unconditionally.
+            doc.documentLayout().documentSize()
     return doc
 
 
