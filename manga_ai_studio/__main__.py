@@ -33,11 +33,13 @@ def main() -> None:
     # The user must always be able to find and paste the log path. Native
     # crashes additionally leave a minidump next to it (quick-260909-ke1).
     print(f"[manga-ai-studio] log file: {log_path}", file=sys.stderr)
-    print(
-        "[manga-ai-studio] native crashes leave a mas-<timestamp>.dmp minidump "
-        "next to the log file",
-        file=sys.stderr,
-    )
+    # Minidump note DISABLED with the capture itself (diagnostics.install) —
+    # multi-GB .dmp files were filling users' disks.
+    # print(
+    #     "[manga-ai-studio] native crashes leave a mas-<timestamp>.dmp minidump "
+    #     "next to the log file",
+    #     file=sys.stderr,
+    # )
 
     config_dir = Path.home() / ".manga_ai_studio"
     config_dir.mkdir(parents=True, exist_ok=True)

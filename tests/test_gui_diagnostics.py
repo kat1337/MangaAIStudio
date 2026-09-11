@@ -153,5 +153,16 @@ def test_main_wires_diagnostics_in_documented_order() -> None:
     assert idx_qt < idx_hb, "heartbeat armed after the handler"
     assert idx_hb < idx_print, "log path printed after the heartbeat is armed"
     assert "file=sys.stderr" in src
-    # quick-260909-ke1 task 2: the user must be able to find the minidumps.
-    assert ".dmp" in src and "minidump" in src
+    # Minidump capture + its stderr note are DISABLED (multi-GB .dmp files were
+    # filling users' disks): no ACTIVE (non-comment) line may reference them.
+    # If you re-enable diagnostics.install_minidump_handler, restore the note
+    # AND flip this pin back to assert the user can find the dumps.
+    active_dmp_lines = [
+        line
+        for line in src.splitlines()
+        if (".dmp" in line or "minidump" in line) and not line.lstrip().startswith("#")
+    ]
+    assert active_dmp_lines == [], (
+        "__main__.py references minidumps outside a comment but the capture "
+        f"is disabled: {active_dmp_lines}"
+    )

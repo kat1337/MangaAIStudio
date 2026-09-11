@@ -248,7 +248,10 @@ def install(base_dir: Path | None = None, hang_timeout_s: float = HANG_TIMEOUT_S
     _write_session_separator()
     # Native-crash minidumps LAST (after the sink): its DEBUG traces must never
     # land in the file before the session separator does.
-    install_minidump_handler(log_dir)
+    # DISABLED (2026-09-10, user request): with-data-segs minidumps of OOM-scale
+    # sessions wrote multi-GB .dmp files (8 GB observed) users have no disk for.
+    # Re-enable this call for native-crash triage only.
+    # install_minidump_handler(log_dir)
     _is_installed = True
     return log_path
 
@@ -793,8 +796,12 @@ def reset() -> None:
         _md_filter_prev = None
         _md_sigabrt_prev = None
         _dump_dir = None
-        _crash_dump_written = False
         _minidump_installed = False
+    # The one-dump-per-session latch clears UNCONDITIONALLY: capture may be
+    # disabled (install() no longer arms it) yet the latch is still settable
+    # by tests that drive the filter/handler directly — a latched session
+    # must never survive a reset().
+    _crash_dump_written = False
     _beat_count = 0
     _mem_latches = {"rss": False, "commit": False}
     if _prev_qt_handler is not None:

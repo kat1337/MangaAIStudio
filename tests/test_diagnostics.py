@@ -259,9 +259,16 @@ _win_only = pytest.mark.skipif(
 def test_install_minidump_handler_is_idempotent_and_reset_restores(
     tmp_path: Path,
 ) -> None:
-    """install() arms the capture once; reset() deregisters and restores state."""
+    """install() arms the capture once; reset() deregisters and restores state.
+
+    install() no longer arms minidump capture itself (multi-GB dumps disabled,
+    2026-09-10) — the handler is armed explicitly here because THIS test's
+    subject is the capture machinery, not the wiring.
+    """
     apis = diagnostics._load_windows_apis()
     diagnostics.install(tmp_path, hang_timeout_s=0.5)
+    assert not diagnostics._minidump_installed  # disabled at the wiring site
+    diagnostics.install_minidump_handler(tmp_path / "logs")
     assert diagnostics._minidump_installed
     assert diagnostics._dump_dir == tmp_path / "logs"
     assert diagnostics._md_filter_cb is not None  # ctypes callback kept alive
@@ -416,6 +423,9 @@ def test_abort_in_subprocess_writes_minidump_and_chains_faulthandler(
     code = (
         "import manga_ai_studio.diagnostics as d;"
         f"d.install({str(tmp_path)!r}, hang_timeout_s=60.0);"
+        # Capture is disabled at the install() wiring (multi-GB dumps) — the
+        # end-to-end crash pipeline under test must arm it explicitly.
+        f"d.install_minidump_handler({str(logs)!r});"
         "import ctypes;"
         'ctypes.CDLL("ucrtbase.dll").abort()'
     )
