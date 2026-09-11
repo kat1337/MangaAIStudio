@@ -432,6 +432,7 @@ class _WindowsApis(NamedTuple):
     capture_stack_back_trace: Any
     get_module_handle_ex_w: Any
     get_module_base_name_w: Any
+    get_module_file_name_ex_w: Any
     get_module_information: Any
     get_current_process: Any
     get_current_process_id: Any
@@ -501,6 +502,9 @@ def _load_windows_apis() -> _WindowsApis:
         get_module_base_name_w=_resolve(
             psapi, "GetModuleBaseNameW", c.c_uint32, [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint32]
         ),
+        get_module_file_name_ex_w=_resolve(
+            psapi, "GetModuleFileNameExW", c.c_uint32, [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint32]
+        ),
         get_module_information=_resolve(
             psapi, "GetModuleInformation", c.c_int, [c.c_void_p, c.c_void_p, c.c_void_p, c.c_uint32]
         ),
@@ -512,15 +516,20 @@ def _load_windows_apis() -> _WindowsApis:
     )
 
 
-def _module_for_address(apis: Any, address: int) -> str:
-    """Resolve ``address`` to ``module!+0xoffset``; the raw hex when unmapped."""
+def _resolve_frame(apis: Any, address: int) -> tuple[str, str, Any]:
+    """Resolve one stack address to ``(label, module-name-lower, module-handle)``.
+
+    ``label`` is the human-readable ``module!+0xoffset`` form (raw hex when the
+    address is unmapped); ``module-handle`` feeds the version lookup for the
+    faulting frame (None when unresolved).
+    """
     import ctypes
 
     hmod = ctypes.c_void_p(0)
     # 0x4 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
     # 0x2 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT — never load/retain.
     if not apis.get_module_handle_ex_w(0x6, ctypes.c_void_p(address), ctypes.byref(hmod)):
-        return f"0x{address:016X}"
+        return f"0x{address:016X}", "", None
 
     class _MODULEINFO(ctypes.Structure):
         _fields_ = [
@@ -536,13 +545,13 @@ def _module_for_address(apis: Any, address: int) -> str:
     ) or not apis.get_module_base_name_w(
         apis.get_current_process(), hmod, ctypes.byref(name_buf), 260
     ):
-        return f"0x{address:016X}"
+        return f"0x{address:016X}", "", None
     base = info.lpBaseOfDll or 0
-    return f"{name_buf.value}!+0x{address - base:08X}"
+    return f"{name_buf.value}!+0x{address - base:08X}", name_buf.value.lower(), hmod
 
 
-def _native_stack(apis: Any) -> list[str]:
-    """The calling thread's native stack as indented ``module!+0xoffset`` lines.
+def _native_stack(apis: Any) -> list[tuple[str, str, Any]]:
+    """The calling thread's native stack as ``(label, module, handle)`` tuples.
 
     The filter/SIGABRT handler runs ON the faulting thread, so a capture from
     here IS the faulting thread's stack (a few dispatcher frames from the
@@ -554,12 +563,63 @@ def _native_stack(apis: Any) -> list[str]:
     captured = apis.capture_stack_back_trace(
         0, _MAX_NATIVE_FRAMES, ctypes.cast(buf, ctypes.c_void_p), None
     )
-    lines = []
+    frames = []
     for addr in buf[: min(int(captured), _MAX_NATIVE_FRAMES)]:
         if not addr:
             break
-        lines.append(f"  {len(lines)}: {_module_for_address(apis, addr)}")
-    return lines
+        frames.append(_resolve_frame(apis, addr))
+    return frames
+
+
+def _module_path(apis: Any, hmod: Any) -> str:
+    """The full on-disk path of a loaded module; '' when unresolvable."""
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(520)
+    if hmod is None or not apis.get_module_file_name_ex_w(
+        apis.get_current_process(), hmod, ctypes.byref(buf), 520
+    ):
+        return ""
+    return buf.value
+
+
+def _module_file_version(path: str) -> str:
+    """The module's VS_FIXEDFILEINFO FileVersion ("6.10.1" style); '' if absent."""
+    import ctypes
+
+    version = ctypes.WinDLL("version", use_last_error=True)
+    size = version.GetFileVersionInfoSizeW(path, None)
+    if not size:
+        return ""
+    data = ctypes.create_string_buffer(size)
+    if not version.GetFileVersionInfoW(path, 0, size, data):
+        return ""
+    val = ctypes.c_void_p()
+    val_len = ctypes.c_uint()
+    if not version.VerQueryValueW(
+        data, "\\", ctypes.byref(val), ctypes.byref(val_len)
+    ) or not val_len.value:
+        return ""
+
+    class _FIXEDFILEINFO(ctypes.Structure):
+        _fields_ = [
+            ("dwSignature", ctypes.c_uint32),
+            ("dwStrucVersion", ctypes.c_uint32),
+            ("dwFileVersionMS", ctypes.c_uint32),
+            ("dwFileVersionLS", ctypes.c_uint32),
+        ]
+
+    ffi = ctypes.cast(val, ctypes.POINTER(_FIXEDFILEINFO)).contents
+    ms, ls = ffi.dwFileVersionMS, ffi.dwFileVersionLS
+    return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+
+
+# Modules that are ALWAYS this reporter's own callback trampoline when they
+# lead a captured stack (the ctypes callback enters through libffi; python
+# frames follow), plus the OS raise/dispatch machinery that sits between the
+# trampoline and the actual faulting frame in the UEF path.
+_REPORTER_NOISE = {"libffi-8.dll", "_ctypes.pyd", "python314.dll", "python.exe"}
+_DISPATCH_RUN = {"kernelbase.dll", "ntdll.dll"}
 
 
 def _native_crash_report(exception_pointers: int | None) -> str:
@@ -567,9 +627,11 @@ def _native_crash_report(exception_pointers: int | None) -> str:
 
     ``exception_pointers`` is the raw LPEXCEPTION_POINTERS from the filter
     (None for the SIGABRT path). The report names the exception code, resolves
-    the faulting frame to ``module!+0xoffset``, and lists the native stack of
-    the faulting thread. Raises only on environment problems (non-Windows,
-    missing exports) — crash-path callers guard it.
+    the faulting frame to ``module!+0xoffset`` (version-stamped), and lists the
+    native stack of the faulting thread with the reporter's own trampoline and
+    the OS dispatch run elided so the printed stack leads with the crash site.
+    Raises only on environment problems (non-Windows, missing exports) —
+    crash-path callers guard it.
     """
     import ctypes
 
@@ -590,6 +652,7 @@ def _native_crash_report(exception_pointers: int | None) -> str:
         ]
 
     apis = _load_windows_apis()
+    fault_hmod: Any = None
     if exception_pointers:
         pointers = ctypes.cast(
             exception_pointers, ctypes.POINTER(_EXCEPTION_POINTERS)
@@ -604,9 +667,11 @@ def _native_crash_report(exception_pointers: int | None) -> str:
             fault_addr = ctypes.cast(
                 pointers.ContextRecord, ctypes.POINTER(ctypes.c_uint64 * 32)
             ).contents[31]
-        where = (
-            _module_for_address(apis, fault_addr) if fault_addr else "<no faulting address>"
-        )
+        if fault_addr:
+            fault_label, _, fault_hmod = _resolve_frame(apis, fault_addr)
+            where = fault_label
+        else:
+            where = "<no faulting address>"
         header = (
             f"Native crash: exception 0x{code:08X} ({name}) at {where} "
             f"on thread {apis.get_current_thread_id()}"
@@ -619,7 +684,42 @@ def _native_crash_report(exception_pointers: int | None) -> str:
     else:
         header = f"Native abort (SIGABRT) on thread {apis.get_current_thread_id()}"
 
-    lines = [header, "Native stack (innermost first):", *_native_stack(apis)]
+    frames = _native_stack(apis)
+    # Trim THIS reporter's trampoline (a ctypes callback always enters through
+    # libffi → _ctypes → python314), then collapse the OS exception-dispatch
+    # run (KERNELBASE/ntdll) — but only when non-dispatch frames follow, so a
+    # crash INSIDE the dispatch machinery is never hidden.
+    start = 0
+    while start < len(frames) and frames[start][1] in _REPORTER_NOISE:
+        start += 1
+    end = start
+    while end < len(frames) and frames[end][1] in _DISPATCH_RUN:
+        end += 1
+    if end < len(frames):
+        collapsed, body = end - start, frames[end:]
+    else:
+        collapsed, body = 0, frames[start:]
+
+    lines = [header, "Native stack (innermost first):"]
+    if collapsed:
+        lines.append(f"  … {collapsed} reporter/exception-dispatch frames elided …")
+    for i, (label, _, _) in enumerate(body):
+        lines.append(f"  {i}: {label}")
+    if not body and not collapsed:
+        lines.append("  <no native frames captured>")
+
+    # Version-stamp the crash site's module: the offset is only actionable
+    # against the exact build (e.g. mapping Qt6Widgets offsets needs the Qt
+    # version the DLL was built as).
+    focus_hmod = body[0][2] if body else fault_hmod
+    if focus_hmod is not None:
+        path = _module_path(apis, focus_hmod)
+        if path:
+            version = _module_file_version(path)
+            lines.append(
+                f"Faulting module: {path}"
+                + (f" (file version {version})" if version else "")
+            )
     return "\n".join(lines)
 
 
