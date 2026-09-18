@@ -7,7 +7,7 @@ lightweight canvas editor into a single workspace.
 ## Core Value
 
 One app where a scanlator can clean pages, fix inpainting masks, run/correct OCR,
-and lay out translation text — instead of switching between PanelCleaner, mokuro,
+and lay out translation text — instead of switching between PanelCleaner/MangaCleaner, poricom,
 and an image editor.
 
 ## Requirements
